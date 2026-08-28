@@ -82,8 +82,8 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	s := NewSetup()
 	s.ProjectID = "acme"
 	s.ApplyProjectDefaults()
-	if s.BucketName != "substrate-snapshots-acme" {
-		t.Errorf("BucketName = %q", s.BucketName)
+	if s.BucketName != defaultBucketName("acme", "substrate-poc") {
+		t.Errorf("BucketName = %q, want %q", s.BucketName, defaultBucketName("acme", "substrate-poc"))
 	}
 	if s.KoDockerRepo != "gcr.io/acme/ate-images" {
 		t.Errorf("KoDockerRepo = %q", s.KoDockerRepo)
@@ -96,5 +96,27 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	custom.ApplyProjectDefaults()
 	if custom.BucketName != "my-bucket" || custom.KoDockerRepo != "us-docker.pkg.dev/acme/repo" {
 		t.Errorf("overrides clobbered: %q %q", custom.BucketName, custom.KoDockerRepo)
+	}
+}
+
+func TestDefaultBucketName(t *testing.T) {
+	for _, tc := range []struct {
+		project, cluster, want string
+	}{
+		{"acme", "cluster-1", "ate-snapshots-acme-4afb32cc106e2c92"},
+		{"My-Project", "Cluster-A", "ate-snapshots-my-project-34ab3e1c8c468878"},
+		{
+			"a-very-long-gcp-project-name-123",
+			"a-very-long-gke-cluster-name-4567890",
+			"ate-snapshots-a-very-long-gcp-project-name-123-297d5453509db54d",
+		},
+	} {
+		got := defaultBucketName(tc.project, tc.cluster)
+		if got != tc.want {
+			t.Errorf("defaultBucketName(%q, %q) = %q, want %q", tc.project, tc.cluster, got, tc.want)
+		}
+		if len(got) > 63 {
+			t.Errorf("defaultBucketName(%q, %q) length %d > 63", tc.project, tc.cluster, len(got))
+		}
 	}
 }
