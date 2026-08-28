@@ -1,0 +1,144 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package glutton;
+
+option go_package = "github.com/agent-substrate/substrate/internal/proto/glutton";
+
+// A glutton is a single small piece of a larger benchmarking suite. It is designed to be instantiated
+// multiple times, with each piece configured to do different units of work.
+service Glutton {
+  // Tells glutton to write to RAM, either overwriting previously-used
+  // RAM or allocating additional RAM per request instructions. Data written
+  // will be random bytes.
+  rpc WriteRAM(WriteRAMRequest) returns (WriteRAMResponse) {}
+
+  // Tells glutton to write to disk using the specified mode. Data
+  // written will be random bytes.
+  rpc WriteDisk(WriteDiskRequest) returns (WriteDiskResponse) {}
+
+  // Tells glutton to read from disk using the specified mode.
+  rpc ReadDisk(ReadDiskRequest) returns (ReadDiskResponse) {}
+
+  // Tells glutton to make sure it has the specified number of file
+  // descriptors open. It will open or close file descriptors to
+  // hit the desired count (note this count is in addition to the other
+  // FDs needed to run the process).
+  rpc OpenFD(OpenFDRequest) returns (OpenFDResponse) {}
+
+  // Send a request to the glutton, expecting the same response back.
+  rpc Ping(PingRequest) returns (PingResponse) {}
+
+  // Tells the glutton to send network traffic to a peer glutton.
+  // messages will be sent on regular intervals separated by delay_ms.
+  rpc Gossip(GossipRequest) returns (GossipResponse) {}
+}
+
+enum WriteMode {
+  // Overwrite the destination entirely
+  WRITE_MODE_TRUNCATE = 0;
+
+  // Write on top of the existing data
+  WRITE_MODE_OVERWRITE = 1;
+}
+
+// ReadMode selects how much of the file ReadDisk sends back.
+enum ReadMode {
+  // Return the file's bytes in ReadDiskResponse.data alongside its digest.
+  READ_MODE_DATA = 0;
+
+  // Return only size and sha256; ReadDiskResponse.data is empty. The digest
+  // is the same one READ_MODE_DATA returns, so either mode can verify.
+  READ_MODE_DIGEST_ONLY = 1;
+}
+
+message WriteRAMRequest {
+  // name of the array to be written to
+  string key = 1;
+
+  // size of bytes to be written
+  int32 size = 2;
+
+  WriteMode write_mode = 3;
+}
+
+message WriteRAMResponse {
+}
+
+message WriteDiskRequest {
+  // name of the file to be written to
+  string key = 1;
+
+  // size of bytes to be written
+  int32 size = 2;
+
+  WriteMode write_mode = 3;
+}
+
+message WriteDiskResponse {
+  // size of the file after the write
+  int64 size = 1;
+
+  // sha256 of the whole file after the write
+  bytes sha256 = 2;
+}
+
+message ReadDiskRequest {
+  // name of the file to be read from
+  string key = 1;
+
+  ReadMode read_mode = 2;
+}
+
+message ReadDiskResponse {
+  // total size of bytes read
+  int64 size = 1;
+
+  // sha256 of bytes read
+  bytes sha256 = 2;
+
+  // data read from the file. Empty under READ_MODE_DIGEST_ONLY.
+  bytes data = 3;
+}
+
+message OpenFDRequest {
+  // The total number of FDs for the glutton to open
+  int32 count = 1;
+}
+
+message OpenFDResponse {
+}
+
+message PingRequest {
+  // The message to be echoed back from the ping
+  string message = 1;
+}
+
+message PingResponse {
+  // The message echoed back
+  string message = 1;
+}
+
+message GossipRequest {
+  repeated Peer peers = 1;
+}
+
+message GossipResponse {}
+
+message Peer {
+  string host = 1;
+  int32 delay_ms = 2;
+}

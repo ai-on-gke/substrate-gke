@@ -1,0 +1,71 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-demo-sandbox
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: sandbox-workerpool
+  namespace: ate-demo-sandbox
+  labels:
+    workload: sandbox
+spec:
+  replicas: 2
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  template:
+    # Per-worker resources: these size the worker POD and advertise its
+    # scheduling capacity (the per-actor ceiling). The sandbox itself is sized by
+    # the ActorTemplate's spec.resources below, not by these (see internal/sizing).
+    #
+    # Capacity comes from the limits (workerCapacity reads limits only), while the
+    # kube-scheduler packs nodes by the requests — so the CPU request is set well
+    # below the limit to keep the pool placeable on a small node without changing
+    # what an actor is allowed to use. Memory is not compressible, so its request
+    # matches the limit.
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 2Gi
+---
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: sandbox-template
+  namespace: ate-demo-sandbox
+spec:
+  workerSelector:
+    matchLabels:
+      workload: sandbox
+  containers:
+  - name: sandbox
+    image: ko://github.com/agent-substrate/substrate/demos/sandbox
+    env:
+    - name: PORT
+      value: "80"
+  # Sandbox size: an actor occupies its whole worker, so size it at (or below)
+  # the pool's per-worker capacity above. ateom writes these to the OCI spec
+  # (cgroup CPU quota + memory limit) — see internal/sizing.
+  resources:
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  snapshotsConfig:
+    location: gs://${BUCKET_NAME}/ate-demo-sandbox/
