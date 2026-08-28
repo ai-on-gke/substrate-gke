@@ -71,18 +71,11 @@ func newProjectScreen(deps *Deps) *projectScreen {
 		newField("Cluster location (zone)", st.Zone, "us-west1-c", func(s *state.Setup, v string) { s.Zone = v }),
 	}
 	if st.Track == state.TrackAdvanced {
-		bucketVal := st.BucketName
-		if !st.CustomBucket {
-			bucketVal = ""
-		}
 		fields = append(fields,
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
 			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
 			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
-			newField("Snapshot bucket (blank = derived)", bucketVal, "substrate-snapshots-<project>-<cluster>", func(s *state.Setup, v string) {
-				s.BucketName = v
-				s.CustomBucket = (v != "")
-			}),
+			newField("Snapshot bucket (blank = derived)", st.BucketName, "ate-snapshots-<project>-<cluster-hash>", func(s *state.Setup, v string) { s.BucketName = v }),
 			newField("Image registry (blank = derived)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 		)
 	}
@@ -149,7 +142,9 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			f.set(st, strings.TrimSpace(f.input.Value()))
 		}
 		st.ProjectNumber = m.number
-		st.ApplyProjectDefaults()
+		if st.KoDockerRepo == "" {
+			st.KoDockerRepo = "gcr.io/" + st.ProjectID + "/ate-images"
+		}
 		return goNext
 
 	case tea.KeyMsg:

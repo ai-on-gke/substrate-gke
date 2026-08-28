@@ -96,7 +96,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 		"CLUSTER_NAME=substrate-poc",
 		"CLUSTER_LOCATION=us-west1-c",
 		"GCE_REGION=us-west1",
-		"BUCKET_NAME=substrate-snapshots-acme-substrate-poc",
+		"BUCKET_NAME=ate-snapshots-acme-2c2cf930b4f9d8c2",
 		"KO_DOCKER_REPO=gcr.io/acme/ate-images",
 		"NO_DEV_ENV=1",
 		"VERSION=vendored-0123456789ab",

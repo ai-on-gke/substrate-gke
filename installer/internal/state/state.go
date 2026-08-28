@@ -18,6 +18,7 @@
 package state
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 )
@@ -144,7 +145,6 @@ type Setup struct {
 	ClusterIsNew bool
 
 	BucketName   string
-	CustomBucket bool
 	KoDockerRepo string
 
 	NodePool         string
@@ -182,17 +182,13 @@ func (s *Setup) Region() string {
 }
 
 // defaultBucketName derives the snapshot bucket name for a project and cluster:
-// substrate-snapshots-<project_id>-<cluster_name>.
+// ate-snapshots-<project_id>-<cluster_hash>.
 // GCS bucket names must be 3-63 characters, start and end with an alphanumeric
 // character, and contain only lowercase letters, numbers, and dashes/underscores.
 func defaultBucketName(projectID, clusterName string) string {
-	var name string
-	if clusterName == "" {
-		name = fmt.Sprintf("substrate-snapshots-%s", projectID)
-	} else {
-		name = fmt.Sprintf("substrate-snapshots-%s-%s", projectID, clusterName)
-	}
-	name = strings.ToLower(name)
+	projectID = strings.ToLower(projectID)
+	h := sha256.Sum256([]byte(strings.ToLower(clusterName)))
+	name := fmt.Sprintf("ate-snapshots-%s-%x", projectID, h[:8])
 	if len(name) > 63 {
 		name = strings.TrimRight(name[:63], "-")
 	}
@@ -202,11 +198,7 @@ func defaultBucketName(projectID, clusterName string) string {
 // ApplyProjectDefaults fills the values derived from the project ID and cluster
 // name unless the user already overrode them.
 func (s *Setup) ApplyProjectDefaults() {
-	if s.CustomBucket {
-		// user explicitly provided a bucket name; preserve it
-	} else if s.BucketName != "" && s.BucketName != defaultBucketName(s.ProjectID, s.ClusterName) && !strings.HasPrefix(s.BucketName, "substrate-snapshots-") {
-		s.CustomBucket = true
-	} else {
+	if s.BucketName == "" {
 		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName)
 	}
 	if s.KoDockerRepo == "" {
