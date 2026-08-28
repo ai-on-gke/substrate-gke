@@ -65,6 +65,16 @@ func Deploy() []ChecklistItem {
 	}
 }
 
+// FilestoreCSI tracks the phases of deploying the Filestore CSI driver substrate overlay.
+func FilestoreCSI() []ChecklistItem {
+	return []ChecklistItem{
+		{"Disable managed Filestore CSI driver addon (if enabled)", containsAny("Disabling managed", "GcpFilestoreCsiDriver=DISABLED", "Updating [")},
+		{"Fetch Filestore CSI driver overlay repository", containsAny("Cloning into", "Fetching")},
+		{"Configure Service Account & IAM Bindings", contains("Configuring Service Account")},
+		{"Apply Kustomize overlay", contains("Applying Substrate Filestore CSI Driver Overlay")},
+	}
+}
+
 // Progress applies one output line to a checklist, returning the updated
 // index of the active item (-1 when nothing has matched yet). Matches only
 // ever move the cursor forward.

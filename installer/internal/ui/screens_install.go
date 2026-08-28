@@ -169,6 +169,109 @@ func (s *controlPlaneScreen) View(w int) string {
 	return b.String()
 }
 
+// ─── Install Filestore CSI driver ──────────────────────────────────────────
+
+type filestoreScreen struct {
+	deps   *Deps
+	cursor int
+	comp   *execComp
+}
+
+func newFilestoreScreen(deps *Deps) *filestoreScreen {
+	return &filestoreScreen{deps: deps}
+}
+
+func (s *filestoreScreen) Init() tea.Cmd      { return nil }
+func (s *filestoreScreen) CapturesText() bool { return false }
+
+func (s *filestoreScreen) Hints() []Hint {
+	if s.comp != nil {
+		if s.comp.ok() {
+			return []Hint{{"enter", "continue"}}
+		}
+		if s.comp.failed != nil {
+			return []Hint{{"r", "retry"}, {"s", "skip"}}
+		}
+		return nil
+	}
+	return []Hint{{"1/2", "choose"}, {"enter", "confirm"}, {"s", "skip"}, {"b", "back"}}
+}
+
+func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
+	if s.comp != nil {
+		if cmd, handled := s.comp.update(msg); handled {
+			return cmd
+		}
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "enter":
+				if s.comp.ok() {
+					s.deps.Setup.FilestoreCSIDeployed = true
+					return goNext
+				}
+			case "r":
+				if s.comp.failed != nil {
+					return s.comp.restart()
+				}
+			case "s":
+				if s.comp.failed != nil {
+					return goNext
+				}
+			}
+		}
+		return nil
+	}
+
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return nil
+	}
+	switch key.String() {
+	case "1", "up", "k":
+		s.cursor = 0
+	case "2", "down", "j":
+		s.cursor = 1
+	case "s":
+		return goNext
+	case "b", "esc":
+		return goBack
+	case "enter":
+		if s.cursor == 1 {
+			return goNext
+		}
+		s.comp = newExecComp(s.deps.Runner, s.deps.Builder.DeployFilestoreCSI(s.deps.Setup), steps.FilestoreCSI())
+		return s.comp.start()
+	}
+	return nil
+}
+
+func (s *filestoreScreen) View(w int) string {
+	var b strings.Builder
+	b.WriteString(theme.Title.Render("Install Filestore CSI driver") + "\n")
+	b.WriteString(theme.Subtle.Render("Optional: install GCP Filestore CSI Driver configured for Substrate.\nNote: This will disable the managed Filestore CSI driver if enabled.") + "\n\n")
+
+	if s.comp != nil {
+		b.WriteString(s.comp.view(w))
+		if s.comp.ok() {
+			b.WriteString("\n" + theme.Good.Render("Filestore CSI driver deployed. Press [enter] to continue."))
+		}
+		return b.String()
+	}
+
+	options := []string{
+		"[1] Install Filestore CSI driver (Substrate overlay)",
+		"[2] Skip — I'll configure storage drivers later",
+	}
+	for i, opt := range options {
+		if i == s.cursor {
+			b.WriteString(theme.Selected.Render(" "+opt+" ") + "\n")
+		} else {
+			b.WriteString(theme.Subtle.Render("  "+opt) + "\n")
+		}
+	}
+	return b.String()
+}
+
 // ─── Configure autoscaling ─────────────────────────────────────────────────
 
 type poolsMsg struct {
@@ -539,11 +642,12 @@ func (s *completeScreen) View(w int) string {
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")
 
 	summary := fmt.Sprintf(
-		"project    %s\ncluster    %s (%s)%s\nbucket     gs://%s\nregistry   %s\nautoscale  %s\ndemo       %s",
+		"project    %s\ncluster    %s (%s)%s\nbucket     gs://%s\nregistry   %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
 		st.ProjectID,
 		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
 		st.BucketName,
 		st.KoDockerRepo,
+		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
 		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
 		map[bool]string{true: "counter demo deployed", false: "skipped"}[st.DemoDeployed],
 	)

@@ -119,6 +119,16 @@ func Checks(snapshotRoot string) []Check {
 			},
 		},
 		{
+			Key: "git", Name: "git", Fatal: false,
+			Run: func(ctx context.Context) Result {
+				if _, err := exec.LookPath("git"); err != nil {
+					return Result{Warn, "git not found; needed for fetching external overlays like Filestore CSI",
+						"https://git-scm.com/downloads"}
+				}
+				return Result{Pass, "git on PATH", ""}
+			},
+		},
+		{
 			Key: "network", Name: "Network reachability", Fatal: true,
 			Run: func(ctx context.Context) Result {
 				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
