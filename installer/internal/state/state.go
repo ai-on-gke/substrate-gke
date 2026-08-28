@@ -17,7 +17,10 @@
 // engine/state_machine.py and UserSetupState.
 package state
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Step identifies one screen of the wizard.
 type Step int
@@ -141,6 +144,7 @@ type Setup struct {
 	ClusterIsNew bool
 
 	BucketName   string
+	CustomBucket bool
 	KoDockerRepo string
 
 	NodePool         string
@@ -177,11 +181,33 @@ func (s *Setup) Region() string {
 	return s.Zone
 }
 
-// ApplyProjectDefaults fills the values derived from the project ID unless
-// the user already overrode them.
+// defaultBucketName derives the snapshot bucket name for a project and cluster:
+// substrate-snapshots-<project_id>-<cluster_name>.
+// GCS bucket names must be 3-63 characters, start and end with an alphanumeric
+// character, and contain only lowercase letters, numbers, and dashes/underscores.
+func defaultBucketName(projectID, clusterName string) string {
+	var name string
+	if clusterName == "" {
+		name = fmt.Sprintf("substrate-snapshots-%s", projectID)
+	} else {
+		name = fmt.Sprintf("substrate-snapshots-%s-%s", projectID, clusterName)
+	}
+	name = strings.ToLower(name)
+	if len(name) > 63 {
+		name = strings.TrimRight(name[:63], "-")
+	}
+	return name
+}
+
+// ApplyProjectDefaults fills the values derived from the project ID and cluster
+// name unless the user already overrode them.
 func (s *Setup) ApplyProjectDefaults() {
-	if s.BucketName == "" {
-		s.BucketName = "substrate-snapshots-" + s.ProjectID
+	if s.CustomBucket {
+		// user explicitly provided a bucket name; preserve it
+	} else if s.BucketName != "" && s.BucketName != defaultBucketName(s.ProjectID, s.ClusterName) && !strings.HasPrefix(s.BucketName, "substrate-snapshots-") {
+		s.CustomBucket = true
+	} else {
+		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName)
 	}
 	if s.KoDockerRepo == "" {
 		s.KoDockerRepo = "gcr.io/" + s.ProjectID + "/ate-images"

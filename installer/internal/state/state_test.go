@@ -79,7 +79,7 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	s := NewSetup()
 	s.ProjectID = "acme"
 	s.ApplyProjectDefaults()
-	if s.BucketName != "substrate-snapshots-acme" {
+	if s.BucketName != "substrate-snapshots-acme-substrate-poc" {
 		t.Errorf("BucketName = %q", s.BucketName)
 	}
 	if s.KoDockerRepo != "gcr.io/acme/ate-images" {
@@ -93,5 +93,56 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	custom.ApplyProjectDefaults()
 	if custom.BucketName != "my-bucket" || custom.KoDockerRepo != "us-docker.pkg.dev/acme/repo" {
 		t.Errorf("overrides clobbered: %q %q", custom.BucketName, custom.KoDockerRepo)
+	}
+}
+
+func TestDefaultBucketName(t *testing.T) {
+	for _, tc := range []struct {
+		project, cluster, want string
+	}{
+		{"acme", "cluster-1", "substrate-snapshots-acme-cluster-1"},
+		{"acme", "", "substrate-snapshots-acme"},
+		{"My-Project", "Cluster-A", "substrate-snapshots-my-project-cluster-a"},
+		{
+			"a-very-long-gcp-project-name-123",
+			"a-very-long-gke-cluster-name-4567890",
+			// Total length 20 + 32 + 1 + 36 = 89; capped at 63 characters
+			"substrate-snapshots-a-very-long-gcp-project-name-123-a-very-lon",
+		},
+	} {
+		got := defaultBucketName(tc.project, tc.cluster)
+		if got != tc.want {
+			t.Errorf("defaultBucketName(%q, %q) = %q, want %q", tc.project, tc.cluster, got, tc.want)
+		}
+		if len(got) > 63 {
+			t.Errorf("defaultBucketName(%q, %q) length %d > 63", tc.project, tc.cluster, len(got))
+		}
+	}
+}
+
+func TestApplyProjectDefaultsUpdatesBucketOnClusterChange(t *testing.T) {
+	s := NewSetup()
+	s.ProjectID = "my-proj"
+	s.ApplyProjectDefaults()
+	if s.BucketName != "substrate-snapshots-my-proj-substrate-poc" {
+		t.Fatalf("initial BucketName = %q", s.BucketName)
+	}
+
+	// Change cluster -> bucket should be updated automatically
+	s.ClusterName = "prod-east"
+	s.ApplyProjectDefaults()
+	if s.BucketName != "substrate-snapshots-my-proj-prod-east" {
+		t.Errorf("after cluster change: BucketName = %q, want substrate-snapshots-my-proj-prod-east", s.BucketName)
+	}
+
+	// Custom bucket should NOT be overwritten
+	custom := NewSetup()
+	custom.ProjectID = "my-proj"
+	custom.BucketName = "custom-bucket"
+	custom.ApplyProjectDefaults()
+	custom.ClusterName = "prod-east"
+	custom.ApplyProjectDefaults()
+	if custom.BucketName != "custom-bucket" {
+		t.Errorf("custom bucket overwritten: %q", custom.BucketName)
 	}
 }

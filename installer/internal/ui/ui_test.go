@@ -212,3 +212,31 @@ func TestViewsRenderAtEveryStep(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	for _, m := range runCmd(app.Init()) {
+		pump(t, app, m)
+	}
+
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+
+	press("enter", "enter") // welcome, doctor
+	press("enter", "enter") // project fields
+	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
+	press("2", "enter")
+	press("y")
+
+	if app.deps.Setup.ClusterName != "legacy-prod" {
+		t.Fatalf("ClusterName = %q, want legacy-prod", app.deps.Setup.ClusterName)
+	}
+	wantBucket := "substrate-snapshots-my-substrate-project-legacy-prod"
+	if app.deps.Setup.BucketName != wantBucket {
+		t.Fatalf("BucketName = %q, want %q", app.deps.Setup.BucketName, wantBucket)
+	}
+}
