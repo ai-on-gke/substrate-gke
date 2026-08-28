@@ -23,11 +23,11 @@ make dry-run      # walk the full wizard without touching GCP
 
 ## What the installer does
 
-A terminal wizard (ported from upstream PR #1171's onboarding UX) walks seven steps,
+A terminal wizard (ported from upstream PR #1171's onboarding UX) walks multiple steps,
 each running the real command it shows and streaming its output:
 
 1. **Check your setup** — probes for gcloud, application-default credentials, Go,
-   kubectl, and network reachability, with copy-paste fixes.
+   kubectl, network reachability, and git, with copy-paste fixes.
 2. **Choose your GCP project** — validated with `gcloud projects describe`.
 3. **Connect your cluster** — lists your GKE clusters and whether each can run
    Substrate, or lets you create a new one. Substrate needs the PodCertificate
@@ -39,8 +39,11 @@ each running the real command it shows and streaming its output:
 5. **Turn on Substrate** — `ate-setup deploy ate-system`: builds the control-plane
    images from source with ko, pushes them to your project's registry, and installs
    CRDs, the API server, controller, atenet, and atelet.
-6. **Configure autoscaling** (optional) — node-pool autoscaling via gcloud.
-7. **Deploy a demo workload** (optional) — the upstream counter demo, then a live
+6. **Install Filestore CSI driver** (optional) — deploys the GCP Filestore CSI Driver
+   configured for substrate. Note that after the driver is installed, additional
+   steps are needed to configure a Filestore VolumePool.
+7. **Configure autoscaling** (optional) — node-pool autoscaling via gcloud.
+8. **Deploy a demo workload** (optional) — the upstream counter demo, then a live
    verification and next steps.
 
 Exiting and re-running is always safe; every step is idempotent.

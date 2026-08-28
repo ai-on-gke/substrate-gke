@@ -138,8 +138,15 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.ControlPlane {
 		t.Fatalf("after provision: %v", app.mach.Current())
 	}
-	press("enter") // deploy finished → autoscaling
-	press("s")     // skip autoscaling
+	press("enter") // deploy finished → filestore CSI
+	if app.mach.Current() != state.FilestoreCSI {
+		t.Fatalf("after control plane: %v", app.mach.Current())
+	}
+	press("s") // skip filestore CSI → autoscaling
+	if app.mach.Current() != state.Autoscaling {
+		t.Fatalf("after filestore: %v", app.mach.Current())
+	}
+	press("s") // skip autoscaling → demo
 	if app.mach.Current() != state.Demo {
 		t.Fatalf("after autoscaling: %v", app.mach.Current())
 	}
@@ -155,8 +162,8 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	}
 }
 
-// TestCreateNewClusterPath exercises the create-new branch and the deploy
-// of the demo.
+// TestCreateNewClusterPath exercises the create-new branch, deploy of
+// filestore CSI, and deploy of the demo.
 func TestCreateNewClusterPath(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -181,9 +188,17 @@ func TestCreateNewClusterPath(t *testing.T) {
 		t.Fatal("ClusterIsNew must be true")
 	}
 	press("enter", "enter") // provision, control plane
-	press("s")              // skip autoscaling
-	press("1", "enter")     // deploy the counter demo (dry-run)
-	press("enter")          // demo finished → complete
+	if app.mach.Current() != state.FilestoreCSI {
+		t.Fatalf("after control plane: %v", app.mach.Current())
+	}
+	press("1", "enter") // deploy the filestore csi driver (dry-run)
+	press("enter")      // filestore finished → autoscaling
+	if !app.deps.Setup.FilestoreCSIDeployed {
+		t.Fatal("FilestoreCSIDeployed not set")
+	}
+	press("s")          // skip autoscaling
+	press("1", "enter") // deploy the counter demo (dry-run)
+	press("enter")      // demo finished → complete
 	if app.mach.Current() != state.Complete {
 		t.Fatalf("after demo deploy: %v", app.mach.Current())
 	}

@@ -29,6 +29,7 @@ const (
 	Cluster
 	Provision
 	ControlPlane
+	FilestoreCSI
 	Autoscaling
 	Demo
 	Complete
@@ -37,7 +38,7 @@ const (
 // Order is the linear flow of the wizard.
 var Order = []Step{
 	Welcome, CheckSetup, Project, Cluster, Provision,
-	ControlPlane, Autoscaling, Demo, Complete,
+	ControlPlane, FilestoreCSI, Autoscaling, Demo, Complete,
 }
 
 // Title returns the heading shown for a step.
@@ -55,6 +56,8 @@ func (s Step) Title() string {
 		return "Provision GCP resources"
 	case ControlPlane:
 		return "Turn on Substrate"
+	case FilestoreCSI:
+		return "Install Filestore CSI driver"
 	case Autoscaling:
 		return "Configure autoscaling"
 	case Demo:
@@ -142,6 +145,8 @@ type Setup struct {
 
 	BucketName   string
 	KoDockerRepo string
+
+	FilestoreCSIDeployed bool
 
 	NodePool         string
 	AutoscaleEnabled bool

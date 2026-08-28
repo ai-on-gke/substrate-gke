@@ -70,3 +70,45 @@ func TestProgressNeverMovesBackward(t *testing.T) {
 		t.Fatalf("active = %d, want 1", got)
 	}
 }
+
+func TestFilestoreCSIChecklistTracksDeployOutput(t *testing.T) {
+	items := FilestoreCSI()
+	lines := []string{
+		"Disabling managed GKE Filestore CSI Driver addon...",
+		"Cloning into 'gcp-filestore-csi-driver'...",
+		"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
+		"🔐 Configuring Service Account & IAM Bindings...",
+		"📦 Applying Substrate Filestore CSI Driver Overlay via Kustomize...",
+	}
+	if got := feed(items, lines[:1]); got != 0 {
+		t.Fatalf("active = %d, want 0 (disable addon phase)", got)
+	}
+	if got := feed(items, lines[:2]); got != 1 {
+		t.Fatalf("active = %d, want 1 (fetch phase)", got)
+	}
+	if got := feed(items, lines[:4]); got != 2 {
+		t.Fatalf("active = %d, want 2 (IAM phase)", got)
+	}
+	if got := feed(items, lines); got != 3 {
+		t.Fatalf("active = %d, want 3 (apply phase)", got)
+	}
+}
+
+func TestFilestoreCSIChecklistTracksDeployOutputWithoutAddonDisable(t *testing.T) {
+	items := FilestoreCSI()
+	lines := []string{
+		"Cloning into 'gcp-filestore-csi-driver'...",
+		"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
+		"🔐 Configuring Service Account & IAM Bindings...",
+		"📦 Applying Substrate Filestore CSI Driver Overlay via Kustomize...",
+	}
+	if got := feed(items, lines[:1]); got != 1 {
+		t.Fatalf("active = %d, want 1 (fetch phase)", got)
+	}
+	if got := feed(items, lines[:3]); got != 2 {
+		t.Fatalf("active = %d, want 2 (IAM phase)", got)
+	}
+	if got := feed(items, lines); got != 3 {
+		t.Fatalf("active = %d, want 3 (apply phase)", got)
+	}
+}

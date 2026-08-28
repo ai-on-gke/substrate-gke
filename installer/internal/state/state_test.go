@@ -56,6 +56,9 @@ func TestStepNumbering(t *testing.T) {
 	if n, ok := CheckSetup.Number(); !ok || n != 1 {
 		t.Fatalf("CheckSetup.Number() = %d/%v, want 1/true", n, ok)
 	}
+	if n, ok := FilestoreCSI.Number(); !ok || n != 6 {
+		t.Fatalf("FilestoreCSI.Number() = %d/%v, want 6/true", n, ok)
+	}
 	if n, _ := Demo.Number(); n != NumberedSteps {
 		t.Fatalf("Demo.Number() = %d, want %d", n, NumberedSteps)
 	}

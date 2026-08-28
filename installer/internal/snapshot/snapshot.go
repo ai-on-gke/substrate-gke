@@ -180,6 +180,67 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	}
 }
 
+// DeployFilestoreCSI clones the GCP Filestore CSI Driver repository and invokes
+// its Substrate overlay deploy script (deploy/kubernetes/overlays/substrate/deploy.sh).
+// It automatically disables the managed GKE Filestore CSI Driver addon if enabled
+// to prevent conflicts with the Substrate overlay.
+func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
+	deployCmd := fmt.Sprintf("./deploy.sh --project-id %s", st.ProjectID)
+
+	script := strings.Join([]string{
+		"set -euo pipefail",
+		fmt.Sprintf(`FILESTORE_ADDON=$(gcloud container clusters describe %s --project=%s --location=%s --format="value(addonsConfig.gcpFilestoreCsiDriverConfig.enabled)" 2>/dev/null || true)`, st.ClusterName, st.ProjectID, st.Zone),
+		`if [[ "${FILESTORE_ADDON}" == "True" || "${FILESTORE_ADDON}" == "true" ]]; then`,
+		`    echo "Disabling managed GKE Filestore CSI Driver addon..."`,
+		fmt.Sprintf(`    gcloud container clusters update %s --project=%s --location=%s --update-addons=GcpFilestoreCsiDriver=DISABLED`, st.ClusterName, st.ProjectID, st.Zone),
+		`fi`,
+		`TMP_DIR=$(mktemp -d)`,
+		`trap 'rm -rf "${TMP_DIR}"' EXIT`,
+		`git clone --depth 1 https://github.com/kubernetes-sigs/gcp-filestore-csi-driver.git "${TMP_DIR}/gcp-filestore-csi-driver"`,
+		`cd "${TMP_DIR}/gcp-filestore-csi-driver/deploy/kubernetes/overlays/substrate"`,
+		deployCmd,
+	}, "\n")
+
+	return execx.Spec{
+		Label:   "deploy filestore csi driver",
+		Display: deployCmd,
+		Dir:     b.Root,
+		Argv:    []string{"bash", "-c", script},
+		Env:     b.env(st),
+		SimLines: []string{
+			"Disabling managed GKE Filestore CSI Driver addon...",
+			"Updating " + st.ClusterName + "...",
+			"Updated [" + st.ClusterName + "].",
+			"Cloning into 'gcp-filestore-csi-driver'...",
+			"=================================================================",
+			"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
+			"=================================================================",
+			"📋 Configuration:",
+			"   - GCP Project ID     : " + st.ProjectID,
+			"   - GCP Service Account: substrate-filestore-csi@" + st.ProjectID + ".iam.gserviceaccount.com",
+			"=================================================================",
+			"🔐 Configuring Service Account & IAM Bindings...",
+			"   - Verifying default Service Account existence...",
+			"   - Service Account already exists (Skipping creation).",
+			"   - Granting 'roles/file.editor' to the default Service Account on project " + st.ProjectID + "...",
+			"   - Binding Workload Identity User role to the Kubernetes ServiceAccount...",
+			"⚙️  Generating serviceaccount_patch.yaml with service account 'substrate-filestore-csi@" + st.ProjectID + ".iam.gserviceaccount.com'...",
+			"📦 Applying Substrate Filestore CSI Driver Overlay via Kustomize...",
+			"serviceaccount/gcp-filestore-csi-controller-sa configured",
+			"service/csi-filestore-controller created",
+			"csidriverconfig.ate.dev/filestore.csi.storage.gke.io created",
+			"deployment.apps/gcp-filestore-csi-controller configured",
+			"daemonset.apps/gcp-filestore-csi-node configured",
+			"=================================================================",
+			"✅ Deployment complete!",
+			"   - CSI Driver & Substrate CSIDriverConfig applied.",
+			"   - Check controller status : kubectl get pods -n gcp-filestore-csi-driver",
+			"   - Check Substrate driver  : kubectl get csidriverconfig",
+			"=================================================================",
+		},
+	}
+}
+
 // EnableAutoscaling turns on cluster autoscaling for a node pool.
 func (b *Builder) EnableAutoscaling(st *state.Setup) execx.Spec {
 	return execx.Spec{

@@ -119,6 +119,8 @@ func (a *App) screenFor(s state.Step) Screen {
 		return newProvisionScreen(a.deps)
 	case state.ControlPlane:
 		return newControlPlaneScreen(a.deps)
+	case state.FilestoreCSI:
+		return newFilestoreScreen(a.deps)
 	case state.Autoscaling:
 		return newAutoscalingScreen(a.deps)
 	case state.Demo:
@@ -224,7 +226,7 @@ func (a *App) runSlash(name string) tea.Cmd {
 		return goBack
 	case "skip", "s":
 		// Only the optional steps may be skipped.
-		if s := a.mach.Current(); s == state.Autoscaling || s == state.Demo {
+		if s := a.mach.Current(); s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {
 			return goNext
 		}
 	case "exit", "quit", "q":

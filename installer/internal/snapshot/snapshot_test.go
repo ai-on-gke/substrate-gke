@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
@@ -131,5 +132,19 @@ func TestDeploySpecs(t *testing.T) {
 	scale := b.EnableAutoscaling(st)
 	if !slices.Contains(scale.Argv, "--min-nodes=2") || !slices.Contains(scale.Argv, "--max-nodes=9") {
 		t.Errorf("autoscaling argv = %v", scale.Argv)
+	}
+
+	filestore := b.DeployFilestoreCSI(st)
+	if filestore.Label != "deploy filestore csi driver" {
+		t.Errorf("filestore label = %q", filestore.Label)
+	}
+	if filestore.Argv[0] != "bash" || filestore.Argv[1] != "-c" {
+		t.Errorf("filestore argv = %v", filestore.Argv)
+	}
+	if !strings.Contains(filestore.Argv[2], "GcpFilestoreCsiDriver=DISABLED") {
+		t.Errorf("filestore script missing addon disable check: %s", filestore.Argv[2])
+	}
+	if !slices.Contains(filestore.Env, "PROJECT_ID=acme") {
+		t.Errorf("filestore env missing project ID: %v", filestore.Env)
 	}
 }

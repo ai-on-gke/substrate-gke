@@ -93,6 +93,9 @@ func printSummary(app *ui.App, st *state.Setup) {
 	fmt.Println(theme.Good.Render("Substrate installed."))
 	fmt.Printf("  project:  %s\n  cluster:  %s (%s)\n  bucket:   gs://%s\n  registry: %s\n",
 		st.ProjectID, st.ClusterName, st.Zone, st.BucketName, st.KoDockerRepo)
+	if st.FilestoreCSIDeployed {
+		fmt.Println("  filestore: CSI driver deployed (gcp-filestore-csi-driver)")
+	}
 	if st.AutoscaleEnabled {
 		fmt.Printf("  autoscaling: %s, %d–%d nodes\n", st.NodePool, st.AutoscaleMin, st.AutoscaleMax)
 	}
