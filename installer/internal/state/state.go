@@ -18,7 +18,6 @@
 package state
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"strings"
 )
@@ -186,27 +185,32 @@ func (s *Setup) Region() string {
 	return s.Zone
 }
 
-// defaultBucketName derives the snapshot bucket name for a project and cluster:
-// ate-snapshots-<project_id>-<cluster_hash>.
+// defaultBucketName derives the snapshot bucket name for a project and location:
+// ate-snapshots-<project_id>-<zone>.
 // GCS bucket names must be 3-63 characters, start and end with an alphanumeric
 // character, and contain only lowercase letters, numbers, and dashes/underscores.
-func defaultBucketName(projectID, clusterName string) string {
+func defaultBucketName(projectID, zone string) (string, error) {
 	projectID = strings.ToLower(projectID)
-	h := sha256.Sum256([]byte(strings.ToLower(clusterName)))
-	name := fmt.Sprintf("ate-snapshots-%s-%x", projectID, h[:8])
+	zone = strings.ToLower(zone)
+	name := fmt.Sprintf("ate-snapshots-%s-%s", projectID, zone)
 	if len(name) > 63 {
-		name = strings.TrimRight(name[:63], "-")
+		return "", fmt.Errorf("bucket name %q exceeds 63 characters", name)
 	}
-	return name
+	return name, nil
 }
 
 // ApplyProjectDefaults fills the values derived from the project ID and cluster
-// name unless the user already overrode them.
-func (s *Setup) ApplyProjectDefaults() {
+// location unless the user already overrode them.
+func (s *Setup) ApplyProjectDefaults() error {
 	if s.BucketName == "" {
-		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName)
+		b, err := defaultBucketName(s.ProjectID, s.Zone)
+		if err != nil {
+			return err
+		}
+		s.BucketName = b
 	}
 	if s.KoDockerRepo == "" {
 		s.KoDockerRepo = "gcr.io/" + s.ProjectID + "/ate-images"
 	}
+	return nil
 }
