@@ -75,7 +75,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
 			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
 			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
-			newField("Snapshot bucket (blank = derived)", st.BucketName, "ate-snapshots-<project>-<cluster-hash>", func(s *state.Setup, v string) { s.BucketName = v }),
+			newField("Snapshot bucket (blank = derived)", st.BucketName, "ate-snapshots-<project>-<zone>", func(s *state.Setup, v string) { s.BucketName = v }),
 			newField("Image registry (blank = derived)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 		)
 	}
@@ -253,7 +253,10 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.ClusterName = c.Name
 	st.Zone = c.Location
 	st.ClusterIsNew = false
-	st.ApplyProjectDefaults()
+	if err := st.ApplyProjectDefaults(); err != nil {
+		s.err = err
+		return nil
+	}
 	return goNext
 }
 
@@ -284,7 +287,10 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st := s.deps.Setup
 				st.ClusterName = name
 				st.ClusterIsNew = true
-				st.ApplyProjectDefaults()
+				if err := st.ApplyProjectDefaults(); err != nil {
+					s.err = err
+					return nil
+				}
 				return goNext
 			}
 			var cmd tea.Cmd

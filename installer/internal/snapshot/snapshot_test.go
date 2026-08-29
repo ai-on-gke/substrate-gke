@@ -78,17 +78,20 @@ func TestVendoredCommitShortens(t *testing.T) {
 	}
 }
 
-func testSetup() *state.Setup {
+func testSetup(t *testing.T) *state.Setup {
+	t.Helper()
 	st := state.NewSetup()
 	st.ProjectID = "acme"
 	st.ProjectNumber = "42"
-	st.ApplyProjectDefaults()
+	if err := st.ApplyProjectDefaults(); err != nil {
+		t.Fatalf("ApplyProjectDefaults: %v", err)
+	}
 	return st
 }
 
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	b := NewBuilder(fakeSnapshot(t))
-	spec := b.Bootstrap(testSetup())
+	spec := b.Bootstrap(testSetup(t))
 
 	for _, want := range []string{
 		"PROJECT_ID=acme",
@@ -96,7 +99,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 		"CLUSTER_NAME=substrate-poc",
 		"CLUSTER_LOCATION=us-west1-c",
 		"GCE_REGION=us-west1",
-		"BUCKET_NAME=ate-snapshots-acme-2c2cf930b4f9d8c2",
+		"BUCKET_NAME=ate-snapshots-acme-us-west1-c",
 		"KO_DOCKER_REPO=gcr.io/acme/ate-images",
 		"NO_DEV_ENV=1",
 		"VERSION=vendored-0123456789ab",
@@ -112,7 +115,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 
 func TestDeploySpecs(t *testing.T) {
 	b := NewBuilder(fakeSnapshot(t))
-	st := testSetup()
+	st := testSetup(t)
 
 	deploy := b.DeployAteSystem(st)
 	if got := deploy.Argv; got[2] != "./cmd/ate-setup" || got[3] != "deploy" || got[4] != "ate-system" {

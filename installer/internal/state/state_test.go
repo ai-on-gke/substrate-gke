@@ -78,9 +78,15 @@ func TestRegionDerivation(t *testing.T) {
 func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	s := NewSetup()
 	s.ProjectID = "acme"
-	s.ApplyProjectDefaults()
-	if s.BucketName != defaultBucketName("acme", "substrate-poc") {
-		t.Errorf("BucketName = %q, want %q", s.BucketName, defaultBucketName("acme", "substrate-poc"))
+	if err := s.ApplyProjectDefaults(); err != nil {
+		t.Fatalf("ApplyProjectDefaults failed: %v", err)
+	}
+	want, err := defaultBucketName("acme", s.Zone)
+	if err != nil {
+		t.Fatalf("defaultBucketName failed: %v", err)
+	}
+	if s.BucketName != want {
+		t.Errorf("BucketName = %q, want %q", s.BucketName, want)
 	}
 	if s.KoDockerRepo != "gcr.io/acme/ate-images" {
 		t.Errorf("KoDockerRepo = %q", s.KoDockerRepo)
@@ -90,7 +96,9 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	custom.ProjectID = "acme"
 	custom.BucketName = "my-bucket"
 	custom.KoDockerRepo = "us-docker.pkg.dev/acme/repo"
-	custom.ApplyProjectDefaults()
+	if err := custom.ApplyProjectDefaults(); err != nil {
+		t.Fatalf("ApplyProjectDefaults failed: %v", err)
+	}
 	if custom.BucketName != "my-bucket" || custom.KoDockerRepo != "us-docker.pkg.dev/acme/repo" {
 		t.Errorf("overrides clobbered: %q %q", custom.BucketName, custom.KoDockerRepo)
 	}
@@ -98,22 +106,25 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 
 func TestDefaultBucketName(t *testing.T) {
 	for _, tc := range []struct {
-		project, cluster, want string
+		project, zone, want string
+		wantErr             bool
 	}{
-		{"acme", "cluster-1", "ate-snapshots-acme-4afb32cc106e2c92"},
-		{"My-Project", "Cluster-A", "ate-snapshots-my-project-34ab3e1c8c468878"},
+		{"acme", "us-west1-c", "ate-snapshots-acme-us-west1-c", false},
+		{"My-Project", "US-CENTRAL1-A", "ate-snapshots-my-project-us-central1-a", false},
 		{
-			"a-very-long-gcp-project-name-123",
-			"a-very-long-gke-cluster-name-4567890",
-			"ate-snapshots-a-very-long-gcp-project-name-123-297d5453509db54d",
+			"a-very-long-gcp-project-name-1234567890",
+			"us-central1-a",
+			"",
+			true,
 		},
 	} {
-		got := defaultBucketName(tc.project, tc.cluster)
-		if got != tc.want {
-			t.Errorf("defaultBucketName(%q, %q) = %q, want %q", tc.project, tc.cluster, got, tc.want)
+		got, err := defaultBucketName(tc.project, tc.zone)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("defaultBucketName(%q, %q) err = %v, wantErr %v", tc.project, tc.zone, err, tc.wantErr)
+			continue
 		}
-		if len(got) > 63 {
-			t.Errorf("defaultBucketName(%q, %q) length %d > 63", tc.project, tc.cluster, len(got))
+		if got != tc.want {
+			t.Errorf("defaultBucketName(%q, %q) = %q, want %q", tc.project, tc.zone, got, tc.want)
 		}
 	}
 }

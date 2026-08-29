@@ -235,7 +235,7 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 	if app.deps.Setup.ClusterName != "legacy-prod" {
 		t.Fatalf("ClusterName = %q, want legacy-prod", app.deps.Setup.ClusterName)
 	}
-	wantBucket := "ate-snapshots-my-substrate-project-37b310fa401c8677"
+	wantBucket := "ate-snapshots-my-substrate-project-us-central1"
 	if app.deps.Setup.BucketName != wantBucket {
 		t.Fatalf("BucketName = %q, want %q", app.deps.Setup.BucketName, wantBucket)
 	}
