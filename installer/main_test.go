@@ -22,9 +22,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/ui"
 )
+
+// After a managed install the tree is gone, so the summary must not tell the
+// user to cd into it.
+func TestSummaryDoesNotPointAtTheRemovedCache(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "substrate-4a2cb262dd62")
+
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, true))
+	})
+
+	if strings.Contains(out, root) {
+		t.Errorf("summary points at a directory cleanup removed:\n%s", out)
+	}
+	if !strings.Contains(out, snapshot.TeardownCommand()) {
+		t.Errorf("summary does not offer a self-contained teardown:\n%s", out)
+	}
+}
 
 // The teardown line is written to be pasted into a shell, so a checkout path
 // with a space in it — "/Users/John Smith/substrate" is an ordinary macOS
@@ -36,13 +54,13 @@ func TestSummaryTeardownCommandSurvivesAPaste(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, state.NewSetup(), root)
+		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, false))
 	})
 
 	var teardown string
 	for _, line := range strings.Split(out, "\n") {
-		if cmd, ok := strings.CutPrefix(line, "the control plane with: "); ok {
-			teardown = cmd
+		if cmd, ok := strings.CutPrefix(line, "  (cd "); ok {
+			teardown = "(cd " + cmd
 		}
 	}
 	if teardown == "" {

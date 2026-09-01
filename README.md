@@ -68,23 +68,26 @@ few seconds) into
 <user cache dir>/substrate-gke/substrate-<short commit>
 ```
 
-and later steps reuse it. The directory is keyed by commit, so bumping the pin fetches
-into a fresh directory instead of mutating the old one. Nothing is written into this
-repo, and `agent-substrate/substrate` is public, so the fetch needs no credentials.
+and later steps reuse it. Nothing is written into this repo, and
+`agent-substrate/substrate` is public, so the fetch needs no credentials.
 
-The tree is staged under a `.partial` suffix and moved into place only once it is
-complete, so interrupting a fetch costs you the download and nothing else.
+That tree is scratch space for one install, not somewhere to work: **it is deleted once
+the install succeeds**, and re-running the installer fetches it again. If you want to
+develop against Substrate, use your own clone (see `--substrate-root` below) — a copy
+here would be removed out from under you.
 
-Once an install finishes successfully the installer tidies that cache: it drops the
-shallow git pack it checked the tree out from, and removes trees left behind by earlier
-pins. Nothing is deleted while an install could still be retried, and a checkout you
-supplied with `--substrate-root` is never touched.
+Nothing is deleted while an install could still be retried, so a failed run leaves the
+tree in place and retrying it costs no download. The tree is staged under a temporary
+name and moved into place only once complete, so interrupting a fetch costs you the
+download and nothing else.
 
 To point at your own checkout instead — handy when testing an unmerged change:
 
 ```bash
 cd installer && go run . --substrate-root=/path/to/substrate
 ```
+
+A checkout you supply this way is used as-is and never modified or deleted.
 
 ### Moving to a newer Substrate
 

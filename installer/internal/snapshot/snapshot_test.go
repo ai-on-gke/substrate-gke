@@ -146,32 +146,39 @@ func TestCleanupReclaimsOnlyWhatTheInstallerCreated(t *testing.T) {
 		}
 		return p
 	}
-	pack := mkdir(root, ".git")
-	tree := mkdir(root, "cmd", "ate-setup")
+	mkdir(root, ".git")
+	mkdir(root, "cmd", "ate-setup")
 	stale := mkdir(base, treePrefix+"0ldc0mm1t")
-	partial := mkdir(base, treePrefix+"abc123456789.partial")
+	partial := mkdir(base, treePrefix+"abc123456789.partial.aB3xQ1")
 	unrelated := mkdir(base, "some-other-tool")
 
 	if err := NewBuilder(root, true).Cleanup(); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, gone := range []string{pack, stale, partial} {
+	// The managed tree is scratch space for one install, so it goes too —
+	// nothing here is meant to be worked in or kept.
+	for _, gone := range []string{root, stale, partial} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
-			t.Errorf("%s should have been reclaimed", gone)
+			t.Errorf("%s should have been removed", gone)
 		}
-	}
-	// The working tree survives: the exit summary points teardown at it.
-	if _, err := os.Stat(tree); err != nil {
-		t.Errorf("the checkout must survive cleanup: %v", err)
 	}
 	if _, err := os.Stat(unrelated); err != nil {
 		t.Errorf("cleanup must not touch directories it did not create: %v", err)
 	}
 }
 
-// Deleting git history out of a tree the user pointed us at would be
-// destroying their work, not tidying ours.
+// Nothing fetched, nothing to clean — and no error for it.
+func TestCleanupToleratesAnAbsentCache(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "never-created", treePrefix+"abc123456789")
+	if err := NewBuilder(root, true).Cleanup(); err != nil {
+		t.Errorf("cleanup of an absent cache should be a no-op, got %v", err)
+	}
+}
+
+// Deleting a tree the user pointed us at would be destroying their work, not
+// tidying ours — and now that cleanup removes whole trees, the stakes are the
+// user's entire checkout.
 func TestCleanupNeverTouchesAnExplicitCheckout(t *testing.T) {
 	root := fakeCheckout(t)
 	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
@@ -180,8 +187,28 @@ func TestCleanupNeverTouchesAnExplicitCheckout(t *testing.T) {
 	if err := NewBuilder(root, false).Cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
-		t.Errorf("cleanup deleted git history from a user-supplied checkout: %v", err)
+	for _, want := range []string{root, filepath.Join(root, ".git"), filepath.Join(root, "go.mod")} {
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("cleanup destroyed part of a user-supplied checkout (%s): %v", want, err)
+		}
+	}
+}
+
+// The teardown command has to work on a machine where the managed tree is
+// already gone, so it must not reference it.
+func TestTeardownCommandStandsAlone(t *testing.T) {
+	cmd := TeardownCommand()
+	for _, want := range []string{RepoURL, Commit, "mktemp -d", "go run ./cmd/ate-setup delete ate-system"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("teardown command missing %q:\n%s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, treePrefix+ShortCommit()) {
+		t.Errorf("teardown command points at the removed cache:\n%s", cmd)
+	}
+	// It is offered as a copy-paste, so it has to parse as one.
+	if err := exec.Command("bash", "-n", "-c", cmd).Run(); err != nil {
+		t.Errorf("teardown command is not valid shell: %v\n%s", err, cmd)
 	}
 }
 

@@ -100,15 +100,15 @@ func Fetched(root string, managed bool) bool {
 // to recognise trees this installer created.
 const treePrefix = "substrate-"
 
-// Cleanup reclaims cache disk after a successful install: the shallow pack the
-// working tree was checked out from, plus any trees and staging directories
-// left behind by earlier pins. The working tree itself stays, since the exit
-// summary points teardown at it.
+// Cleanup removes every tree this installer fetched, once an install has
+// succeeded. A managed checkout is scratch space for one install, not a place
+// to work: substrate development belongs in the developer's own clone, and a
+// copy nobody is expected to edit is cheaper to re-fetch — a few seconds —
+// than to keep around and reason about as a cache.
 //
-// Both are deliberately deferred to a successful finish rather than done at
-// fetch time. While the install can still be retried there is no way to know
-// what a retry will need, and deleting is not reversible; once it has worked,
-// nothing is going to ask for the pack again.
+// Deleting is deferred to a successful finish rather than done at fetch time.
+// While the install can still be retried, that tree is exactly what a retry
+// needs; once it has worked, nothing will ask for it again.
 //
 // It never touches a user-supplied checkout — that tree, and its history,
 // belong to the user.
@@ -116,21 +116,35 @@ func (b *Builder) Cleanup() error {
 	if !b.Managed {
 		return nil
 	}
-	errs := []error{os.RemoveAll(filepath.Join(b.Root, ".git"))}
-
-	base, keep := filepath.Dir(b.Root), filepath.Base(b.Root)
+	base := filepath.Dir(b.Root)
 	entries, err := os.ReadDir(base)
-	if err != nil {
-		return errors.Join(append(errs, err)...)
+	if os.IsNotExist(err) {
+		return nil // nothing was ever fetched
 	}
+	if err != nil {
+		return err
+	}
+	var errs []error
 	for _, e := range entries {
-		// Only ever remove siblings we would have created ourselves: trees
-		// from other pins, and the ".partial" a killed fetch leaves behind.
-		if name := e.Name(); name != keep && strings.HasPrefix(name, treePrefix) {
-			errs = append(errs, os.RemoveAll(filepath.Join(base, name)))
+		// Only ever remove what we would have created ourselves: this pin,
+		// trees from earlier ones, and the staging directories a killed
+		// fetch leaves behind.
+		if strings.HasPrefix(e.Name(), treePrefix) {
+			errs = append(errs, os.RemoveAll(filepath.Join(base, e.Name())))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// TeardownCommand returns a self-contained shell command that deletes the
+// control plane. It re-fetches the pinned tree into a temporary directory
+// rather than pointing at the managed checkout, which Cleanup removes once
+// the install succeeds. A user-supplied checkout is still there, so callers
+// pass their own root for that case.
+func TeardownCommand() string {
+	return fmt.Sprintf(`(d=$(mktemp -d) && git -C "$d" init -q && git -C "$d" fetch -q --depth 1 %s %s`+
+		` && git -C "$d" checkout -q FETCH_HEAD && cd "$d" && go run ./cmd/ate-setup delete ate-system)`,
+		RepoURL, Commit)
 }
 
 // ShellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a

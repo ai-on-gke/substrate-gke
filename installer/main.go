@@ -91,12 +91,12 @@ func main() {
 		}
 	}
 
-	printSummary(app, deps.Setup, root)
+	printSummary(app, deps.Setup, deps.Builder)
 }
 
 // printSummary leaves a plain-text recap in the terminal after the alt
 // screen closes, like the prototype's exit panel.
-func printSummary(app *ui.App, st *state.Setup, root string) {
+func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder) {
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
 		return
@@ -113,10 +113,20 @@ func printSummary(app *ui.App, st *state.Setup, root string) {
 	if st.DemoDeployed {
 		fmt.Println("  demo: counter deployed — see the next steps printed in the wizard.")
 	}
-	fmt.Printf("\nThe substrate checkout is at %s\n", root)
-	fmt.Println("Tear down GCP resources with the upstream hack/teardown.sh, or delete")
-	// This line is meant to be pasted into a shell, so the path is quoted —
-	// a space in it would otherwise make the cd land somewhere else. The
-	// line above is prose, and reads better unquoted.
-	fmt.Printf("the control plane with: (cd %s && go run ./cmd/ate-setup delete ate-system)\n", snapshot.ShellQuote(root))
+	// The managed checkout was scratch space and is gone by now, so point
+	// teardown at a command that stands on its own. A checkout the user
+	// supplied is still where they left it.
+	teardown := snapshot.TeardownCommand()
+	if b.Managed {
+		fmt.Printf("\nThe substrate tree was fetched to build your images and has been removed;\n")
+		fmt.Printf("re-running the installer fetches it again. Develop against your own clone.\n")
+	} else {
+		fmt.Printf("\nYour substrate checkout at %s is untouched.\n", b.Root)
+		// Pasted into a shell, so the path is quoted — a space in it would
+		// otherwise make the cd land somewhere else. The line above is
+		// prose, and reads better unquoted.
+		teardown = fmt.Sprintf("(cd %s && go run ./cmd/ate-setup delete ate-system)", snapshot.ShellQuote(b.Root))
+	}
+	fmt.Println("\nTear down GCP resources with the upstream hack/teardown.sh, or delete")
+	fmt.Printf("the control plane with:\n  %s\n", teardown)
 }
