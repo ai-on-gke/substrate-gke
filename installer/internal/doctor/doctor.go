@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
 // Status classifies a check result.
@@ -66,7 +68,7 @@ func output(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// Checks returns the preflight suite for a given vendored snapshot root.
+// Checks returns the preflight suite for a given Substrate checkout root.
 func Checks(snapshotRoot string) []Check {
 	return []Check{
 		{
@@ -101,9 +103,17 @@ func Checks(snapshotRoot string) []Check {
 				have := goVersionOf(out)
 				want := requiredGoVersion(snapshotRoot)
 				if want != "" && !goVersionAtLeast(have, want) {
+					// GOTOOLCHAIN=auto (the default) makes an older Go fetch
+					// and re-exec the version go.mod asks for, so this only
+					// blocks the install when toolchain switching is off.
+					if tc := goToolchainMode(ctx); tc != "local" {
+						return Result{Pass,
+							fmt.Sprintf("%s; substrate needs go >= %s, which GOTOOLCHAIN=%s will fetch automatically", out, want, tc),
+							""}
+					}
 					return Result{Fail,
-						fmt.Sprintf("go %s found, but the vendored substrate needs go >= %s", have, want),
-						"https://go.dev/dl/"}
+						fmt.Sprintf("go %s found, but substrate needs go >= %s and GOTOOLCHAIN=local forbids fetching it", have, want),
+						"go env -w GOTOOLCHAIN=auto   # or install a newer Go from https://go.dev/dl/"}
 				}
 				return Result{Pass, out, ""}
 			},
@@ -119,10 +129,10 @@ func Checks(snapshotRoot string) []Check {
 			},
 		},
 		{
-			Key: "git", Name: "git", Fatal: false,
+			Key: "git", Name: "git", Fatal: true,
 			Run: func(ctx context.Context) Result {
 				if _, err := exec.LookPath("git"); err != nil {
-					return Result{Warn, "git not found; needed for fetching external overlays like Filestore CSI",
+					return Result{Fail, "git not found; the installer fetches the pinned substrate tree with it",
 						"https://git-scm.com/downloads"}
 				}
 				return Result{Pass, "git on PATH", ""}
@@ -142,11 +152,15 @@ func Checks(snapshotRoot string) []Check {
 			},
 		},
 		{
-			Key: "snapshot", Name: "Vendored substrate tree", Fatal: true,
+			Key: "snapshot", Name: "Substrate checkout", Fatal: false,
 			Run: func(ctx context.Context) Result {
-				if _, err := os.Stat(filepath.Join(snapshotRoot, "go.mod")); err != nil {
-					return Result{Fail, "vendored substrate/ tree not found at " + snapshotRoot,
-						"hack/vendor-substrate.sh <substrate-checkout> main"}
+				if !snapshot.Fetched(snapshotRoot) {
+					// Not an error: the install steps fetch the pinned tree on
+					// first use. Say so, so the wait is not a surprise.
+					return Result{Warn,
+						fmt.Sprintf("not fetched yet; substrate@%s will be downloaded to %s on the first install step",
+							snapshot.ShortCommit(), snapshotRoot),
+						""}
 				}
 				return Result{Pass, snapshotRoot, ""}
 			},
@@ -164,18 +178,32 @@ func goVersionOf(versionOutput string) string {
 	return m[1]
 }
 
-// requiredGoVersion reads the `go` directive from the snapshot's go.mod.
+// goToolchainMode reports GOTOOLCHAIN. "local" means the toolchain will not
+// upgrade itself; anything else ("auto", "path", or a pinned version) means it
+// will. An unreadable value is treated as the "auto" default.
+func goToolchainMode(ctx context.Context) string {
+	out, err := output(ctx, "go", "env", "GOTOOLCHAIN")
+	if err != nil || out == "" {
+		return "auto"
+	}
+	return out
+}
+
+// requiredGoVersion reads the `go` directive from the checkout's go.mod. The
+// tree is usually absent on a first run — the install steps fetch it — so fall
+// back to the version recorded alongside the pin rather than skipping the
+// check and letting the build fail later on an old toolchain.
 func requiredGoVersion(root string) string {
 	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
-		return ""
+		return snapshot.MinGoVersion
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "go "); ok {
 			return strings.TrimSpace(v)
 		}
 	}
-	return ""
+	return snapshot.MinGoVersion
 }
 
 // goVersionAtLeast compares dotted version strings numerically. A missing

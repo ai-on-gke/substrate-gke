@@ -14,8 +14,8 @@
 
 // The substrate-gke installer: an interactive wizard that provisions GCP
 // resources and installs the Agent Substrate control plane onto a GKE
-// cluster, using the vendored agent-substrate/substrate snapshot in
-// ../substrate.
+// cluster, building from a pinned agent-substrate/substrate checkout that the
+// install steps fetch on demand.
 package main
 
 import (
@@ -39,11 +39,11 @@ func main() {
 	var (
 		doctorMode    = flag.Bool("doctor", false, "run the preflight checks and exit")
 		dryRun        = flag.Bool("dry-run", false, "walk the full wizard without touching GCP (simulated commands)")
-		substrateRoot = flag.String("substrate-root", "", "path to the vendored substrate tree (default: auto-detected)")
+		substrateRoot = flag.String("substrate-root", "", "use an existing substrate checkout instead of fetching the pinned one")
 	)
 	flag.Parse()
 
-	root, err := snapshot.Find(*substrateRoot)
+	root, managed, err := snapshot.Root(*substrateRoot)
 	if err != nil && !*dryRun {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -69,7 +69,7 @@ func main() {
 		Setup:   state.NewSetup(),
 		Runner:  runner,
 		GCP:     &gcp.Client{DryRun: *dryRun},
-		Builder: snapshot.NewBuilder(root),
+		Builder: snapshot.NewBuilder(root, managed),
 		Checks:  doctor.Checks(root),
 		DryRun:  *dryRun,
 	}
@@ -80,12 +80,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	printSummary(app, deps.Setup)
+	printSummary(app, deps.Setup, root)
 }
 
 // printSummary leaves a plain-text recap in the terminal after the alt
 // screen closes, like the prototype's exit panel.
-func printSummary(app *ui.App, st *state.Setup) {
+func printSummary(app *ui.App, st *state.Setup, root string) {
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
 		return
@@ -102,6 +102,7 @@ func printSummary(app *ui.App, st *state.Setup) {
 	if st.DemoDeployed {
 		fmt.Println("  demo: counter deployed — see the next steps printed in the wizard.")
 	}
-	fmt.Println("\nTear down GCP resources with the upstream hack/teardown.sh, or delete")
-	fmt.Println("the control plane with: (cd substrate && go run ./cmd/ate-setup delete ate-system)")
+	fmt.Printf("\nThe substrate checkout is at %s\n", root)
+	fmt.Println("Tear down GCP resources with the upstream hack/teardown.sh, or delete")
+	fmt.Printf("the control plane with: (cd %s && go run ./cmd/ate-setup delete ate-system)\n", root)
 }

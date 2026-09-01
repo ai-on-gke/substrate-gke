@@ -38,10 +38,10 @@ fmt:
 verify:
 	cd installer && test -z "$$(gofmt -l .)" && go vet ./...
 
-# Refresh the vendored substrate snapshot:
-#   make vendor-substrate SUBSTRATE=/path/to/substrate REF=main
-SUBSTRATE ?= ../substrate
-REF ?= main
-.PHONY: vendor-substrate
-vendor-substrate:
-	hack/vendor-substrate.sh $(SUBSTRATE) $(REF)
+# The pinned upstream revision the installer builds from. To move to a newer
+# Substrate, edit Commit (and MinGoVersion) in
+# installer/internal/snapshot/snapshot.go — the tree is fetched on demand, not
+# vendored here.
+.PHONY: substrate-pin
+substrate-pin:
+	@grep -E '^\t(RepoURL|Commit|MinGoVersion) ' installer/internal/snapshot/snapshot.go

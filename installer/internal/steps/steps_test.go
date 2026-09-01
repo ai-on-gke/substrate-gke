@@ -27,18 +27,27 @@ func feed(items []ChecklistItem, lines []string) int {
 
 func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 	items := Bootstrap()
+	// Item 0 is the substrate fetch, so the seven bootstrap phases sit at 1..7.
 	lines := []string{
+		"Fetching substrate@85d404a82379 from https://github.com/agent-substrate/substrate.git...",
 		"time=... msg=Starting full bootstrap...",
 		"time=... msg=Step 1/7: Enabling required APIs...",
 		"time=... msg=Step 2/7: Creating GKE Cluster...",
 		"time=... msg=Cluster does not exist. Creating... cluster=substrate-poc",
 		"time=... msg=Step 3/7: Creating GCS Bucket for snapshots...",
 	}
-	if got := feed(items, lines); got != 2 {
-		t.Fatalf("active = %d, want 2 (bucket step)", got)
+	if got := feed(items, lines); got != 3 {
+		t.Fatalf("active = %d, want 3 (bucket step)", got)
 	}
-	if got := feed(items, []string{"Step 7/7: Creating Monitoring Dashboards..."}); got != 6 {
-		t.Fatalf("active = %d, want 6", got)
+	if got := feed(items, []string{"Step 7/7: Creating Monitoring Dashboards..."}); got != 7 {
+		t.Fatalf("active = %d, want 7", got)
+	}
+}
+
+// A warm cache prints a different line; it must still light up the fetch item.
+func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
+	if got := feed(Bootstrap(), []string{"Using cached substrate@85d404a82379"}); got != 0 {
+		t.Fatalf("active = %d, want 0 (fetch step)", got)
 	}
 }
 

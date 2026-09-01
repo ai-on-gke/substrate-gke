@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package snapshot locates the vendored agent-substrate/substrate tree and
+// Package snapshot resolves the pinned agent-substrate/substrate checkout and
 // builds the command invocations the wizard executes against it.
+//
+// The tree is fetched on demand rather than vendored into this repo, the same
+// way DeployFilestoreCSI fetches the Filestore CSI driver overlay: a shallow
+// git fetch of exactly the revision needed. Unlike that clone, this one is
+// pinned to a commit and cached, because several wizard steps run against it.
 package snapshot
 
 import (
@@ -26,68 +31,73 @@ import (
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
-// Find resolves the vendored substrate tree. An explicit path wins; otherwise
-// it walks up from the working directory looking for a substrate/ directory
-// containing go.mod (so the installer works from the repo root, from
-// installer/, or from a built binary run inside the repo).
-func Find(explicit string) (string, error) {
+const (
+	// RepoURL is the upstream Substrate repository. It is public, so the
+	// fetch needs no credentials.
+	RepoURL = "https://github.com/agent-substrate/substrate.git"
+
+	// Commit pins the upstream revision the installer builds from. Bump this
+	// to move to a newer Substrate, and update MinGoVersion to match the `go`
+	// directive in that revision's go.mod.
+	Commit = "85d404a8237d97344ab2d30817caa5bdb2acf81f"
+
+	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
+	// prefers the real go.mod once the tree is on disk and falls back to this
+	// when checking Go before the first fetch.
+	MinGoVersion = "1.27.0"
+)
+
+// ShortCommit is Commit abbreviated for display.
+func ShortCommit() string { return Commit[:12] }
+
+// Root returns the directory holding the Substrate tree. An explicit path
+// wins and must already be a checkout; otherwise the pinned tree lives in a
+// per-commit directory under the user cache, so bumping Commit fetches into a
+// fresh directory instead of mutating the old one.
+//
+// The returned path need not exist yet — the install steps fetch it on first
+// use. Managed reports whether the installer owns that fetch.
+func Root(explicit string) (path string, managed bool, err error) {
 	if explicit != "" {
-		if isSnapshot(explicit) {
-			return filepath.Abs(explicit)
+		if !isCheckout(explicit) {
+			return "", false, fmt.Errorf("%s does not look like a substrate checkout (no go.mod)", explicit)
 		}
-		return "", fmt.Errorf("%s does not look like a substrate snapshot (no go.mod)", explicit)
+		abs, err := filepath.Abs(explicit)
+		return abs, false, err
 	}
-	dir, err := os.Getwd()
+	cache, err := os.UserCacheDir()
 	if err != nil {
-		return "", err
+		return "", false, fmt.Errorf("cannot locate a cache directory for the substrate checkout: %w", err)
 	}
-	for {
-		candidate := filepath.Join(dir, "substrate")
-		if isSnapshot(candidate) {
-			return candidate, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("could not find the vendored substrate/ tree; run from the substrate-gke repo or pass --substrate-root")
-		}
-		dir = parent
-	}
+	return filepath.Join(cache, "substrate-gke", "substrate-"+ShortCommit()), true, nil
 }
 
-func isSnapshot(dir string) bool {
+func isCheckout(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, "go.mod"))
 	return err == nil
 }
 
-// VendoredCommit reads the commit recorded by hack/vendor-substrate.sh,
-// shortened for display. Returns "unknown" when absent.
-func VendoredCommit(root string) string {
-	b, err := os.ReadFile(filepath.Join(root, "VENDORED_COMMIT"))
-	if err != nil {
-		return "unknown"
-	}
-	c := strings.TrimSpace(string(b))
-	if len(c) > 12 {
-		c = c[:12]
-	}
-	if c == "" {
-		return "unknown"
-	}
-	return c
-}
+// Fetched reports whether the tree at root has already been fetched.
+func Fetched(root string) bool { return isCheckout(root) }
 
-// Builder assembles execx.Specs rooted at the snapshot.
+// Builder assembles execx.Specs rooted at the Substrate checkout.
 type Builder struct {
 	Root string
-	// Version stamps the images ko builds (the snapshot has no .git for
-	// `git describe` to consult).
+	// Managed is true when Root is the pinned checkout the installer fetches
+	// itself, false when the user supplied their own tree.
+	Managed bool
+	// Version stamps the images ko builds (the checkout is detached at a
+	// pinned commit, so `git describe` has no tag to report).
 	Version string
 }
 
-// NewBuilder returns a Builder whose Version is derived from the vendored
-// commit.
-func NewBuilder(root string) *Builder {
-	return &Builder{Root: root, Version: "vendored-" + VendoredCommit(root)}
+// NewBuilder returns a Builder for the tree at root.
+func NewBuilder(root string, managed bool) *Builder {
+	version := "substrate-local"
+	if managed {
+		version = "substrate-" + ShortCommit()
+	}
+	return &Builder{Root: root, Managed: managed, Version: version}
 }
 
 // env builds the environment both upstream tools read, mirroring
@@ -111,17 +121,62 @@ func (b *Builder) env(st *state.Setup) []string {
 	}
 }
 
+// FetchLine is the output the fetch preamble prints when it downloads the
+// tree; the install checklists key their "fetch" phase off it.
+const FetchLine = "Fetching substrate"
+
+// ensure returns the shell lines that guarantee the checkout exists and leave
+// the shell inside it. Fetching only the pinned commit at depth 1 keeps this
+// to a few seconds; a tree the user supplied is used as-is.
+func (b *Builder) ensure() []string {
+	if !b.Managed {
+		return []string{fmt.Sprintf("cd %q", b.Root)}
+	}
+	return []string{
+		fmt.Sprintf("SUBSTRATE_DIR=%q", b.Root),
+		`if [ ! -e "${SUBSTRATE_DIR}/go.mod" ]; then`,
+		fmt.Sprintf(`    echo "%s@%s from %s..."`, FetchLine, ShortCommit(), RepoURL),
+		`    rm -rf "${SUBSTRATE_DIR}"`,
+		`    mkdir -p "${SUBSTRATE_DIR}"`,
+		`    git -C "${SUBSTRATE_DIR}" init -q`,
+		fmt.Sprintf(`    git -C "${SUBSTRATE_DIR}" remote add origin %s`, RepoURL),
+		fmt.Sprintf(`    git -C "${SUBSTRATE_DIR}" fetch -q --depth 1 origin %s`, Commit),
+		`    git -C "${SUBSTRATE_DIR}" checkout -q FETCH_HEAD`,
+		fmt.Sprintf(`    echo "Fetched substrate@%s"`, ShortCommit()),
+		`else`,
+		fmt.Sprintf(`    echo "Using cached substrate@%s"`, ShortCommit()),
+		`fi`,
+		`cd "${SUBSTRATE_DIR}"`,
+	}
+}
+
+// inTree wraps a command so it runs inside the Substrate checkout, fetching
+// the tree first if it is not there yet.
+func (b *Builder) inTree(command string) []string {
+	lines := append([]string{"set -euo pipefail"}, b.ensure()...)
+	lines = append(lines, command)
+	return []string{"bash", "-c", strings.Join(lines, "\n")}
+}
+
+// fetchSimLines is what --dry-run replays for the fetch preamble.
+func (b *Builder) fetchSimLines() []string {
+	if !b.Managed {
+		return nil
+	}
+	return []string{fmt.Sprintf("Using cached substrate@%s", ShortCommit())}
+}
+
 // Bootstrap provisions GCP resources (APIs, cluster, bucket, IAM,
-// dashboards) via the vendored tools/setup-gcp. All seven steps are
-// idempotent, so it is safe to run against an existing cluster.
+// dashboards) via the upstream tools/setup-gcp. All seven steps are
+// idempotent, so it is safe to run against an existing cluster. This is the
+// first step to touch the checkout, so it usually pays the fetch.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "setup-gcp bootstrap",
 		Display: "go run ./tools/setup-gcp bootstrap",
-		Dir:     b.Root,
-		Argv:    []string{"go", "run", "./tools/setup-gcp", "bootstrap"},
+		Argv:    b.inTree("go run ./tools/setup-gcp bootstrap"),
 		Env:     b.env(st),
-		SimLines: []string{
+		SimLines: append(b.fetchSimLines(),
 			"Step 1/7: Enabling required APIs...",
 			"Step 2/7: Creating GKE Cluster...",
 			"Step 3/7: Creating GCS Bucket for snapshots...",
@@ -130,22 +185,21 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 			"Step 6/7: Creating IAM policy bindings for bucket...",
 			"Step 7/7: Creating Monitoring Dashboards...",
 			"Bootstrap completed successfully.",
-		},
+		),
 	}
 }
 
-// DeployAteSystem installs the Substrate control plane with the vendored
+// DeployAteSystem installs the Substrate control plane with the upstream
 // cmd/ate-setup. ate-setup fetches cluster credentials itself from
 // PROJECT_ID/CLUSTER_NAME/CLUSTER_LOCATION, and ko builds and pushes the
-// control-plane images from the snapshot source.
+// control-plane images from the checkout's source.
 func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system",
-		Dir:     b.Root,
-		Argv:    []string{"go", "run", "./cmd/ate-setup", "deploy", "ate-system"},
+		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system"),
 		Env:     b.env(st),
-		SimLines: []string{
+		SimLines: append(b.fetchSimLines(),
 			"[step]: deploy_ate_system",
 			"[step]: deploy_crds",
 			"[step]: ensure_apiserver_prerequisites",
@@ -159,7 +213,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 			"[step]: Waiting for ATE system components to be ready...",
 			"deployment \"ate-api-server\" successfully rolled out",
 			"daemon set \"atelet\" successfully rolled out",
-		},
+		),
 	}
 }
 
@@ -169,21 +223,21 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy demo " + name,
 		Display: "go run ./cmd/ate-setup deploy demo " + name,
-		Dir:     b.Root,
-		Argv:    []string{"go", "run", "./cmd/ate-setup", "deploy", "demo", name},
+		Argv:    b.inTree("go run ./cmd/ate-setup deploy demo " + name),
 		Env:     b.env(st),
-		SimLines: []string{
-			"[step]: deploy_demo_" + name,
-			"workerpool.ate.dev/ate-demo-" + name + " created",
-			"actortemplate.ate.dev/" + name + " created",
-		},
+		SimLines: append(b.fetchSimLines(),
+			"[step]: deploy_demo_"+name,
+			"workerpool.ate.dev/ate-demo-"+name+" created",
+			"actortemplate.ate.dev/"+name+" created",
+		),
 	}
 }
 
 // DeployFilestoreCSI clones the GCP Filestore CSI Driver repository and invokes
 // its Substrate overlay deploy script (deploy/kubernetes/overlays/substrate/deploy.sh).
 // It automatically disables the managed GKE Filestore CSI Driver addon if enabled
-// to prevent conflicts with the Substrate overlay.
+// to prevent conflicts with the Substrate overlay. It needs no Substrate
+// checkout of its own.
 func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 	deployCmd := fmt.Sprintf("./deploy.sh --project-id %s", st.ProjectID)
 
@@ -204,7 +258,6 @@ func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "deploy filestore csi driver",
 		Display: deployCmd,
-		Dir:     b.Root,
 		Argv:    []string{"bash", "-c", script},
 		Env:     b.env(st),
 		SimLines: []string{
@@ -248,7 +301,6 @@ func (b *Builder) EnableAutoscaling(st *state.Setup) execx.Spec {
 		Display: fmt.Sprintf(
 			"gcloud container node-pools update %s --cluster=%s --location=%s --enable-autoscaling --min-nodes=%d --max-nodes=%d",
 			st.NodePool, st.ClusterName, st.Zone, st.AutoscaleMin, st.AutoscaleMax),
-		Dir: b.Root,
 		Argv: []string{
 			"gcloud", "container", "node-pools", "update", st.NodePool,
 			"--project=" + st.ProjectID,
@@ -270,7 +322,6 @@ func (b *Builder) Verify(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "verify ate-system",
 		Display: "kubectl get pods -n ate-system",
-		Dir:     b.Root,
 		Argv:    []string{"kubectl", "get", "pods", "-n", "ate-system", "-o", "wide"},
 		SimLines: []string{
 			"NAME                              READY   STATUS    RESTARTS   AGE",

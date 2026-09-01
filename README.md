@@ -7,7 +7,7 @@ Substrate control plane onto a GKE cluster.
 ## Quickstart
 
 Prerequisites: `gcloud` (authenticated, with application-default credentials), a Go
-toolchain, and `kubectl`.
+toolchain, `git`, and `kubectl`.
 
 ```bash
 gcloud auth application-default login
@@ -52,21 +52,39 @@ Exiting and re-running is always safe; every step is idempotent.
 
 ```
 installer/   The wizard (Go, bubbletea). `go run .` from this directory works too.
-substrate/   Vendored snapshot of agent-substrate/substrate — do not edit by hand.
-hack/        vendor-substrate.sh, the script that refreshes the snapshot.
 ```
 
-The `substrate/` snapshot is large on purpose: upstream's installer builds the
-control-plane images from source with [ko](https://ko.build), so the manifests alone
-are not enough — the Go source tree and its vendor directory come along.
-`substrate/VENDOR.md` records the exact upstream commit.
+That is the whole repo. Upstream Substrate is **not** vendored here.
 
-## Updating the vendored substrate
+## How Substrate itself is obtained
+
+Upstream's installer builds the control-plane images from source with
+[ko](https://ko.build), so a Substrate source tree has to be on disk at install time —
+the manifests alone are not enough.
+
+Rather than vendoring it, the installer fetches it the same way it fetches the
+Filestore CSI driver overlay: a shallow `git` fetch, pinned to an exact upstream
+commit. The first install step that needs the tree downloads it (a few seconds) into
+
+```
+<user cache dir>/substrate-gke/substrate-<short commit>
+```
+
+and later steps reuse it. The directory is keyed by commit, so bumping the pin fetches
+into a fresh directory instead of mutating the old one. Nothing is written into this
+repo, and `agent-substrate/substrate` is public, so the fetch needs no credentials.
+
+To point at your own checkout instead — handy when testing an unmerged change:
 
 ```bash
-make vendor-substrate SUBSTRATE=/path/to/substrate REF=main
-cd substrate && go build ./cmd/ate-setup ./tools/setup-gcp   # sanity check
+cd installer && go run . --substrate-root=/path/to/substrate
 ```
+
+### Moving to a newer Substrate
+
+Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion`
+next to it to match the `go` directive in that revision's `go.mod`. `make substrate-pin`
+prints the current values.
 
 ## Development
 

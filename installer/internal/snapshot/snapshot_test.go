@@ -24,58 +24,99 @@ import (
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
-func fakeSnapshot(t *testing.T) string {
+func fakeCheckout(t *testing.T) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "substrate")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{
-		"go.mod":          "module github.com/agent-substrate/substrate\n",
-		"VENDORED_COMMIT": "0123456789abcdef0123\n",
-	} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	gomod := "module github.com/agent-substrate/substrate\n\ngo " + MinGoVersion + "\n"
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(gomod), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	return root
 }
 
-func TestFindExplicitAndWalkUp(t *testing.T) {
-	root := fakeSnapshot(t)
-
-	if got, err := Find(root); err != nil || got == "" {
-		t.Fatalf("Find(explicit) = %q, %v", got, err)
-	}
-
-	// From a subdirectory of the repo, Find should walk up to substrate/.
-	sub := filepath.Join(filepath.Dir(root), "installer", "internal")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(sub)
-	got, err := Find("")
+func TestRootDefaultsToAPinnedCacheDir(t *testing.T) {
+	got, managed, err := Root("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != root {
-		t.Fatalf("Find(walk) = %q, want %q", got, root)
+	if !managed {
+		t.Error("the default root must be installer-managed")
+	}
+	// Keyed by commit so bumping the pin cannot reuse a stale tree.
+	if want := "substrate-" + ShortCommit(); filepath.Base(got) != want {
+		t.Errorf("Root() = %q, want a directory named %q", got, want)
+	}
+	// The tree is fetched on demand, so Root must not require it to exist.
+	if _, err := os.Stat(got); err == nil {
+		t.Skip("cache dir already populated on this machine")
 	}
 }
 
-func TestFindRejectsNonSnapshot(t *testing.T) {
-	if _, err := Find(t.TempDir()); err == nil {
+func TestRootAcceptsAnExplicitCheckout(t *testing.T) {
+	root := fakeCheckout(t)
+	got, managed, err := Root(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managed {
+		t.Error("a user-supplied checkout must not be installer-managed")
+	}
+	if got != root {
+		t.Errorf("Root(explicit) = %q, want %q", got, root)
+	}
+}
+
+func TestRootRejectsANonCheckout(t *testing.T) {
+	if _, _, err := Root(t.TempDir()); err == nil {
 		t.Fatal("want an error for a directory without go.mod")
 	}
 }
 
-func TestVendoredCommitShortens(t *testing.T) {
-	root := fakeSnapshot(t)
-	if got := VendoredCommit(root); got != "0123456789ab" {
-		t.Fatalf("VendoredCommit = %q", got)
+func TestPinIsAFullCommitSHA(t *testing.T) {
+	if len(Commit) != 40 {
+		t.Fatalf("Commit must be a full 40-char SHA, got %d chars: %q", len(Commit), Commit)
 	}
-	if got := VendoredCommit(t.TempDir()); got != "unknown" {
-		t.Fatalf("VendoredCommit(missing) = %q", got)
+	for _, r := range Commit {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			t.Fatalf("Commit is not lowercase hex: %q", Commit)
+		}
+	}
+}
+
+// The fetch must name an exact commit: a branch or tag would silently drift.
+func TestEnsureFetchesThePinnedCommitShallowly(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	script := b.Bootstrap(testSetup()).Argv[2]
+
+	for _, want := range []string{
+		"fetch -q --depth 1 origin " + Commit,
+		"remote add origin " + RepoURL,
+		"checkout -q FETCH_HEAD",
+		`cd "${SUBSTRATE_DIR}"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("fetch preamble missing %q:\n%s", want, script)
+		}
+	}
+	// Idempotent: an existing tree is reused rather than re-fetched.
+	if !strings.Contains(script, `if [ ! -e "${SUBSTRATE_DIR}/go.mod" ]; then`) {
+		t.Errorf("fetch preamble is not guarded by a cache check:\n%s", script)
+	}
+}
+
+// A user-supplied tree must be used as-is, never overwritten by a fetch.
+func TestEnsureLeavesAnExplicitCheckoutAlone(t *testing.T) {
+	b := NewBuilder(fakeCheckout(t), false)
+	script := b.Bootstrap(testSetup()).Argv[2]
+
+	if strings.Contains(script, "git ") {
+		t.Errorf("an explicit checkout must not be fetched over:\n%s", script)
+	}
+	if !strings.Contains(script, "cd \""+b.Root+"\"") {
+		t.Errorf("script does not cd into the explicit checkout:\n%s", script)
 	}
 }
 
@@ -88,7 +129,7 @@ func testSetup() *state.Setup {
 }
 
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
-	b := NewBuilder(fakeSnapshot(t))
+	b := NewBuilder("/tmp/substrate-pin", true)
 	spec := b.Bootstrap(testSetup())
 
 	for _, want := range []string{
@@ -100,31 +141,33 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 		"BUCKET_NAME=ate-snapshots-acme-2c2cf930b4f9d8c2",
 		"KO_DOCKER_REPO=gcr.io/acme/ate-images",
 		"NO_DEV_ENV=1",
-		"VERSION=vendored-0123456789ab",
+		"VERSION=substrate-" + ShortCommit(),
 	} {
 		if !slices.Contains(spec.Env, want) {
 			t.Errorf("Bootstrap env missing %q", want)
 		}
 	}
-	if spec.Argv[0] != "go" || spec.Argv[2] != "./tools/setup-gcp" {
+	if !strings.Contains(spec.Argv[2], "go run ./tools/setup-gcp bootstrap") {
 		t.Errorf("unexpected argv: %v", spec.Argv)
 	}
 }
 
 func TestDeploySpecs(t *testing.T) {
-	b := NewBuilder(fakeSnapshot(t))
+	b := NewBuilder("/tmp/substrate-pin", true)
 	st := testSetup()
 
 	deploy := b.DeployAteSystem(st)
-	if got := deploy.Argv; got[2] != "./cmd/ate-setup" || got[3] != "deploy" || got[4] != "ate-system" {
-		t.Errorf("deploy argv = %v", got)
+	if !strings.Contains(deploy.Argv[2], "go run ./cmd/ate-setup deploy ate-system") {
+		t.Errorf("deploy argv = %v", deploy.Argv)
 	}
-	if deploy.Dir != b.Root {
-		t.Errorf("deploy must run from the snapshot root, got %q", deploy.Dir)
+	// The script cds into the checkout itself, so Dir must stay unset — the
+	// tree may not exist yet when the command starts.
+	if deploy.Dir != "" {
+		t.Errorf("deploy must not pin Dir to the checkout, got %q", deploy.Dir)
 	}
 
 	demo := b.DeployDemo(st, "counter")
-	if got := demo.Argv[len(demo.Argv)-1]; got != "counter" {
+	if !strings.Contains(demo.Argv[2], "deploy demo counter") {
 		t.Errorf("demo argv = %v", demo.Argv)
 	}
 

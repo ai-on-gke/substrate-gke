@@ -15,9 +15,14 @@
 package doctor
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
 func TestGoVersionOf(t *testing.T) {
@@ -56,8 +61,10 @@ func TestRequiredGoVersionReadsGoMod(t *testing.T) {
 	if got := requiredGoVersion(dir); got != "1.26.3" {
 		t.Fatalf("requiredGoVersion = %q", got)
 	}
-	if got := requiredGoVersion(t.TempDir()); got != "" {
-		t.Fatalf("requiredGoVersion(missing) = %q", got)
+	// The checkout is absent until the first install step fetches it, so the
+	// Go check must still have a version to compare against.
+	if got := requiredGoVersion(t.TempDir()); got != snapshot.MinGoVersion {
+		t.Fatalf("requiredGoVersion(missing) = %q, want the pinned fallback %q", got, snapshot.MinGoVersion)
 	}
 }
 
@@ -68,9 +75,58 @@ func TestChecksIncludeTheFatalSet(t *testing.T) {
 			fatal[c.Key] = true
 		}
 	}
-	for _, key := range []string{"gcloud", "adc", "go", "network", "snapshot"} {
+	// git is fatal: the substrate tree is fetched with it, not vendored.
+	for _, key := range []string{"gcloud", "adc", "go", "network", "git"} {
 		if !fatal[key] {
 			t.Errorf("check %q should be fatal", key)
 		}
 	}
+	// The checkout is fetched on demand, so its absence must not block.
+	if fatal["snapshot"] {
+		t.Error(`check "snapshot" must not be fatal; it self-heals by fetching`)
+	}
+}
+
+// The pinned substrate can need a newer Go than the one installed. With
+// toolchain switching on (the default) that is not a blocker, so the check
+// must not fail the install for it.
+func TestGoCheckDefersToToolchainSwitching(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no go on PATH")
+	}
+	// An empty root makes requiredGoVersion fall back to the pinned version,
+	// which is newer than plenty of installed toolchains.
+	for _, c := range Checks(t.TempDir()) {
+		if c.Key != "go" {
+			continue
+		}
+		got := c.Run(context.Background())
+		if goToolchainMode(context.Background()) == "local" {
+			t.Skip("GOTOOLCHAIN=local on this machine; the strict path is expected")
+		}
+		if got.Status == Fail {
+			t.Errorf("go check must not fail when GOTOOLCHAIN can fetch the toolchain: %q", got.Detail)
+		}
+		return
+	}
+	t.Fatal(`no "go" check found`)
+}
+
+// A missing checkout should warn rather than fail, and say where it will land.
+func TestSnapshotCheckWarnsBeforeTheFirstFetch(t *testing.T) {
+	root := t.TempDir()
+	for _, c := range Checks(root) {
+		if c.Key != "snapshot" {
+			continue
+		}
+		got := c.Run(context.Background())
+		if got.Status != Warn {
+			t.Fatalf("status = %v, want Warn", got.Status)
+		}
+		if !strings.Contains(got.Detail, root) || !strings.Contains(got.Detail, snapshot.ShortCommit()) {
+			t.Errorf("detail should name the destination and pin, got %q", got.Detail)
+		}
+		return
+	}
+	t.Fatal(`no "snapshot" check found`)
 }

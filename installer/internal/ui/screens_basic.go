@@ -74,7 +74,7 @@ func (s *welcomeScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString("\n" + theme.Logo() + "\n\n")
 	b.WriteString(theme.Subtle.Render("High-density AI agent sandboxing on Kubernetes — GKE installer") + "\n")
-	b.WriteString(theme.Fainted.Render("vendored substrate: "+s.deps.Builder.Version) + "\n\n")
+	b.WriteString(theme.Fainted.Render("substrate: "+s.deps.Builder.Version) + "\n\n")
 
 	tracks := []struct{ name, desc string }{
 		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster."},

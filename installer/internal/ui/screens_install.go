@@ -662,7 +662,7 @@ func (s *completeScreen) View(w int) string {
 	next := theme.Title.Render("Next steps") + "\n" +
 		theme.CommandLine.Render("kubectl port-forward -n ate-system svc/atenet-router 8000:80") + "\n" +
 		theme.Subtle.Render("then, if you deployed the counter demo:") + "\n" +
-		theme.CommandLine.Render(`go install ./cmd/kubectl-ate    # run inside the vendored substrate/ tree`) + "\n" +
+		theme.CommandLine.Render(`go install ./cmd/kubectl-ate    # run inside the substrate checkout`) + "\n" +
 		theme.CommandLine.Render("kubectl ate create atespace demo") + "\n" +
 		theme.CommandLine.Render("kubectl ate create actor my-counter-1 -a demo --template=ate-demo-counter/counter") + "\n" +
 		theme.CommandLine.Render(`curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" http://localhost:8000/`)
