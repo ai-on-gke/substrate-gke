@@ -207,6 +207,33 @@ func TestFetchPreambleQuotesPathsSafely(t *testing.T) {
 	}
 }
 
+// The Filestore script interpolates wizard answers into gcloud invocations for
+// the same reason the fetch preamble interpolates paths, and needs the same
+// guarantee: whatever the user typed reaches the command as literal text.
+func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
+	st := testSetup()
+	st.ProjectID = "acme `id -u`"
+	st.ClusterName = "clu'ster $HOME"
+	st.Zone = "us-central1-a; id -u"
+
+	script := NewBuilder(fakeCheckout(t), false).DeployFilestoreCSI(st).Argv[2]
+	for _, answer := range []string{st.ProjectID, st.ClusterName, st.Zone} {
+		quoted := shellQuote(answer)
+		if !strings.Contains(script, quoted) {
+			t.Errorf("answer %q is not quoted in the script:\n%s", answer, script)
+		}
+		// Quoting is only worth anything if bash agrees, including for the
+		// embedded single quote, which cannot be escaped inside '...'.
+		out, err := exec.Command("bash", "-c", "printf '%s' "+quoted).Output()
+		if err != nil {
+			t.Fatalf("%q: %v", answer, err)
+		}
+		if string(out) != answer {
+			t.Errorf("shell resolved %q to %q, want it verbatim", answer, out)
+		}
+	}
+}
+
 // A user-supplied tree must be used as-is, never overwritten by a fetch.
 func TestEnsureLeavesAnExplicitCheckoutAlone(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
