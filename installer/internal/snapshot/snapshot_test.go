@@ -127,9 +127,61 @@ func TestEnsureStagesTheTreeAndPublishesItAtomically(t *testing.T) {
 	case marker > publish:
 		t.Errorf("the marker must land before the tree is published:\n%s", script)
 	}
-	// The shallow pack is dead weight once the working tree exists.
-	if !strings.Contains(script, `rm -rf "${STAGE}/.git"`) {
-		t.Errorf("fetch keeps the .git directory:\n%s", script)
+	// Reclaiming disk is Cleanup's job, after the install has succeeded. A
+	// fetch that deleted things could not be safely retried.
+	if strings.Contains(script, "rm -rf \"${STAGE}/.git\"") {
+		t.Errorf("the fetch must not reclaim disk; that is deferred to Cleanup:\n%s", script)
+	}
+}
+
+// Cleanup runs only after a successful install, so it may delete — but only
+// things this installer created.
+func TestCleanupReclaimsOnlyWhatTheInstallerCreated(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, treePrefix+"abc123456789")
+	mkdir := func(parts ...string) string {
+		p := filepath.Join(parts...)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	pack := mkdir(root, ".git")
+	tree := mkdir(root, "cmd", "ate-setup")
+	stale := mkdir(base, treePrefix+"0ldc0mm1t")
+	partial := mkdir(base, treePrefix+"abc123456789.partial")
+	unrelated := mkdir(base, "some-other-tool")
+
+	if err := NewBuilder(root, true).Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, gone := range []string{pack, stale, partial} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Errorf("%s should have been reclaimed", gone)
+		}
+	}
+	// The working tree survives: the exit summary points teardown at it.
+	if _, err := os.Stat(tree); err != nil {
+		t.Errorf("the checkout must survive cleanup: %v", err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("cleanup must not touch directories it did not create: %v", err)
+	}
+}
+
+// Deleting git history out of a tree the user pointed us at would be
+// destroying their work, not tidying ours.
+func TestCleanupNeverTouchesAnExplicitCheckout(t *testing.T) {
+	root := fakeCheckout(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewBuilder(root, false).Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		t.Errorf("cleanup deleted git history from a user-supplied checkout: %v", err)
 	}
 }
 

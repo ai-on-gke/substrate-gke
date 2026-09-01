@@ -83,6 +83,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Only once the install actually worked, and never against a simulated
+	// run, which fetched nothing and would otherwise delete real caches.
+	if app.Completed && !*dryRun {
+		if err := deps.Builder.Cleanup(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: could not tidy the substrate cache:", err)
+		}
+	}
+
 	printSummary(app, deps.Setup, root)
 }
 

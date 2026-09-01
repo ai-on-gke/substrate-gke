@@ -69,12 +69,16 @@ few seconds) into
 ```
 
 and later steps reuse it. The directory is keyed by commit, so bumping the pin fetches
-into a fresh directory instead of mutating the old one; old ones are yours to delete.
-Nothing is written into this repo, and `agent-substrate/substrate` is public, so the
-fetch needs no credentials.
+into a fresh directory instead of mutating the old one. Nothing is written into this
+repo, and `agent-substrate/substrate` is public, so the fetch needs no credentials.
 
 The tree is staged under a `.partial` suffix and moved into place only once it is
 complete, so interrupting a fetch costs you the download and nothing else.
+
+Once an install finishes successfully the installer tidies that cache: it drops the
+shallow git pack it checked the tree out from, and removes trees left behind by earlier
+pins. Nothing is deleted while an install could still be retried, and a checkout you
+supplied with `--substrate-root` is never touched.
 
 To point at your own checkout instead — handy when testing an unmerged change:
 

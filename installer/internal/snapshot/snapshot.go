@@ -22,6 +22,7 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,7 +70,7 @@ func Root(explicit string) (path string, managed bool, err error) {
 	if err != nil {
 		return "", false, fmt.Errorf("cannot locate a cache directory for the substrate checkout: %w", err)
 	}
-	return filepath.Join(cache, "substrate-gke", "substrate-"+ShortCommit()), true, nil
+	return filepath.Join(cache, "substrate-gke", treePrefix+ShortCommit()), true, nil
 }
 
 func isCheckout(dir string) bool {
@@ -93,6 +94,43 @@ func Fetched(root string, managed bool) bool {
 	}
 	_, err := os.Stat(filepath.Join(root, CompleteMarker))
 	return err == nil
+}
+
+// treePrefix names the per-commit cache directories, and is what Cleanup uses
+// to recognise trees this installer created.
+const treePrefix = "substrate-"
+
+// Cleanup reclaims cache disk after a successful install: the shallow pack the
+// working tree was checked out from, plus any trees and staging directories
+// left behind by earlier pins. The working tree itself stays, since the exit
+// summary points teardown at it.
+//
+// Both are deliberately deferred to a successful finish rather than done at
+// fetch time. While the install can still be retried there is no way to know
+// what a retry will need, and deleting is not reversible; once it has worked,
+// nothing is going to ask for the pack again.
+//
+// It never touches a user-supplied checkout — that tree, and its history,
+// belong to the user.
+func (b *Builder) Cleanup() error {
+	if !b.Managed {
+		return nil
+	}
+	errs := []error{os.RemoveAll(filepath.Join(b.Root, ".git"))}
+
+	base, keep := filepath.Dir(b.Root), filepath.Base(b.Root)
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	for _, e := range entries {
+		// Only ever remove siblings we would have created ourselves: trees
+		// from other pins, and the ".partial" a killed fetch leaves behind.
+		if name := e.Name(); name != keep && strings.HasPrefix(name, treePrefix) {
+			errs = append(errs, os.RemoveAll(filepath.Join(base, name)))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // shellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
@@ -175,11 +213,6 @@ func (b *Builder) ensure() []string {
 		fmt.Sprintf(`    git -C "${STAGE}" remote add origin %s`, RepoURL),
 		fmt.Sprintf(`    git -C "${STAGE}" fetch -q --depth 1 origin %s`, Commit),
 		`    git -C "${STAGE}" checkout -q FETCH_HEAD`,
-		// Nothing reads the repository after checkout — upstream's ko runner
-		// only shells out to `git describe` when VERSION is unset, and env()
-		// always sets it — so the shallow pack is dead weight next to the
-		// working tree it already produced.
-		`    rm -rf "${STAGE}/.git"`,
 		fmt.Sprintf(`    touch "${STAGE}/%s"`, CompleteMarker),
 		`    mv "${STAGE}" "${SUBSTRATE_DIR}"`,
 		fmt.Sprintf(`    echo "Fetched substrate@%s"`, ShortCommit()),
