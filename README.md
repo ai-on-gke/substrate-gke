@@ -54,17 +54,15 @@ Exiting and re-running is always safe; every step is idempotent.
 installer/   The wizard (Go, bubbletea). `go run .` from this directory works too.
 ```
 
-That is the whole repo. Upstream Substrate is **not** vendored here.
-
 ## How Substrate itself is obtained
 
 Upstream's installer builds the control-plane images from source with
 [ko](https://ko.build), so a Substrate source tree has to be on disk at install time —
 the manifests alone are not enough.
 
-Rather than vendoring it, the installer fetches it the same way it fetches the
-Filestore CSI driver overlay: a shallow `git` fetch, pinned to an exact upstream
-commit. The first install step that needs the tree downloads it (a few seconds) into
+Rather than vendoring it, the installer fetches it with a shallow `git` fetch pinned to
+an exact upstream commit. The first install step that needs the tree downloads it (a
+few seconds) into
 
 ```
 <user cache dir>/substrate-gke/substrate-<short commit>
