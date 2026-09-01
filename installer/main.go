@@ -115,5 +115,8 @@ func printSummary(app *ui.App, st *state.Setup, root string) {
 	}
 	fmt.Printf("\nThe substrate checkout is at %s\n", root)
 	fmt.Println("Tear down GCP resources with the upstream hack/teardown.sh, or delete")
-	fmt.Printf("the control plane with: (cd %s && go run ./cmd/ate-setup delete ate-system)\n", root)
+	// This line is meant to be pasted into a shell, so the path is quoted —
+	// a space in it would otherwise make the cd land somewhere else. The
+	// line above is prose, and reads better unquoted.
+	fmt.Printf("the control plane with: (cd %s && go run ./cmd/ate-setup delete ate-system)\n", snapshot.ShellQuote(root))
 }

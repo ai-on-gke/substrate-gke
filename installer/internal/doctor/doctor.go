@@ -72,6 +72,12 @@ func output(ctx context.Context, name string, args ...string) (string, error) {
 // managed reports whether the installer owns that checkout and will fetch it,
 // which decides whether the tools behind the fetch are hard requirements.
 func Checks(snapshotRoot string, managed bool) []Check {
+	// git is a hard requirement only when the installer still has a fetch to
+	// do. A user-supplied tree reduces the preamble to a bare `cd`, and a
+	// managed tree that already carries its completion marker takes the
+	// cached branch — neither runs a single git command.
+	needsGit := managed && !snapshot.Fetched(snapshotRoot, managed)
+
 	return []Check{
 		{
 			Key: "gcloud", Name: "Google Cloud SDK", Fatal: true,
@@ -109,7 +115,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 					// lets it switch to the version go.mod asks for. Only
 					// "auto" and "<version>+auto" download one.
 					tc := goToolchainMode(ctx)
-					switch toolchainSwitching(tc) {
+					switch toolchainSwitching(have, tc) {
 					case switchDownloads:
 						return Result{Pass,
 							fmt.Sprintf("%s; substrate needs go >= %s, which GOTOOLCHAIN=%s will fetch automatically", out, want, tc),
@@ -121,6 +127,13 @@ func Checks(snapshotRoot string, managed bool) []Check {
 						return Result{Warn,
 							fmt.Sprintf("go %s found, but substrate needs go >= %s; GOTOOLCHAIN=%s will only switch to a go%s already on PATH, never download one", have, want, tc, want),
 							"go env -w GOTOOLCHAIN=auto   # or install go" + want + " from https://go.dev/dl/"}
+					}
+					if !goVersionAtLeast(have, minSwitchingGo) {
+						// Setting GOTOOLCHAIN would not help here, so do not
+						// suggest it.
+						return Result{Fail,
+							fmt.Sprintf("go %s found, but substrate needs go >= %s, and toolchain switching only arrived in go %s — this go cannot fetch a newer one", have, want, minSwitchingGo),
+							"install go" + want + " from https://go.dev/dl/"}
 					}
 					return Result{Fail,
 						fmt.Sprintf("go %s found, but substrate needs go >= %s and GOTOOLCHAIN=%s will not fetch it", have, want, tc),
@@ -140,15 +153,13 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 		{
-			// Only load-bearing when the installer owns the checkout. With
-			// --substrate-root the fetch preamble is a bare `cd`, so git is
-			// merely nice to have — the optional Filestore CSI step still
-			// clones with it.
-			Key: "git", Name: "git", Fatal: managed,
+			Key: "git", Name: "git", Fatal: needsGit,
 			Run: func(ctx context.Context) Result {
 				if _, err := exec.LookPath("git"); err != nil {
-					if !managed {
-						return Result{Warn, "git not found; not needed for your own checkout, but the Filestore CSI step clones with it",
+					if !needsGit {
+						// Still worth flagging: the optional Filestore CSI
+						// step clones with it.
+						return Result{Warn, "git not found; the substrate tree does not need it here, but the Filestore CSI step clones with it",
 							"https://git-scm.com/downloads"}
 					}
 					return Result{Fail, "git not found; the installer fetches the pinned substrate tree with it",
@@ -198,7 +209,9 @@ func goVersionOf(versionOutput string) string {
 }
 
 // goToolchainMode reports GOTOOLCHAIN, defaulting to "auto" when it cannot be
-// read.
+// read. Go before 1.21 has no such variable and prints an empty line for it,
+// which lands on that default — harmless only because toolchainSwitching
+// discounts the mode entirely for those versions.
 func goToolchainMode(ctx context.Context) string {
 	out, err := output(ctx, "go", "env", "GOTOOLCHAIN")
 	if err != nil || out == "" {
@@ -206,6 +219,9 @@ func goToolchainMode(ctx context.Context) string {
 	}
 	return out
 }
+
+// minSwitchingGo is the first Go release that can switch toolchains at all.
+const minSwitchingGo = "1.21"
 
 // How a GOTOOLCHAIN value obtains a newer toolchain than the one installed.
 type switchMode int
@@ -222,9 +238,17 @@ const (
 	switchFromPath
 )
 
-// toolchainSwitching classifies a GOTOOLCHAIN value. The suffix after "+" is
-// what decides: "go1.21.0+auto" downloads, "go1.21.0" alone does not.
-func toolchainSwitching(mode string) switchMode {
+// toolchainSwitching classifies a GOTOOLCHAIN value for the Go release named
+// by have. The suffix after "+" is what decides: "go1.21.0+auto" downloads,
+// "go1.21.0" alone does not.
+//
+// have matters because toolchain switching itself only exists from go1.21.
+// Older releases ignore GOTOOLCHAIN and print nothing for it, so reading the
+// mode alone would take a stock 1.19/1.20 for one that fetches on demand.
+func toolchainSwitching(have, mode string) switchMode {
+	if !goVersionAtLeast(have, minSwitchingGo) {
+		return switchNever
+	}
 	if _, suffix, ok := strings.Cut(mode, "+"); ok {
 		mode = suffix
 	}

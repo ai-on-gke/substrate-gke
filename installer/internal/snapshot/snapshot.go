@@ -133,10 +133,10 @@ func (b *Builder) Cleanup() error {
 	return errors.Join(errs...)
 }
 
-// shellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
+// ShellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
 // double-quoted string, which bash still expands — a `$` or a backtick in the
 // path would be interpreted rather than taken literally.
-func shellQuote(s string) string {
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
@@ -196,25 +196,43 @@ const (
 //
 // The tree is staged in a sibling directory and renamed into place only once
 // it is complete, so interrupting a fetch leaves no half-tree that later runs
-// would mistake for a good cache. Paths are single-quoted because the shell
-// expands `$` and backticks inside double quotes.
+// would mistake for a good cache. The stage is a mktemp name rather than a
+// fixed ".partial": two wizards running at once would otherwise share one
+// staging path, and the interleaving where the second re-inits the stage the
+// first is about to mark complete publishes an empty tree that, marker and
+// all, no later run would ever distrust.
+//
+// Paths are single-quoted because the shell expands `$` and backticks inside
+// double quotes.
 func (b *Builder) ensure() []string {
 	if !b.Managed {
-		return []string{"cd " + shellQuote(b.Root)}
+		return []string{"cd " + ShellQuote(b.Root)}
 	}
 	return []string{
-		"SUBSTRATE_DIR=" + shellQuote(b.Root),
-		`STAGE="${SUBSTRATE_DIR}.partial"`,
+		"SUBSTRATE_DIR=" + ShellQuote(b.Root),
 		fmt.Sprintf(`if [ ! -e "${SUBSTRATE_DIR}/%s" ]; then`, CompleteMarker),
 		fmt.Sprintf(`    echo "%s@%s from %s..."`, FetchLine, ShortCommit(), RepoURL),
-		`    rm -rf "${SUBSTRATE_DIR}" "${STAGE}"`,
-		`    mkdir -p "${STAGE}"`,
+		`    rm -rf "${SUBSTRATE_DIR}"`,
+		`    mkdir -p "$(dirname "${SUBSTRATE_DIR}")"`,
+		`    STAGE=$(mktemp -d "${SUBSTRATE_DIR}.partial.XXXXXX")`,
+		// Nothing else knows this name, so a failure from here on has to
+		// clean up after itself. Ctrl-C needs the second trap: bash dies on
+		// an untrapped signal without ever running its EXIT handler, and
+		// exiting from the handler is what gets us back to that path.
+		`    trap 'rm -rf "${STAGE}"' EXIT`,
+		`    trap 'exit 130' INT TERM`,
 		`    git -C "${STAGE}" init -q`,
 		fmt.Sprintf(`    git -C "${STAGE}" remote add origin %s`, RepoURL),
 		fmt.Sprintf(`    git -C "${STAGE}" fetch -q --depth 1 origin %s`, Commit),
 		`    git -C "${STAGE}" checkout -q FETCH_HEAD`,
 		fmt.Sprintf(`    touch "${STAGE}/%s"`, CompleteMarker),
-		`    mv "${STAGE}" "${SUBSTRATE_DIR}"`,
+		// If a concurrent run published first, its tree is as good as ours;
+		// renaming onto it would only nest our stage inside it.
+		fmt.Sprintf(`    if [ -e "${SUBSTRATE_DIR}/%s" ]; then`, CompleteMarker),
+		`        rm -rf "${STAGE}"`,
+		`    else`,
+		`        mv "${STAGE}" "${SUBSTRATE_DIR}"`,
+		`    fi`,
 		fmt.Sprintf(`    echo "Fetched substrate@%s"`, ShortCommit()),
 		`else`,
 		fmt.Sprintf(`    echo "%s%s"`, CachedLine, ShortCommit()),
@@ -291,12 +309,14 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 }
 
 // DeployDemo deploys one of the upstream demo applications (for the wizard,
-// the counter demo).
+// the counter demo). name is quoted like every other value inTree splices
+// into a script: the only caller passes a literal today, but a demo name
+// picked from a list or typed in would otherwise reach bash as source.
 func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy demo " + name,
 		Display: "go run ./cmd/ate-setup deploy demo " + name,
-		Argv:    b.inTree("go run ./cmd/ate-setup deploy demo " + name),
+		Argv:    b.inTree("go run ./cmd/ate-setup deploy demo " + ShellQuote(name)),
 		Env:     b.env(st),
 		SimLines: append(b.fetchSimLines(),
 			"[step]: deploy_demo_"+name,
@@ -314,7 +334,7 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 	// Wizard answers reach this script as text, so they are quoted for the
 	// same reason the fetch preamble quotes its paths.
-	project, cluster, zone := shellQuote(st.ProjectID), shellQuote(st.ClusterName), shellQuote(st.Zone)
+	project, cluster, zone := ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone)
 	deployCmd := fmt.Sprintf("./deploy.sh --project-id %s", project)
 
 	script := strings.Join([]string{

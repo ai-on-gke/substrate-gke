@@ -218,7 +218,7 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 
 	script := NewBuilder(fakeCheckout(t), false).DeployFilestoreCSI(st).Argv[2]
 	for _, answer := range []string{st.ProjectID, st.ClusterName, st.Zone} {
-		quoted := shellQuote(answer)
+		quoted := ShellQuote(answer)
 		if !strings.Contains(script, quoted) {
 			t.Errorf("answer %q is not quoted in the script:\n%s", answer, script)
 		}
@@ -234,6 +234,51 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 	}
 }
 
+// inTree splices its argument into a bash script, so every value a caller
+// puts in that argument has to be quoted. Today's only demo name is a
+// literal; this keeps the seam closed if one ever comes from the user.
+func TestDeployDemoQuotesTheDemoName(t *testing.T) {
+	script := NewBuilder("/tmp/substrate-pin", true).DeployDemo(testSetup(), "counter; id -u").Argv[2]
+	if strings.Contains(script, "deploy demo counter; id -u") {
+		t.Errorf("demo name reaches bash unquoted:\n%s", script)
+	}
+	if !strings.Contains(script, "deploy demo "+ShellQuote("counter; id -u")) {
+		t.Errorf("demo name is not quoted:\n%s", script)
+	}
+}
+
+// Two wizards racing must not leave a marked-complete tree that is empty.
+func TestEnsureStagesUnderAUniquePath(t *testing.T) {
+	script := NewBuilder("/tmp/substrate-pin", true).Bootstrap(testSetup()).Argv[2]
+
+	if strings.Contains(script, `STAGE="${SUBSTRATE_DIR}.partial"`) {
+		t.Errorf("the staging path is shared between concurrent runs:\n%s", script)
+	}
+	if !strings.Contains(script, `STAGE=$(mktemp -d "${SUBSTRATE_DIR}.partial.XXXXXX")`) {
+		t.Errorf("the stage is not a per-process mktemp path:\n%s", script)
+	}
+	// The stage still has to be a sibling, or the publishing rename would
+	// cross a filesystem and stop being atomic.
+	if !strings.Contains(script, `mkdir -p "$(dirname "${SUBSTRATE_DIR}")"`) {
+		t.Errorf("mktemp has no parent directory to stage in:\n%s", script)
+	}
+	// A run that dies between mktemp and the rename must not strand the
+	// stage, since nothing else knows its name. The EXIT trap alone is not
+	// enough: bash skips it entirely when it dies on an untrapped signal,
+	// which is the Ctrl-C case.
+	if !strings.Contains(script, `trap 'rm -rf "${STAGE}"' EXIT`) {
+		t.Errorf("an interrupted fetch leaks its staging directory:\n%s", script)
+	}
+	if !strings.Contains(script, `trap 'exit 130' INT TERM`) {
+		t.Errorf("a signalled fetch never reaches its EXIT trap:\n%s", script)
+	}
+	// And if a concurrent run published first, renaming onto its tree would
+	// nest the stage inside it rather than replace it.
+	if !strings.Contains(script, `rm -rf "${STAGE}"`+"\n    else") {
+		t.Errorf("the loser of a publish race must discard its stage:\n%s", script)
+	}
+}
+
 // A user-supplied tree must be used as-is, never overwritten by a fetch.
 func TestEnsureLeavesAnExplicitCheckoutAlone(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
@@ -242,7 +287,7 @@ func TestEnsureLeavesAnExplicitCheckoutAlone(t *testing.T) {
 	if strings.Contains(script, "git ") {
 		t.Errorf("an explicit checkout must not be fetched over:\n%s", script)
 	}
-	if !strings.Contains(script, "cd "+shellQuote(b.Root)) {
+	if !strings.Contains(script, "cd "+ShellQuote(b.Root)) {
 		t.Errorf("script does not cd into the explicit checkout:\n%s", script)
 	}
 }
@@ -313,8 +358,12 @@ func TestDeploySpecs(t *testing.T) {
 	}
 
 	demo := b.DeployDemo(st, "counter")
-	if !strings.Contains(demo.Argv[2], "deploy demo counter") {
+	if !strings.Contains(demo.Argv[2], "deploy demo "+ShellQuote("counter")) {
 		t.Errorf("demo argv = %v", demo.Argv)
+	}
+	// Display is for the user to read, not for a shell to run.
+	if demo.Display != "go run ./cmd/ate-setup deploy demo counter" {
+		t.Errorf("demo display = %q", demo.Display)
 	}
 
 	st.AutoscaleMin, st.AutoscaleMax = 2, 9

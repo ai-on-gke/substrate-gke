@@ -70,8 +70,13 @@ func TestRequiredGoVersionReadsGoMod(t *testing.T) {
 
 func fatalKeys(t *testing.T, managed bool) map[string]bool {
 	t.Helper()
+	return fatalKeysAt(t, t.TempDir(), managed)
+}
+
+func fatalKeysAt(t *testing.T, root string, managed bool) map[string]bool {
+	t.Helper()
 	fatal := map[string]bool{}
-	for _, c := range Checks(t.TempDir(), managed) {
+	for _, c := range Checks(root, managed) {
 		if c.Fatal {
 			fatal[c.Key] = true
 		}
@@ -100,6 +105,18 @@ func TestGitIsOnlyFatalWhenTheInstallerFetches(t *testing.T) {
 	if fatal := fatalKeys(t, false); fatal["git"] {
 		t.Error(`check "git" must not be fatal for a user-supplied checkout`)
 	}
+	if fatal := fatalKeys(t, true); !fatal["git"] {
+		t.Error(`check "git" must be fatal when the installer still has to fetch`)
+	}
+	// A managed tree that is already fetched takes the cached branch of the
+	// preamble, which runs no git at all.
+	warm := t.TempDir()
+	if err := os.WriteFile(filepath.Join(warm, snapshot.CompleteMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fatal := fatalKeysAt(t, warm, true); fatal["git"] {
+		t.Error(`check "git" must not be fatal once the pinned tree is on disk`)
+	}
 	// The rest of the fatal set does not depend on who owns the checkout.
 	for _, key := range []string{"gcloud", "adc", "go", "network"} {
 		if !fatalKeys(t, false)[key] {
@@ -112,18 +129,26 @@ func TestGitIsOnlyFatalWhenTheInstallerFetches(t *testing.T) {
 // non-"local" value as safe passed the doctor and then died mid-bootstrap.
 func TestToolchainSwitching(t *testing.T) {
 	for _, tc := range []struct {
+		have string
 		mode string
 		want switchMode
 	}{
-		{"auto", switchDownloads},
-		{"go1.21.0+auto", switchDownloads},
-		{"local", switchNever},
-		{"go1.24.0", switchNever}, // a bare pin never switches
-		{"path", switchFromPath},
-		{"go1.24.0+path", switchFromPath},
+		{"1.24.0", "auto", switchDownloads},
+		{"1.24.0", "go1.21.0+auto", switchDownloads},
+		{"1.24.0", "local", switchNever},
+		{"1.24.0", "go1.24.0", switchNever}, // a bare pin never switches
+		{"1.24.0", "path", switchFromPath},
+		{"1.24.0", "go1.24.0+path", switchFromPath},
+
+		// Switching arrived in go1.21. Below that the mode is not just
+		// unhonoured, it is unset — `go env GOTOOLCHAIN` prints an empty
+		// line, which goToolchainMode reports as "auto".
+		{"1.20.7", "auto", switchNever},
+		{"1.19", "auto", switchNever},
+		{"1.21", "auto", switchDownloads},
 	} {
-		if got := toolchainSwitching(tc.mode); got != tc.want {
-			t.Errorf("toolchainSwitching(%q) = %v, want %v", tc.mode, got, tc.want)
+		if got := toolchainSwitching(tc.have, tc.mode); got != tc.want {
+			t.Errorf("toolchainSwitching(%q, %q) = %v, want %v", tc.have, tc.mode, got, tc.want)
 		}
 	}
 }
@@ -141,7 +166,12 @@ func TestGoCheckDefersToToolchainSwitching(t *testing.T) {
 		if c.Key != "go" {
 			continue
 		}
-		if toolchainSwitching(goToolchainMode(context.Background())) != switchDownloads {
+		ctx := context.Background()
+		out, err := output(ctx, "go", "version")
+		if err != nil {
+			t.Skip("cannot read the go version on this machine")
+		}
+		if toolchainSwitching(goVersionOf(out), goToolchainMode(ctx)) != switchDownloads {
 			t.Skip("GOTOOLCHAIN cannot fetch on this machine; the strict path is expected")
 		}
 		if got := c.Run(context.Background()); got.Status == Fail {
