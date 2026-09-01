@@ -14,7 +14,11 @@
 
 package steps
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
+)
 
 // feed applies lines in order and returns the final active index.
 func feed(items []ChecklistItem, lines []string) int {
@@ -29,7 +33,7 @@ func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 	items := Bootstrap()
 	// Item 0 is the substrate fetch, so the seven bootstrap phases sit at 1..7.
 	lines := []string{
-		"Fetching substrate@85d404a82379 from https://github.com/agent-substrate/substrate.git...",
+		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
 		"time=... msg=Starting full bootstrap...",
 		"time=... msg=Step 1/7: Enabling required APIs...",
 		"time=... msg=Step 2/7: Creating GKE Cluster...",
@@ -46,7 +50,7 @@ func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 
 // A warm cache prints a different line; it must still light up the fetch item.
 func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
-	if got := feed(Bootstrap(), []string{"Using cached substrate@85d404a82379"}); got != 0 {
+	if got := feed(Bootstrap(), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
 		t.Fatalf("active = %d, want 0 (fetch step)", got)
 	}
 }
