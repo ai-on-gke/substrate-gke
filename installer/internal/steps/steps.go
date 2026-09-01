@@ -49,7 +49,7 @@ func containsAny(subs ...string) func(string) bool {
 // preceded by the pinned substrate fetch this step pays for on a cold cache.
 func Bootstrap() []ChecklistItem {
 	return []ChecklistItem{
-		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, "Using cached substrate@")},
+		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Step 1/7")},
 		{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Step 2/7")},
 		{"Create the GCS snapshot bucket", contains("Step 3/7")},

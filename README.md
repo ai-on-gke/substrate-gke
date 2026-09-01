@@ -69,8 +69,12 @@ few seconds) into
 ```
 
 and later steps reuse it. The directory is keyed by commit, so bumping the pin fetches
-into a fresh directory instead of mutating the old one. Nothing is written into this
-repo, and `agent-substrate/substrate` is public, so the fetch needs no credentials.
+into a fresh directory instead of mutating the old one; old ones are yours to delete.
+Nothing is written into this repo, and `agent-substrate/substrate` is public, so the
+fetch needs no credentials.
+
+The tree is staged under a `.partial` suffix and moved into place only once it is
+complete, so interrupting a fetch costs you the download and nothing else.
 
 To point at your own checkout instead — handy when testing an unmerged change:
 
@@ -82,7 +86,9 @@ cd installer && go run . --substrate-root=/path/to/substrate
 
 Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion`
 next to it to match the `go` directive in that revision's `go.mod`. `make substrate-pin`
-prints the current values.
+prints the current values, and `make substrate-pin-check` verifies `MinGoVersion`
+against upstream's `go.mod` at that commit — run it after every bump, since a stale
+value lets the preflight doctor pass and the install then fail mid-bootstrap.
 
 ## Development
 

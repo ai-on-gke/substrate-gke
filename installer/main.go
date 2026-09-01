@@ -43,8 +43,11 @@ func main() {
 	)
 	flag.Parse()
 
+	// Fail here even under --dry-run: a bad --substrate-root would otherwise
+	// leave root empty, and an empty root reaches the exit summary as a
+	// teardown command whose `cd` target is missing entirely.
 	root, managed, err := snapshot.Root(*substrateRoot)
-	if err != nil && !*dryRun {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -52,7 +55,7 @@ func main() {
 	if *doctorMode {
 		fmt.Println("substrate-gke preflight doctor")
 		fmt.Println()
-		if fatal := doctor.RunCLI(context.Background(), doctor.Checks(root)); fatal > 0 {
+		if fatal := doctor.RunCLI(context.Background(), doctor.Checks(root, managed)); fatal > 0 {
 			fmt.Printf("\n%d fatal problem(s) found.\n", fatal)
 			os.Exit(1)
 		}
@@ -70,7 +73,7 @@ func main() {
 		Runner:  runner,
 		GCP:     &gcp.Client{DryRun: *dryRun},
 		Builder: snapshot.NewBuilder(root, managed),
-		Checks:  doctor.Checks(root),
+		Checks:  doctor.Checks(root, managed),
 		DryRun:  *dryRun,
 	}
 

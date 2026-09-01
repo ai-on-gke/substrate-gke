@@ -68,14 +68,21 @@ func TestRequiredGoVersionReadsGoMod(t *testing.T) {
 	}
 }
 
-func TestChecksIncludeTheFatalSet(t *testing.T) {
+func fatalKeys(t *testing.T, managed bool) map[string]bool {
+	t.Helper()
 	fatal := map[string]bool{}
-	for _, c := range Checks(t.TempDir()) {
+	for _, c := range Checks(t.TempDir(), managed) {
 		if c.Fatal {
 			fatal[c.Key] = true
 		}
 	}
-	// git is fatal: the substrate tree is fetched with it, not vendored.
+	return fatal
+}
+
+func TestChecksIncludeTheFatalSet(t *testing.T) {
+	fatal := fatalKeys(t, true)
+	// git is fatal when the installer owns the fetch: the tree comes down
+	// with it, rather than being vendored.
 	for _, key := range []string{"gcloud", "adc", "go", "network", "git"} {
 		if !fatal[key] {
 			t.Errorf("check %q should be fatal", key)
@@ -84,6 +91,40 @@ func TestChecksIncludeTheFatalSet(t *testing.T) {
 	// The checkout is fetched on demand, so its absence must not block.
 	if fatal["snapshot"] {
 		t.Error(`check "snapshot" must not be fatal; it self-heals by fetching`)
+	}
+}
+
+// With --substrate-root the fetch preamble is a bare `cd`, so a git-less host
+// can still install. Blocking there would refuse a flow the README advertises.
+func TestGitIsOnlyFatalWhenTheInstallerFetches(t *testing.T) {
+	if fatal := fatalKeys(t, false); fatal["git"] {
+		t.Error(`check "git" must not be fatal for a user-supplied checkout`)
+	}
+	// The rest of the fatal set does not depend on who owns the checkout.
+	for _, key := range []string{"gcloud", "adc", "go", "network"} {
+		if !fatalKeys(t, false)[key] {
+			t.Errorf("check %q should stay fatal regardless of --substrate-root", key)
+		}
+	}
+}
+
+// Only "auto" and "<version>+auto" download a newer toolchain. Treating every
+// non-"local" value as safe passed the doctor and then died mid-bootstrap.
+func TestToolchainSwitching(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want switchMode
+	}{
+		{"auto", switchDownloads},
+		{"go1.21.0+auto", switchDownloads},
+		{"local", switchNever},
+		{"go1.24.0", switchNever}, // a bare pin never switches
+		{"path", switchFromPath},
+		{"go1.24.0+path", switchFromPath},
+	} {
+		if got := toolchainSwitching(tc.mode); got != tc.want {
+			t.Errorf("toolchainSwitching(%q) = %v, want %v", tc.mode, got, tc.want)
+		}
 	}
 }
 
@@ -96,15 +137,14 @@ func TestGoCheckDefersToToolchainSwitching(t *testing.T) {
 	}
 	// An empty root makes requiredGoVersion fall back to the pinned version,
 	// which is newer than plenty of installed toolchains.
-	for _, c := range Checks(t.TempDir()) {
+	for _, c := range Checks(t.TempDir(), true) {
 		if c.Key != "go" {
 			continue
 		}
-		got := c.Run(context.Background())
-		if goToolchainMode(context.Background()) == "local" {
-			t.Skip("GOTOOLCHAIN=local on this machine; the strict path is expected")
+		if toolchainSwitching(goToolchainMode(context.Background())) != switchDownloads {
+			t.Skip("GOTOOLCHAIN cannot fetch on this machine; the strict path is expected")
 		}
-		if got.Status == Fail {
+		if got := c.Run(context.Background()); got.Status == Fail {
 			t.Errorf("go check must not fail when GOTOOLCHAIN can fetch the toolchain: %q", got.Detail)
 		}
 		return
@@ -115,7 +155,7 @@ func TestGoCheckDefersToToolchainSwitching(t *testing.T) {
 // A missing checkout should warn rather than fail, and say where it will land.
 func TestSnapshotCheckWarnsBeforeTheFirstFetch(t *testing.T) {
 	root := t.TempDir()
-	for _, c := range Checks(root) {
+	for _, c := range Checks(root, true) {
 		if c.Key != "snapshot" {
 			continue
 		}

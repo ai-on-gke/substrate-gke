@@ -77,8 +77,30 @@ func isCheckout(dir string) bool {
 	return err == nil
 }
 
-// Fetched reports whether the tree at root has already been fetched.
-func Fetched(root string) bool { return isCheckout(root) }
+// CompleteMarker is written at the top of a managed checkout once its fetch
+// has finished. Presence of the marker — not of go.mod — is what makes the
+// cache trustworthy: git checks files out in path order, so an interrupted
+// checkout can leave go.mod on disk without internal/ or vendor/, and keying
+// the cache on go.mod would treat that half-tree as good forever.
+const CompleteMarker = ".substrate-gke-complete"
+
+// Fetched reports whether the tree at root is ready to build from. A managed
+// checkout must carry its completion marker; a user-supplied one only has to
+// look like a checkout, since the installer never writes to it.
+func Fetched(root string, managed bool) bool {
+	if !managed {
+		return isCheckout(root)
+	}
+	_, err := os.Stat(filepath.Join(root, CompleteMarker))
+	return err == nil
+}
+
+// shellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
+// double-quoted string, which bash still expands — a `$` or a backtick in the
+// path would be interpreted rather than taken literally.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // Builder assembles execx.Specs rooted at the Substrate checkout.
 type Builder struct {
@@ -121,30 +143,48 @@ func (b *Builder) env(st *state.Setup) []string {
 	}
 }
 
-// FetchLine is the output the fetch preamble prints when it downloads the
-// tree; the install checklists key their "fetch" phase off it.
-const FetchLine = "Fetching substrate"
+// FetchLine and CachedLine are the two outcomes the fetch preamble reports.
+// The install checklists key their "fetch" phase off both, so they are
+// constants rather than literals: rewording an echo without updating the
+// matcher would silently stop that checklist row from ever lighting up.
+const (
+	FetchLine  = "Fetching substrate"
+	CachedLine = "Using cached substrate@"
+)
 
 // ensure returns the shell lines that guarantee the checkout exists and leave
 // the shell inside it. Fetching only the pinned commit at depth 1 keeps this
 // to a few seconds; a tree the user supplied is used as-is.
+//
+// The tree is staged in a sibling directory and renamed into place only once
+// it is complete, so interrupting a fetch leaves no half-tree that later runs
+// would mistake for a good cache. Paths are single-quoted because the shell
+// expands `$` and backticks inside double quotes.
 func (b *Builder) ensure() []string {
 	if !b.Managed {
-		return []string{fmt.Sprintf("cd %q", b.Root)}
+		return []string{"cd " + shellQuote(b.Root)}
 	}
 	return []string{
-		fmt.Sprintf("SUBSTRATE_DIR=%q", b.Root),
-		`if [ ! -e "${SUBSTRATE_DIR}/go.mod" ]; then`,
+		"SUBSTRATE_DIR=" + shellQuote(b.Root),
+		`STAGE="${SUBSTRATE_DIR}.partial"`,
+		fmt.Sprintf(`if [ ! -e "${SUBSTRATE_DIR}/%s" ]; then`, CompleteMarker),
 		fmt.Sprintf(`    echo "%s@%s from %s..."`, FetchLine, ShortCommit(), RepoURL),
-		`    rm -rf "${SUBSTRATE_DIR}"`,
-		`    mkdir -p "${SUBSTRATE_DIR}"`,
-		`    git -C "${SUBSTRATE_DIR}" init -q`,
-		fmt.Sprintf(`    git -C "${SUBSTRATE_DIR}" remote add origin %s`, RepoURL),
-		fmt.Sprintf(`    git -C "${SUBSTRATE_DIR}" fetch -q --depth 1 origin %s`, Commit),
-		`    git -C "${SUBSTRATE_DIR}" checkout -q FETCH_HEAD`,
+		`    rm -rf "${SUBSTRATE_DIR}" "${STAGE}"`,
+		`    mkdir -p "${STAGE}"`,
+		`    git -C "${STAGE}" init -q`,
+		fmt.Sprintf(`    git -C "${STAGE}" remote add origin %s`, RepoURL),
+		fmt.Sprintf(`    git -C "${STAGE}" fetch -q --depth 1 origin %s`, Commit),
+		`    git -C "${STAGE}" checkout -q FETCH_HEAD`,
+		// Nothing reads the repository after checkout — upstream's ko runner
+		// only shells out to `git describe` when VERSION is unset, and env()
+		// always sets it — so the shallow pack is dead weight next to the
+		// working tree it already produced.
+		`    rm -rf "${STAGE}/.git"`,
+		fmt.Sprintf(`    touch "${STAGE}/%s"`, CompleteMarker),
+		`    mv "${STAGE}" "${SUBSTRATE_DIR}"`,
 		fmt.Sprintf(`    echo "Fetched substrate@%s"`, ShortCommit()),
 		`else`,
-		fmt.Sprintf(`    echo "Using cached substrate@%s"`, ShortCommit()),
+		fmt.Sprintf(`    echo "%s%s"`, CachedLine, ShortCommit()),
 		`fi`,
 		`cd "${SUBSTRATE_DIR}"`,
 	}
@@ -163,7 +203,7 @@ func (b *Builder) fetchSimLines() []string {
 	if !b.Managed {
 		return nil
 	}
-	return []string{fmt.Sprintf("Using cached substrate@%s", ShortCommit())}
+	return []string{CachedLine + ShortCommit()}
 }
 
 // Bootstrap provisions GCP resources (APIs, cluster, bucket, IAM,
@@ -239,14 +279,17 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // to prevent conflicts with the Substrate overlay. It needs no Substrate
 // checkout of its own.
 func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
-	deployCmd := fmt.Sprintf("./deploy.sh --project-id %s", st.ProjectID)
+	// Wizard answers reach this script as text, so they are quoted for the
+	// same reason the fetch preamble quotes its paths.
+	project, cluster, zone := shellQuote(st.ProjectID), shellQuote(st.ClusterName), shellQuote(st.Zone)
+	deployCmd := fmt.Sprintf("./deploy.sh --project-id %s", project)
 
 	script := strings.Join([]string{
 		"set -euo pipefail",
-		fmt.Sprintf(`FILESTORE_ADDON=$(gcloud container clusters describe %s --project=%s --location=%s --format="value(addonsConfig.gcpFilestoreCsiDriverConfig.enabled)" 2>/dev/null || true)`, st.ClusterName, st.ProjectID, st.Zone),
+		fmt.Sprintf(`FILESTORE_ADDON=$(gcloud container clusters describe %s --project=%s --location=%s --format="value(addonsConfig.gcpFilestoreCsiDriverConfig.enabled)" 2>/dev/null || true)`, cluster, project, zone),
 		`if [[ "${FILESTORE_ADDON}" == "True" || "${FILESTORE_ADDON}" == "true" ]]; then`,
 		`    echo "Disabling managed GKE Filestore CSI Driver addon..."`,
-		fmt.Sprintf(`    gcloud container clusters update %s --project=%s --location=%s --update-addons=GcpFilestoreCsiDriver=DISABLED`, st.ClusterName, st.ProjectID, st.Zone),
+		fmt.Sprintf(`    gcloud container clusters update %s --project=%s --location=%s --update-addons=GcpFilestoreCsiDriver=DISABLED`, cluster, project, zone),
 		`fi`,
 		`TMP_DIR=$(mktemp -d)`,
 		`trap 'rm -rf "${TMP_DIR}"' EXIT`,

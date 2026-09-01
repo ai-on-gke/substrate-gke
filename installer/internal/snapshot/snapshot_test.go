@@ -16,6 +16,7 @@ package snapshot
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -101,9 +102,56 @@ func TestEnsureFetchesThePinnedCommitShallowly(t *testing.T) {
 			t.Errorf("fetch preamble missing %q:\n%s", want, script)
 		}
 	}
-	// Idempotent: an existing tree is reused rather than re-fetched.
-	if !strings.Contains(script, `if [ ! -e "${SUBSTRATE_DIR}/go.mod" ]; then`) {
-		t.Errorf("fetch preamble is not guarded by a cache check:\n%s", script)
+	// Idempotent: a complete tree is reused rather than re-fetched.
+	if !strings.Contains(script, `if [ ! -e "${SUBSTRATE_DIR}/`+CompleteMarker+`" ]; then`) {
+		t.Errorf("fetch preamble is not guarded by the completion marker:\n%s", script)
+	}
+}
+
+// An interrupted fetch must not leave anything the next run would trust, so
+// the tree is built in a staging directory and moved into place at the end.
+func TestEnsureStagesTheTreeAndPublishesItAtomically(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	script := b.Bootstrap(testSetup()).Argv[2]
+
+	if strings.Contains(script, `git -C "${SUBSTRATE_DIR}"`) {
+		t.Errorf("git must work in the staging dir, never in the published one:\n%s", script)
+	}
+	marker := strings.Index(script, `touch "${STAGE}/`+CompleteMarker)
+	publish := strings.Index(script, `mv "${STAGE}" "${SUBSTRATE_DIR}"`)
+	switch {
+	case marker < 0:
+		t.Errorf("fetch never writes the completion marker:\n%s", script)
+	case publish < 0:
+		t.Errorf("fetch never moves the staged tree into place:\n%s", script)
+	case marker > publish:
+		t.Errorf("the marker must land before the tree is published:\n%s", script)
+	}
+	// The shallow pack is dead weight once the working tree exists.
+	if !strings.Contains(script, `rm -rf "${STAGE}/.git"`) {
+		t.Errorf("fetch keeps the .git directory:\n%s", script)
+	}
+}
+
+// Go's %q yields a double-quoted string, which bash still expands. A cache or
+// --substrate-root path containing `$` or a backtick must survive verbatim.
+func TestFetchPreambleQuotesPathsSafely(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "a $HOME `id -u` dir")
+	for _, managed := range []bool{true, false} {
+		script := NewBuilder(root, managed).Bootstrap(testSetup()).Argv[2]
+		// Run just the assignments, then ask the shell what it resolved.
+		prelude, _, ok := strings.Cut(script, "\nif [ ")
+		if !ok {
+			prelude, _, _ = strings.Cut(script, "\ngo run ")
+			prelude = strings.Replace(prelude, "cd ", "SUBSTRATE_DIR=", 1)
+		}
+		out, err := exec.Command("bash", "-c", prelude+"\nprintf '%s' \"${SUBSTRATE_DIR}\"").Output()
+		if err != nil {
+			t.Fatalf("managed=%v: %v\n%s", managed, err, prelude)
+		}
+		if string(out) != root {
+			t.Errorf("managed=%v: shell resolved the path to %q, want the literal %q", managed, out, root)
+		}
 	}
 }
 
@@ -115,8 +163,27 @@ func TestEnsureLeavesAnExplicitCheckoutAlone(t *testing.T) {
 	if strings.Contains(script, "git ") {
 		t.Errorf("an explicit checkout must not be fetched over:\n%s", script)
 	}
-	if !strings.Contains(script, "cd \""+b.Root+"\"") {
+	if !strings.Contains(script, "cd "+shellQuote(b.Root)) {
 		t.Errorf("script does not cd into the explicit checkout:\n%s", script)
+	}
+}
+
+// git checks files out in path order, so an interrupted fetch can leave go.mod
+// behind without the rest of the tree. Only the marker proves completeness.
+func TestFetchedRequiresTheCompletionMarker(t *testing.T) {
+	partial := fakeCheckout(t)
+	if Fetched(partial, true) {
+		t.Error("a managed checkout without its marker must not count as fetched")
+	}
+	// A user-supplied tree never carries a marker and must still be usable.
+	if !Fetched(partial, false) {
+		t.Error("an explicit checkout should be usable as-is")
+	}
+	if err := os.WriteFile(filepath.Join(partial, CompleteMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !Fetched(partial, true) {
+		t.Error("a marked checkout must count as fetched")
 	}
 }
 
