@@ -68,6 +68,12 @@ type NodePool struct {
 // wizard can be exercised without a GCP project.
 type Client struct {
 	DryRun bool
+	// crmBase overrides the Cloud Resource Manager endpoint; tests point it
+	// at a local server. Empty means the real one.
+	crmBase string
+	// token overrides how MissingPermissions obtains an access token; nil
+	// means asking gcloud for the application-default one.
+	token func(ctx context.Context) (string, error)
 }
 
 const cmdTimeout = 60 * time.Second
