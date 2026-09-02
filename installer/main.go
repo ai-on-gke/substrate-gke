@@ -40,8 +40,18 @@ func main() {
 		doctorMode    = flag.Bool("doctor", false, "run the preflight checks and exit")
 		dryRun        = flag.Bool("dry-run", false, "walk the full wizard without touching GCP (simulated commands)")
 		substrateRoot = flag.String("substrate-root", "", "use an existing substrate checkout instead of fetching the pinned one")
+		fetchTree     = flag.String("fetch-substrate", "", "fetch a substrate checkout into this directory and exit (the pinned commit, or --commit)")
+		fetchCommit   = flag.String("commit", "", "with --fetch-substrate: the commit to fetch instead of the pinned one")
 	)
 	flag.Parse()
+
+	if *fetchTree != "" {
+		if err := snapshot.FetchTree(context.Background(), *fetchTree, *fetchCommit); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Fail here even under --dry-run: a bad --substrate-root would otherwise
 	// leave root empty, and an empty root reaches the exit summary as a

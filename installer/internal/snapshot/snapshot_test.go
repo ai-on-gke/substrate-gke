@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -463,6 +464,49 @@ func testSetup(t *testing.T) *state.Setup {
 		t.Fatalf("ApplyProjectDefaults: %v", err)
 	}
 	return st
+}
+
+// The fetch has to produce a usable checkout of exactly the commit asked for,
+// and refuse to write into a directory that already holds one.
+func TestFetchTreeChecksOutTheCommit(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", origin}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "-q")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "first")
+	if err := os.WriteFile(filepath.Join(origin, "go.mod"), []byte("module example.com/substrate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "go.mod")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "second")
+	want := run("rev-parse", "HEAD")
+
+	dir := filepath.Join(t.TempDir(), "tree")
+	if err := fetchTree(context.Background(), dir, origin, want); err != nil {
+		t.Fatalf("fetchTree: %v", err)
+	}
+	got, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse in the fetched tree: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("fetched tree is at %s, want %s", got, want)
+	}
+	if !isCheckout(dir) {
+		t.Errorf("fetched tree has no go.mod")
+	}
+	if err := fetchTree(context.Background(), dir, origin, want); err == nil {
+		t.Errorf("fetching over an existing checkout should be refused")
+	}
 }
 
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
