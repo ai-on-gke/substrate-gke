@@ -119,8 +119,8 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 		t.Fatalf("after doctor: %v", app.mach.Current())
 	}
 	// Project ID was prefilled by the dry-run gcloud client; enter moves
-	// focus to the zone field, the final enter validates and advances.
-	press("enter", "enter")
+	// focus to zone, then snapshot bucket, then validates and advances.
+	press("enter", "enter", "enter")
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("after project: %v", app.mach.Current())
 	}
@@ -177,10 +177,10 @@ func TestCreateNewClusterPath(t *testing.T) {
 		}
 	}
 
-	press("enter", "enter")    // welcome, doctor
-	press("enter", "enter")    // project fields
-	press("3", "enter")        // "create a new cluster" row (2 clusters + create)
-	pump(t, app, key("enter")) // accept the default name
+	press("enter", "enter")          // welcome, doctor
+	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
+	press("3", "enter")              // "create a new cluster" row (2 clusters + create)
+	pump(t, app, key("enter"))       // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
 	}
@@ -241,8 +241,8 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 		}
 	}
 
-	press("enter", "enter") // welcome, doctor
-	press("enter", "enter") // project fields
+	press("enter", "enter")          // welcome, doctor
+	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
 	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
 	press("2", "enter")
 	press("y")
@@ -250,8 +250,76 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 	if app.deps.Setup.ClusterName != "legacy-prod" {
 		t.Fatalf("ClusterName = %q, want legacy-prod", app.deps.Setup.ClusterName)
 	}
-	wantBucket := "ate-snapshots-my-substrate-project-37b310fa401c8677"
+	wantBucket := "ate-snapshots-my-substrate-project-us-central1"
 	if app.deps.Setup.BucketName != wantBucket {
 		t.Fatalf("BucketName = %q, want %q", app.deps.Setup.BucketName, wantBucket)
+	}
+}
+
+func TestCustomBucketNameQuickstartTrack(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	for _, m := range runCmd(app.Init()) {
+		pump(t, app, m)
+	}
+
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+
+	// Welcome: Quickstart (enter)
+	press("enter")
+	// Doctor: continue (enter)
+	press("enter")
+	// Project screen:
+	// fields: 0:ProjectID, 1:Zone, 2:Bucket
+	press("enter", "enter")
+	for _, r := range "my-custom-bucket" {
+		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	press("enter") // submit from field 2
+
+	// Cluster screen: pick row 2 (legacy-prod)
+	press("2", "enter")
+	press("y")
+
+	if app.deps.Setup.BucketName != "my-custom-bucket" {
+		t.Fatalf("BucketName = %q, want my-custom-bucket", app.deps.Setup.BucketName)
+	}
+}
+
+func TestCustomBucketNameAdvancedTrack(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	for _, m := range runCmd(app.Init()) {
+		pump(t, app, m)
+	}
+
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+
+	// Welcome: select Advanced track (row 2)
+	press("2", "enter")
+	// Doctor: continue
+	press("enter")
+	// Project screen in Advanced track:
+	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo
+	press("enter", "enter")
+	for _, r := range "my-custom-bucket" {
+		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	press("enter", "enter", "enter", "enter", "enter") // submit from field 6
+
+	// Cluster screen: pick row 2 (legacy-prod)
+	press("2", "enter")
+	press("y")
+
+	if app.deps.Setup.BucketName != "my-custom-bucket" {
+		t.Fatalf("BucketName = %q, want my-custom-bucket", app.deps.Setup.BucketName)
 	}
 }

@@ -90,7 +90,7 @@ func TestPinIsAFullCommitSHA(t *testing.T) {
 // The fetch must name an exact commit: a branch or tag would silently drift.
 func TestEnsureFetchesThePinnedCommitShallowly(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
-	script := b.Bootstrap(testSetup()).Argv[2]
+	script := b.Bootstrap(testSetup(t)).Argv[2]
 
 	for _, want := range []string{
 		"fetch -q --depth 1 " + RepoURL + " " + Commit,
@@ -111,7 +111,7 @@ func TestEnsureFetchesThePinnedCommitShallowly(t *testing.T) {
 // the tree is built in a staging directory and moved into place at the end.
 func TestEnsureStagesTheTreeAndPublishesItAtomically(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
-	script := b.Bootstrap(testSetup()).Argv[2]
+	script := b.Bootstrap(testSetup(t)).Argv[2]
 
 	if strings.Contains(script, `git -C "${SUBSTRATE_DIR}"`) {
 		t.Errorf("git must work in the staging dir, never in the published one:\n%s", script)
@@ -199,12 +199,12 @@ func TestCleanupNeverTouchesAnExplicitCheckout(t *testing.T) {
 // than trusting whatever kubectl context is ambient, and must reclaim its
 // temporary checkout — a paste must not strand a full tree in $TMPDIR.
 func TestTeardownCommandStandsAlone(t *testing.T) {
-	cmd := TeardownCommand(testSetup(), "")
+	cmd := TeardownCommand(testSetup(t), "")
 	for _, want := range []string{
 		RepoURL, Commit, "mktemp -d",
 		`trap 'rm -rf "$d"' EXIT`,
 		"PROJECT_ID=" + ShellQuote("acme"),
-		"CLUSTER_NAME=" + ShellQuote("substrate-poc"),
+		"CLUSTER_NAME=" + ShellQuote("substrate-test"),
 		"CLUSTER_LOCATION=" + ShellQuote("us-west1-c"),
 		"NO_DEV_ENV=1 go run ./cmd/ate-setup delete ate-system",
 	} {
@@ -225,10 +225,10 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 // still pins the target cluster through the environment.
 func TestTeardownCommandUsesAnExplicitCheckout(t *testing.T) {
 	root := "/Users/John Smith/My Projects/substrate"
-	cmd := TeardownCommand(testSetup(), root)
+	cmd := TeardownCommand(testSetup(t), root)
 	for _, want := range []string{
 		"cd " + ShellQuote(root),
-		"CLUSTER_NAME=" + ShellQuote("substrate-poc"),
+		"CLUSTER_NAME=" + ShellQuote("substrate-test"),
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("teardown command missing %q:\n%s", want, cmd)
@@ -244,7 +244,7 @@ func TestTeardownCommandUsesAnExplicitCheckout(t *testing.T) {
 func TestFetchPreambleQuotesPathsSafely(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "a $HOME `id -u` dir")
 	for _, managed := range []bool{true, false} {
-		script := NewBuilder(root, managed).Bootstrap(testSetup()).Argv[2]
+		script := NewBuilder(root, managed).Bootstrap(testSetup(t)).Argv[2]
 		// Run just the assignments, then ask the shell what it resolved.
 		prelude, _, ok := strings.Cut(script, "\nif [ ")
 		if !ok {
@@ -265,7 +265,7 @@ func TestFetchPreambleQuotesPathsSafely(t *testing.T) {
 // the same reason the fetch preamble interpolates paths, and needs the same
 // guarantee: whatever the user typed reaches the command as literal text.
 func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
-	st := testSetup()
+	st := testSetup(t)
 	st.ProjectID = "acme `id -u`"
 	st.ClusterName = "clu'ster $HOME"
 	st.Zone = "us-central1-a; id -u"
@@ -292,7 +292,7 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 // puts in that argument has to be quoted. Today's only demo name is a
 // literal; this keeps the seam closed if one ever comes from the user.
 func TestDeployDemoQuotesTheDemoName(t *testing.T) {
-	script := NewBuilder("/tmp/substrate-pin", true).DeployDemo(testSetup(), "counter; id -u").Argv[2]
+	script := NewBuilder("/tmp/substrate-pin", true).DeployDemo(testSetup(t), "counter; id -u").Argv[2]
 	if strings.Contains(script, "deploy demo counter; id -u") {
 		t.Errorf("demo name reaches bash unquoted:\n%s", script)
 	}
@@ -303,7 +303,7 @@ func TestDeployDemoQuotesTheDemoName(t *testing.T) {
 
 // Two wizards racing must not leave a marked-complete tree that is empty.
 func TestEnsureStagesUnderAUniquePath(t *testing.T) {
-	script := NewBuilder("/tmp/substrate-pin", true).Bootstrap(testSetup()).Argv[2]
+	script := NewBuilder("/tmp/substrate-pin", true).Bootstrap(testSetup(t)).Argv[2]
 
 	if strings.Contains(script, `STAGE="${SUBSTRATE_DIR}.partial"`) {
 		t.Errorf("the staging path is shared between concurrent runs:\n%s", script)
@@ -400,7 +400,7 @@ func TestLockReclaimsOrphanedStages(t *testing.T) {
 // A user-supplied tree must be used as-is, never overwritten by a fetch.
 func TestEnsureLeavesAnExplicitCheckoutAlone(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
-	script := b.Bootstrap(testSetup()).Argv[2]
+	script := b.Bootstrap(testSetup(t)).Argv[2]
 
 	if strings.Contains(script, "git ") {
 		t.Errorf("an explicit checkout must not be fetched over:\n%s", script)
@@ -429,25 +429,28 @@ func TestFetchedRequiresTheCompletionMarker(t *testing.T) {
 	}
 }
 
-func testSetup() *state.Setup {
+func testSetup(t *testing.T) *state.Setup {
+	t.Helper()
 	st := state.NewSetup()
 	st.ProjectID = "acme"
 	st.ProjectNumber = "42"
-	st.ApplyProjectDefaults()
+	if err := st.ApplyProjectDefaults(); err != nil {
+		t.Fatalf("ApplyProjectDefaults: %v", err)
+	}
 	return st
 }
 
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
-	spec := b.Bootstrap(testSetup())
+	spec := b.Bootstrap(testSetup(t))
 
 	for _, want := range []string{
 		"PROJECT_ID=acme",
 		"PROJECT_NUMBER=42",
-		"CLUSTER_NAME=substrate-poc",
+		"CLUSTER_NAME=substrate-test",
 		"CLUSTER_LOCATION=us-west1-c",
 		"GCE_REGION=us-west1",
-		"BUCKET_NAME=ate-snapshots-acme-2c2cf930b4f9d8c2",
+		"BUCKET_NAME=ate-snapshots-acme-us-west1-c",
 		"KO_DOCKER_REPO=gcr.io/acme/ate-images",
 		"NO_DEV_ENV=1",
 		"VERSION=substrate-" + ShortCommit(),
@@ -463,7 +466,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 
 func TestDeploySpecs(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
-	st := testSetup()
+	st := testSetup(t)
 
 	deploy := b.DeployAteSystem(st)
 	if !strings.Contains(deploy.Argv[2], "go run ./cmd/ate-setup deploy ate-system") {
