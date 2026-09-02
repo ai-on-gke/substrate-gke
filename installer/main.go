@@ -142,6 +142,19 @@ func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned boo
 		fmt.Printf("\nYour substrate checkout at %s is untouched.\n", b.Root)
 		teardown = snapshot.TeardownCommand(st, b.Root)
 	}
-	fmt.Println("\nTear down GCP resources with the upstream hack/teardown.sh, or delete")
-	fmt.Printf("the control plane with:\n  %s\n", teardown)
+	// Two teardown depths: delete only the control plane (keep the cluster),
+	// or delete everything this install created and stop the charges. The
+	// cleanup invocation carries the wizard's own answers so it can be run
+	// from a fresh clone weeks later.
+	fmt.Printf("\nDelete the Substrate control plane (keeping the cluster) with:\n  %s\n", teardown)
+	fmt.Println("\nDelete everything this install created in GCP — the cluster, the")
+	fmt.Printf("snapshot bucket, IAM bindings, and dashboards — with:\n  %s\n", cleanupCommand(st))
+}
+
+// cleanupCommand renders the tools/cleanup-gcp invocation for this install.
+// Quoted for pasting, like the teardown command.
+func cleanupCommand(st *state.Setup) string {
+	return fmt.Sprintf("./tools/cleanup-gcp --project %s --cluster %s --location %s --bucket %s",
+		snapshot.ShellQuote(st.ProjectID), snapshot.ShellQuote(st.ClusterName),
+		snapshot.ShellQuote(st.Zone), snapshot.ShellQuote(st.BucketName))
 }

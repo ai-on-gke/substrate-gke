@@ -116,3 +116,51 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	return string(out)
 }
+
+// Users get stuck with leftover charges unless the summary hands them a
+// complete GCP cleanup, carrying their own answers, quoted for pasting.
+func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
+	st := state.NewSetup()
+	st.ProjectID = "acme"
+	st.BucketName = "ate-snapshots-acme-us-west1-c"
+
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, st, snapshot.NewBuilder(t.TempDir(), true), true)
+	})
+
+	for _, want := range []string{
+		"./tools/cleanup-gcp",
+		"--project " + snapshot.ShellQuote("acme"),
+		"--cluster " + snapshot.ShellQuote(st.ClusterName),
+		"--location " + snapshot.ShellQuote(st.Zone),
+		"--bucket " + snapshot.ShellQuote(st.BucketName),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary cleanup line missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// The summary tells users to paste the script's invocation, so the script has
+// to exist, parse, and be executable.
+func TestCleanupGcpScriptIsRunnable(t *testing.T) {
+	const script = "../tools/cleanup-gcp"
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("the summary points at a script that does not exist: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("%s is not executable", script)
+	}
+	if err := exec.Command("bash", "-n", script).Run(); err != nil {
+		t.Errorf("%s is not valid shell: %v", script, err)
+	}
+	// Argument validation must fire before anything touches gcloud.
+	out, err := exec.Command("bash", script, "--project", "acme").CombinedOutput()
+	if err == nil {
+		t.Errorf("script accepted incomplete arguments:\n%s", out)
+	}
+	if !strings.Contains(string(out), "CLUSTER_NAME") {
+		t.Errorf("script did not name the missing argument:\n%s", out)
+	}
+}
