@@ -221,6 +221,30 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 	}
 }
 
+// The kubectl-ate install has the same constraints as the teardown — the
+// managed checkout is gone by the time the user reads it — plus one of its
+// own: it cannot be `go install <module>@<pin>`, which Go refuses for this
+// module because its go.mod replaces k8s.io/apimachinery with a local
+// third_party path. It must build from a fetched checkout instead.
+func TestKubectlAteInstallStandsAlone(t *testing.T) {
+	cmd := KubectlAteInstall()
+	for _, want := range []string{
+		RepoURL, Commit, "mktemp -d",
+		`trap 'rm -rf "$d"' EXIT`,
+		"go install ./cmd/kubectl-ate",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("kubectl-ate install missing %q:\n%s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, ModulePath+"/cmd/kubectl-ate@") {
+		t.Errorf("`go install module@version` is refused for a module with replace directives:\n%s", cmd)
+	}
+	if err := exec.Command("bash", "-n", "-c", cmd).Run(); err != nil {
+		t.Errorf("kubectl-ate install is not valid shell: %v\n%s", err, cmd)
+	}
+}
+
 // The variant for a user-supplied checkout cds there instead of fetching, and
 // still pins the target cluster through the environment.
 func TestTeardownCommandUsesAnExplicitCheckout(t *testing.T) {
