@@ -45,6 +45,10 @@ type projValidMsg struct {
 	owner  *projectScreen
 	number string
 	err    error
+	// missing are bootstrap permissions the credentials provably lack;
+	// permErr means the permission probe itself could not run.
+	missing []gcp.RequiredPermission
+	permErr error
 }
 
 type projectScreen struct {
@@ -53,6 +57,10 @@ type projectScreen struct {
 	focus      int
 	validating bool
 	errText    string
+	// permAcked is set once a permission problem has been shown, so the next
+	// enter proceeds anyway: the probe is advisory (a role might be granted
+	// minutes from now), but failing here beats failing mid-bootstrap.
+	permAcked bool
 }
 
 func newField(label, value, placeholder string, set func(*state.Setup, string)) field {
@@ -114,10 +122,35 @@ func (s *projectScreen) submit() tea.Cmd {
 	}
 	s.errText = ""
 	s.validating = true
+	acked := s.permAcked
 	return func() tea.Msg {
-		num, err := s.deps.GCP.ProjectNumber(context.Background(), pid)
-		return projValidMsg{s, num, err}
+		msg := projValidMsg{owner: s}
+		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
+		// Check the bootstrap permissions now rather than failing three
+		// screens later, mid-provision. Skipped once acknowledged.
+		if msg.err == nil && !acked {
+			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
+		}
+		return msg
 	}
+}
+
+// permProblem renders a missing-permission report (or a probe failure) with
+// the fix, ending with the escape hatch: the probe is authoritative about
+// today's policy but not about what an admin grants five minutes from now.
+func permProblem(projectID string, missing []gcp.RequiredPermission, permErr error) string {
+	var b strings.Builder
+	if permErr != nil {
+		fmt.Fprintf(&b, "Could not verify your IAM permissions on %s:\n%v\n", projectID, permErr)
+	} else {
+		fmt.Fprintf(&b, "Your application-default credentials lack permissions setup-gcp needs on %s:\n", projectID)
+		for _, p := range missing {
+			fmt.Fprintf(&b, "  %s — grant %s\n", p.Permission, p.Role)
+		}
+		fmt.Fprintf(&b, "Grant them with: gcloud projects add-iam-policy-binding %s --member=user:YOU --role=ROLE\n", projectID)
+	}
+	b.WriteString("Press [enter] again to continue anyway; the provision step may fail.")
+	return b.String()
 }
 
 func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
@@ -135,6 +168,11 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		s.validating = false
 		if m.err != nil {
 			s.errText = m.err.Error()
+			return nil
+		}
+		if len(m.missing) > 0 || m.permErr != nil {
+			s.permAcked = true
+			s.errText = permProblem(strings.TrimSpace(s.fields[0].input.Value()), m.missing, m.permErr)
 			return nil
 		}
 		st := s.deps.Setup
