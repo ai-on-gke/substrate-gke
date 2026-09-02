@@ -97,7 +97,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	for _, want := range []string{
 		"PROJECT_ID=acme",
 		"PROJECT_NUMBER=42",
-		"CLUSTER_NAME=substrate-poc",
+		"CLUSTER_NAME=substrate-test",
 		"CLUSTER_LOCATION=us-west1-c",
 		"GCE_REGION=us-west1",
 		"BUCKET_NAME=ate-snapshots-acme-us-west1-c",

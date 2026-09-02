@@ -168,7 +168,7 @@ func NewSetup() *Setup {
 		Network:      "default",
 		Subnetwork:   "default",
 		MachineType:  "c3-standard-4",
-		ClusterName:  "substrate-poc",
+		ClusterName:  "substrate-test",
 		NodePool:     "substrate-node-pool",
 		AutoscaleMin: 1,
 		AutoscaleMax: 5,
