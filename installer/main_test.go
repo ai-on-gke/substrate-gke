@@ -31,16 +31,35 @@ import (
 // user to cd into it.
 func TestSummaryDoesNotPointAtTheRemovedCache(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "substrate-4a2cb262dd62")
+	st := state.NewSetup()
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, true))
+		printSummary(&ui.App{Completed: true}, st, snapshot.NewBuilder(root, true), true)
 	})
 
 	if strings.Contains(out, root) {
 		t.Errorf("summary points at a directory cleanup removed:\n%s", out)
 	}
-	if !strings.Contains(out, snapshot.TeardownCommand()) {
+	if !strings.Contains(out, snapshot.TeardownCommand(st, "")) {
 		t.Errorf("summary does not offer a self-contained teardown:\n%s", out)
+	}
+}
+
+// Under --dry-run cleanup never runs, and it can also fail; either way a
+// tree (or an older cache) may still be on disk, and the summary must not
+// claim it was removed.
+func TestSummaryDoesNotClaimARemovalThatDidNotHappen(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "substrate-4a2cb262dd62")
+
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, true), false)
+	})
+
+	if strings.Contains(out, "has been removed") {
+		t.Errorf("summary claims a removal that did not happen:\n%s", out)
+	}
+	if !strings.Contains(out, root) {
+		t.Errorf("summary should say where the still-cached tree lives:\n%s", out)
 	}
 }
 
@@ -54,7 +73,7 @@ func TestSummaryTeardownCommandSurvivesAPaste(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, false))
+		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, false), false)
 	})
 
 	var teardown string

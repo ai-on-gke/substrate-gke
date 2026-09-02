@@ -33,9 +33,13 @@ import (
 )
 
 const (
+	// ModulePath is the upstream Substrate Go module, for commands that
+	// install from it directly rather than from a checkout.
+	ModulePath = "github.com/agent-substrate/substrate"
+
 	// RepoURL is the upstream Substrate repository. It is public, so the
 	// fetch needs no credentials.
-	RepoURL = "https://github.com/agent-substrate/substrate.git"
+	RepoURL = "https://" + ModulePath + ".git"
 
 	// Commit pins the upstream revision the installer builds from. Bump this
 	// to move to a newer Substrate, and update MinGoVersion to match the `go`
@@ -97,8 +101,47 @@ func Fetched(root string, managed bool) bool {
 }
 
 // treePrefix names the per-commit cache directories, and is what Cleanup uses
-// to recognise trees this installer created.
-const treePrefix = "substrate-"
+// to recognise trees this installer created. stageInfix joins a tree name to
+// the mktemp suffix of the staging directories its fetch builds in, and
+// lockSuffix names the flock file that marks a tree (and its stages) as
+// belonging to a live run.
+const (
+	treePrefix = "substrate-"
+	stageInfix = ".partial."
+	lockSuffix = ".lock"
+)
+
+// Lock marks the managed tree as in use for the rest of the process, so a
+// concurrent installer's Cleanup leaves it — and any stage its fetch is still
+// building — alone. It also reclaims staging directories orphaned by a fetch
+// that was killed outright: SIGKILL runs no traps, and nothing else ever
+// learns a mktemp name, so without this sweep those directories would only go
+// once some install on the machine succeeded.
+//
+// The lock is advisory and best-effort. On failure the run is merely as
+// unprotected as it was before locks existed, which is not worth refusing to
+// install over.
+func (b *Builder) Lock() {
+	if !b.Managed || b.lock != nil {
+		return
+	}
+	base := filepath.Dir(b.Root)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return
+	}
+	// Sweep before taking our own lock: a stage orphaned by a killed run of
+	// this same pin is guarded by the very lock name we are about to hold.
+	if entries, err := os.ReadDir(base); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), treePrefix) && strings.Contains(e.Name(), stageInfix) {
+				removeUnlessLive(base, e.Name())
+			}
+		}
+	}
+	if f, err := sharedLock(b.Root + lockSuffix); err == nil {
+		b.lock = f
+	}
+}
 
 // Cleanup removes every tree this installer fetched, once an install has
 // succeeded. A managed checkout is scratch space for one install, not a place
@@ -111,10 +154,18 @@ const treePrefix = "substrate-"
 // needs; once it has worked, nothing will ask for it again.
 //
 // It never touches a user-supplied checkout — that tree, and its history,
-// belong to the user.
+// belong to the user — and it skips anything a concurrent installer run still
+// holds a lock on: the first run to finish must not pull the tree out from
+// under the second.
 func (b *Builder) Cleanup() error {
 	if !b.Managed {
 		return nil
+	}
+	// Our own shared lock guards our tree from other runs' cleanups; held any
+	// longer it would guard it from this one too.
+	if b.lock != nil {
+		b.lock.Close()
+		b.lock = nil
 	}
 	base := filepath.Dir(b.Root)
 	entries, err := os.ReadDir(base)
@@ -129,22 +180,77 @@ func (b *Builder) Cleanup() error {
 		// Only ever remove what we would have created ourselves: this pin,
 		// trees from earlier ones, and the staging directories a killed
 		// fetch leaves behind.
-		if strings.HasPrefix(e.Name(), treePrefix) {
-			errs = append(errs, os.RemoveAll(filepath.Join(base, e.Name())))
+		if !strings.HasPrefix(e.Name(), treePrefix) || strings.HasSuffix(e.Name(), lockSuffix) {
+			continue
 		}
+		errs = append(errs, removeUnlessLive(base, e.Name()))
 	}
 	return errors.Join(errs...)
+}
+
+// removeUnlessLive deletes one cache entry unless the run that owns it is
+// still alive. A tree and the stages fetched for it share one lock name, so
+// failing to grab that lock exclusively means a live installer is using the
+// tree — or is still staging it — and the entry must survive.
+//
+// The lock files themselves are left behind: they are empty, and unlinking
+// one while another process holds or is acquiring it would split future runs
+// across two inodes that cannot see each other's locks.
+func removeUnlessLive(base, name string) error {
+	tree := name
+	if i := strings.Index(name, stageInfix); i >= 0 {
+		tree = name[:i]
+	}
+	lock, err := exclusiveLock(filepath.Join(base, tree+lockSuffix))
+	if err != nil {
+		return nil // a live run holds it; not ours to reclaim
+	}
+	if lock != nil {
+		defer lock.Close()
+	}
+	return os.RemoveAll(filepath.Join(base, name))
+}
+
+// fetchAt returns the git commands that materialize the pinned commit inside
+// dir, which must already exist. dir is spliced into shell text as-is, so
+// callers pass an already-quoted word. Fetching the URL directly instead of
+// through a named remote keeps the recipe usable both in the fetch preamble
+// and in the pasteable teardown command, which share it so the pin can never
+// drift between them.
+func fetchAt(dir string) []string {
+	return []string{
+		"git -C " + dir + " init -q",
+		fmt.Sprintf("git -C %s fetch -q --depth 1 %s %s", dir, RepoURL, Commit),
+		"git -C " + dir + " checkout -q FETCH_HEAD",
+	}
 }
 
 // TeardownCommand returns a self-contained shell command that deletes the
 // control plane. It re-fetches the pinned tree into a temporary directory
 // rather than pointing at the managed checkout, which Cleanup removes once
-// the install succeeds. A user-supplied checkout is still there, so callers
-// pass their own root for that case.
-func TeardownCommand() string {
-	return fmt.Sprintf(`(d=$(mktemp -d) && git -C "$d" init -q && git -C "$d" fetch -q --depth 1 %s %s`+
-		` && git -C "$d" checkout -q FETCH_HEAD && cd "$d" && go run ./cmd/ate-setup delete ate-system)`,
-		RepoURL, Commit)
+// the install succeeds; the trap reclaims that directory when the paste
+// finishes, since nothing else ever learns its name. A user-supplied checkout
+// is still there, so callers pass their own root for that case instead.
+//
+// ate-setup reads its target from the environment, so the command carries the
+// same project/cluster answers the install used — pasted into a fresh shell
+// weeks later, it must not depend on whatever kubectl context is ambient.
+func TeardownCommand(st *state.Setup, root string) string {
+	env := fmt.Sprintf("PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s NO_DEV_ENV=1",
+		ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone))
+	del := env + " go run ./cmd/ate-setup delete ate-system"
+	if root != "" {
+		return fmt.Sprintf("(cd %s && %s)", ShellQuote(root), del)
+	}
+	return `(d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT && ` +
+		strings.Join(fetchAt(`"$d"`), " && ") + ` && cd "$d" && ` + del + ")"
+}
+
+// KubectlAteInstall returns the command that installs the kubectl-ate plugin
+// from the pinned revision, for machines where the managed checkout is
+// already gone.
+func KubectlAteInstall() string {
+	return "go install " + ModulePath + "/cmd/kubectl-ate@" + Commit
 }
 
 // ShellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
@@ -163,6 +269,9 @@ type Builder struct {
 	// Version stamps the images ko builds (the checkout is detached at a
 	// pinned commit, so `git describe` has no tag to report).
 	Version string
+	// lock, while open, is the shared flock marking Root as in use by this
+	// process. Taken by Lock, released by Cleanup (or process exit).
+	lock *os.File
 }
 
 // NewBuilder returns a Builder for the tree at root.
@@ -222,23 +331,24 @@ func (b *Builder) ensure() []string {
 	if !b.Managed {
 		return []string{"cd " + ShellQuote(b.Root)}
 	}
-	return []string{
+	lines := []string{
 		"SUBSTRATE_DIR=" + ShellQuote(b.Root),
 		fmt.Sprintf(`if [ ! -e "${SUBSTRATE_DIR}/%s" ]; then`, CompleteMarker),
 		fmt.Sprintf(`    echo "%s@%s from %s..."`, FetchLine, ShortCommit(), RepoURL),
 		`    rm -rf "${SUBSTRATE_DIR}"`,
 		`    mkdir -p "$(dirname "${SUBSTRATE_DIR}")"`,
-		`    STAGE=$(mktemp -d "${SUBSTRATE_DIR}.partial.XXXXXX")`,
+		fmt.Sprintf(`    STAGE=$(mktemp -d "${SUBSTRATE_DIR}%sXXXXXX")`, stageInfix),
 		// Nothing else knows this name, so a failure from here on has to
 		// clean up after itself. Ctrl-C needs the second trap: bash dies on
 		// an untrapped signal without ever running its EXIT handler, and
 		// exiting from the handler is what gets us back to that path.
 		`    trap 'rm -rf "${STAGE}"' EXIT`,
 		`    trap 'exit 130' INT TERM`,
-		`    git -C "${STAGE}" init -q`,
-		fmt.Sprintf(`    git -C "${STAGE}" remote add origin %s`, RepoURL),
-		fmt.Sprintf(`    git -C "${STAGE}" fetch -q --depth 1 origin %s`, Commit),
-		`    git -C "${STAGE}" checkout -q FETCH_HEAD`,
+	}
+	for _, cmd := range fetchAt(`"${STAGE}"`) {
+		lines = append(lines, "    "+cmd)
+	}
+	return append(lines,
 		fmt.Sprintf(`    touch "${STAGE}/%s"`, CompleteMarker),
 		// If a concurrent run published first, its tree is as good as ours;
 		// renaming onto it would only nest our stage inside it.
@@ -246,13 +356,19 @@ func (b *Builder) ensure() []string {
 		`        rm -rf "${STAGE}"`,
 		`    else`,
 		`        mv "${STAGE}" "${SUBSTRATE_DIR}"`,
+		// The check above cannot be atomic with the mv: a run that publishes
+		// in between turns our rename into a move *into* its tree. mv leaves
+		// the stage's own name behind in that case and only in that case, so
+		// removing that path mops up the race loser and is a no-op for the
+		// winner.
+		`        rm -rf "${SUBSTRATE_DIR}/${STAGE##*/}"`,
 		`    fi`,
 		fmt.Sprintf(`    echo "Fetched substrate@%s"`, ShortCommit()),
 		`else`,
 		fmt.Sprintf(`    echo "%s%s"`, CachedLine, ShortCommit()),
 		`fi`,
 		`cd "${SUBSTRATE_DIR}"`,
-	}
+	)
 }
 
 // inTree wraps a command so it runs inside the Substrate checkout, fetching

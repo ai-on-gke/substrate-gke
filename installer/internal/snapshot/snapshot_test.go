@@ -93,8 +93,7 @@ func TestEnsureFetchesThePinnedCommitShallowly(t *testing.T) {
 	script := b.Bootstrap(testSetup()).Argv[2]
 
 	for _, want := range []string{
-		"fetch -q --depth 1 origin " + Commit,
-		"remote add origin " + RepoURL,
+		"fetch -q --depth 1 " + RepoURL + " " + Commit,
 		"checkout -q FETCH_HEAD",
 		`cd "${SUBSTRATE_DIR}"`,
 	} {
@@ -195,10 +194,20 @@ func TestCleanupNeverTouchesAnExplicitCheckout(t *testing.T) {
 }
 
 // The teardown command has to work on a machine where the managed tree is
-// already gone, so it must not reference it.
+// already gone and in a shell opened weeks later, so it must not reference
+// the cache, must carry the install's own target in its environment rather
+// than trusting whatever kubectl context is ambient, and must reclaim its
+// temporary checkout — a paste must not strand a full tree in $TMPDIR.
 func TestTeardownCommandStandsAlone(t *testing.T) {
-	cmd := TeardownCommand()
-	for _, want := range []string{RepoURL, Commit, "mktemp -d", "go run ./cmd/ate-setup delete ate-system"} {
+	cmd := TeardownCommand(testSetup(), "")
+	for _, want := range []string{
+		RepoURL, Commit, "mktemp -d",
+		`trap 'rm -rf "$d"' EXIT`,
+		"PROJECT_ID=" + ShellQuote("acme"),
+		"CLUSTER_NAME=" + ShellQuote("substrate-poc"),
+		"CLUSTER_LOCATION=" + ShellQuote("us-west1-c"),
+		"NO_DEV_ENV=1 go run ./cmd/ate-setup delete ate-system",
+	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("teardown command missing %q:\n%s", want, cmd)
 		}
@@ -209,6 +218,24 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 	// It is offered as a copy-paste, so it has to parse as one.
 	if err := exec.Command("bash", "-n", "-c", cmd).Run(); err != nil {
 		t.Errorf("teardown command is not valid shell: %v\n%s", err, cmd)
+	}
+}
+
+// The variant for a user-supplied checkout cds there instead of fetching, and
+// still pins the target cluster through the environment.
+func TestTeardownCommandUsesAnExplicitCheckout(t *testing.T) {
+	root := "/Users/John Smith/My Projects/substrate"
+	cmd := TeardownCommand(testSetup(), root)
+	for _, want := range []string{
+		"cd " + ShellQuote(root),
+		"CLUSTER_NAME=" + ShellQuote("substrate-poc"),
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("teardown command missing %q:\n%s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "mktemp") {
+		t.Errorf("an explicit checkout needs no temporary fetch:\n%s", cmd)
 	}
 }
 
@@ -303,6 +330,70 @@ func TestEnsureStagesUnderAUniquePath(t *testing.T) {
 	// nest the stage inside it rather than replace it.
 	if !strings.Contains(script, `rm -rf "${STAGE}"`+"\n    else") {
 		t.Errorf("the loser of a publish race must discard its stage:\n%s", script)
+	}
+	// The pre-publish check cannot be atomic with the mv, so the loser of
+	// that residual window has to mop up the stage the mv nested inside the
+	// winner's tree.
+	if !strings.Contains(script, `rm -rf "${SUBSTRATE_DIR}/${STAGE##*/}"`) {
+		t.Errorf("a stage nested by a lost publish race is never reclaimed:\n%s", script)
+	}
+}
+
+// The first run to finish must not tidy away the tree — or the in-flight
+// stage — of a second run that is still installing.
+func TestCleanupSparesEntriesOfLiveRuns(t *testing.T) {
+	base := t.TempDir()
+	mkdir := func(parts ...string) string {
+		p := filepath.Join(parts...)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	ours := mkdir(base, treePrefix+"ourc0mm1t")
+	theirs := mkdir(base, treePrefix+"theirc0mm1t")
+
+	// The concurrent run locks its tree first, then stages its fetch — the
+	// same order main() and the fetch preamble use.
+	other := NewBuilder(theirs, true)
+	other.Lock()
+	if other.lock == nil {
+		t.Skip("advisory locks unsupported on this platform")
+	}
+	t.Cleanup(func() { other.lock.Close() })
+	theirStage := mkdir(base, treePrefix+"theirc0mm1t"+stageInfix+"aB3xQ1")
+
+	b := NewBuilder(ours, true)
+	b.Lock()
+	if err := b.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(ours); !os.IsNotExist(err) {
+		t.Errorf("our own tree should have been removed")
+	}
+	for _, kept := range []string{theirs, theirStage} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("cleanup deleted %s out from under a live run: %v", kept, err)
+		}
+	}
+}
+
+// A fetch killed outright runs no traps and nothing else knows its mktemp
+// name, so the next run of the installer sweeps orphaned stages up front —
+// waiting for a successful install would keep ~185MB around indefinitely.
+func TestLockReclaimsOrphanedStages(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, treePrefix+"abc123456789")
+	orphan := filepath.Join(base, treePrefix+"abc123456789"+stageInfix+"dEadPr")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	NewBuilder(root, true).Lock()
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("an orphaned stage survived the startup sweep")
 	}
 }
 

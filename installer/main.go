@@ -76,6 +76,9 @@ func main() {
 		Checks:  doctor.Checks(root, managed),
 		DryRun:  *dryRun,
 	}
+	// Mark the tree as ours before anything can fetch it, so a concurrent
+	// installer finishing first cannot tidy it away mid-install.
+	deps.Builder.Lock()
 
 	app := ui.NewApp(deps)
 	if _, err := tea.NewProgram(app, tea.WithAltScreen()).Run(); err != nil {
@@ -85,18 +88,23 @@ func main() {
 
 	// Only once the install actually worked, and never against a simulated
 	// run, which fetched nothing and would otherwise delete real caches.
+	cleaned := false
 	if app.Completed && !*dryRun {
 		if err := deps.Builder.Cleanup(); err != nil {
 			fmt.Fprintln(os.Stderr, "warning: could not tidy the substrate cache:", err)
+		} else {
+			cleaned = true
 		}
 	}
 
-	printSummary(app, deps.Setup, deps.Builder)
+	printSummary(app, deps.Setup, deps.Builder, cleaned)
 }
 
 // printSummary leaves a plain-text recap in the terminal after the alt
-// screen closes, like the prototype's exit panel.
-func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder) {
+// screen closes, like the prototype's exit panel. cleaned reports whether
+// Cleanup actually removed the managed tree — under --dry-run it never runs,
+// and it can fail, so the summary must not claim more than happened.
+func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned bool) {
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
 		return
@@ -113,19 +121,22 @@ func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder) {
 	if st.DemoDeployed {
 		fmt.Println("  demo: counter deployed — see the next steps printed in the wizard.")
 	}
-	// The managed checkout was scratch space and is gone by now, so point
-	// teardown at a command that stands on its own. A checkout the user
-	// supplied is still where they left it.
-	teardown := snapshot.TeardownCommand()
-	if b.Managed {
+	// The managed checkout is scratch space, so point teardown at a command
+	// that stands on its own. A checkout the user supplied is still where
+	// they left it, and the pasted `cd` is quoted — a space in the path would
+	// otherwise land it somewhere else; the prose mentions read better
+	// unquoted.
+	teardown := snapshot.TeardownCommand(st, "")
+	switch {
+	case b.Managed && cleaned:
 		fmt.Printf("\nThe substrate tree was fetched to build your images and has been removed;\n")
 		fmt.Printf("re-running the installer fetches it again. Develop against your own clone.\n")
-	} else {
+	case b.Managed:
+		fmt.Printf("\nThe substrate tree, if fetched, is cached at %s;\n", b.Root)
+		fmt.Printf("it is removed once a real install succeeds. Develop against your own clone.\n")
+	default:
 		fmt.Printf("\nYour substrate checkout at %s is untouched.\n", b.Root)
-		// Pasted into a shell, so the path is quoted — a space in it would
-		// otherwise make the cd land somewhere else. The line above is
-		// prose, and reads better unquoted.
-		teardown = fmt.Sprintf("(cd %s && go run ./cmd/ate-setup delete ate-system)", snapshot.ShellQuote(b.Root))
+		teardown = snapshot.TeardownCommand(st, b.Root)
 	}
 	fmt.Println("\nTear down GCP resources with the upstream hack/teardown.sh, or delete")
 	fmt.Printf("the control plane with:\n  %s\n", teardown)
