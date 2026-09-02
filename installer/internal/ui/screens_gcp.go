@@ -69,14 +69,14 @@ func newProjectScreen(deps *Deps) *projectScreen {
 	fields := []field{
 		newField("GCP project ID", st.ProjectID, "my-project", func(s *state.Setup, v string) { s.ProjectID = v }),
 		newField("Cluster location (zone)", st.Zone, "us-west1-c", func(s *state.Setup, v string) { s.Zone = v }),
+		newField("Snapshot bucket (leave empty for default)", st.BucketName, "ate-snapshots-<project>-<zone>", func(s *state.Setup, v string) { s.BucketName = v }),
 	}
 	if st.Track == state.TrackAdvanced {
 		fields = append(fields,
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
 			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
 			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
-			newField("Snapshot bucket (blank = derived)", st.BucketName, "ate-snapshots-<project>-<zone>", func(s *state.Setup, v string) { s.BucketName = v }),
-			newField("Image registry (blank = derived)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
+			newField("Image registry (leave empty for default)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 		)
 	}
 	scr := &projectScreen{deps: deps, fields: fields}
