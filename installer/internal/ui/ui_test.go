@@ -16,6 +16,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -87,7 +88,7 @@ func testApp(t *testing.T) *App {
 		Setup:   state.NewSetup(),
 		Runner:  execx.DryRun{Delay: time.Millisecond},
 		GCP:     &gcp.Client{DryRun: true},
-		Builder: &snapshot.Builder{Root: t.TempDir(), Version: "vendored-test"},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
 		Checks:  doctor.Checks(t.TempDir(), true),
 		DryRun:  true,
 	}
@@ -110,13 +111,23 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 		}
 	}
 
-	press("enter") // welcome → doctor; dry-run checks all pass inline
+	press("enter") // welcome → doctor
 	if app.mach.Current() != state.CheckSetup {
 		t.Fatalf("after welcome: %v", app.mach.Current())
 	}
-	press("enter") // doctor → project
-	if app.mach.Current() != state.Project {
+	press("enter") // doctor → images
+	if app.mach.Current() != state.Images {
 		t.Fatalf("after doctor: %v", app.mach.Current())
+	}
+	// Take the pre-built images: enter picks them, then the offered registry,
+	// tag, manifest repository, and manifest commit are accepted in turn.
+	// Nothing is built, so the project is never asked for a registry to push to.
+	press("enter", "enter", "enter", "enter", "enter")
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	if app.deps.Setup.ImageRepo != snapshot.ReleaseRepo || app.deps.Setup.ImageTag != snapshot.ReleaseVersion {
+		t.Fatalf("images step did not record the release: %+v", app.deps.Setup)
 	}
 	// Project ID was prefilled by the dry-run gcloud client; enter moves
 	// focus to zone, then snapshot bucket, then validates and advances.
@@ -177,10 +188,12 @@ func TestCreateNewClusterPath(t *testing.T) {
 		}
 	}
 
-	press("enter", "enter")          // welcome, doctor
-	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
-	press("3", "enter")              // "create a new cluster" row (2 clusters + create)
-	pump(t, app, key("enter"))       // accept the default name
+	press("enter")                                     // welcome
+	press("enter")                                     // doctor
+	press("enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
+	press("enter", "enter", "enter")                   // project fields (pid, zone, bucket)
+	press("3", "enter")                                // "create a new cluster" row (2 clusters + create)
+	pump(t, app, key("enter"))                         // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
 	}
@@ -213,7 +226,7 @@ func TestViewsRenderAtEveryStep(t *testing.T) {
 		Setup:   state.NewSetup(),
 		Runner:  execx.DryRun{Delay: time.Millisecond},
 		GCP:     &gcp.Client{DryRun: true},
-		Builder: &snapshot.Builder{Root: t.TempDir(), Version: "vendored-test"},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
 		Checks:  doctor.Checks(t.TempDir(), true),
 		DryRun:  true,
 	}
@@ -241,8 +254,10 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 		}
 	}
 
-	press("enter", "enter")          // welcome, doctor
-	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
+	press("enter")                                     // welcome
+	press("enter")                                     // doctor
+	press("enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
+	press("enter", "enter", "enter")                   // project fields (pid, zone, bucket)
 	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
 	press("2", "enter")
 	press("y")
@@ -273,6 +288,8 @@ func TestCustomBucketNameQuickstartTrack(t *testing.T) {
 	press("enter")
 	// Doctor: continue (enter)
 	press("enter")
+	// Images: pre-built, then the offered registry, tag, repository, and commit
+	press("enter", "enter", "enter", "enter", "enter")
 	// Project screen:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket
 	press("enter", "enter")
@@ -307,6 +324,10 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("2", "enter")
 	// Doctor: continue
 	press("enter")
+	// Images: build from source, keeping the offered repository and the HEAD
+	// commit the screen resolved. Only this path asks for a registry.
+	press("2", "enter")
+	press("enter", "enter")
 	// Project screen in Advanced track:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo
 	press("enter", "enter")
@@ -321,5 +342,161 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 
 	if app.deps.Setup.BucketName != "my-custom-bucket" {
 		t.Fatalf("BucketName = %q, want my-custom-bucket", app.deps.Setup.BucketName)
+	}
+}
+
+// The registry is only ever pushed to by a build from source, and the release
+// registry is pull-only, so a pre-built install must not be asked for one.
+func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
+	labels := func(prebuilt bool) []string {
+		app := testApp(t)
+		app.deps.Setup.Track = state.TrackAdvanced
+		if prebuilt {
+			app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+		}
+		var out []string
+		for _, f := range newProjectScreen(app.deps).fields {
+			out = append(out, f.label)
+		}
+		return out
+	}
+	const registry = "Image registry (leave empty for default)"
+	if !slices.Contains(labels(false), registry) {
+		t.Errorf("a source build must be asked where to push: %v", labels(false))
+	}
+	if slices.Contains(labels(true), registry) {
+		t.Errorf("a pre-built install pushes nothing: %v", labels(true))
+	}
+}
+
+// Building from source points the whole run at the commit the user chose: the
+// checkout the steps fetch, and the doctor that reports on it.
+func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), false)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	pump(t, app, key("enter")) // welcome → doctor
+	pump(t, app, key("enter")) // doctor → images
+	pump(t, app, key("2"))     // build from source
+	pump(t, app, key("enter"))
+	pump(t, app, key("enter")) // repository → revision
+	pump(t, app, key("enter")) // submit
+
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	if app.deps.Setup.Prebuilt() {
+		t.Error("building from source must not record an image repo")
+	}
+	if len(app.deps.Checks) == 0 {
+		t.Error("the doctor checks were not recomputed for the chosen tree")
+	}
+}
+
+// The published release is a default, not a limit: a team installing its own
+// published build types its registry here rather than building from source.
+func TestImagesScreenAcceptsAnOverriddenRegistry(t *testing.T) {
+	const registry = "us-west1-docker.pkg.dev/acme/substrate"
+	const tag = "40ca1ce6"
+
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	pump(t, app, key("enter")) // welcome → doctor
+	pump(t, app, key("enter")) // doctor → images
+	pump(t, app, key("enter")) // pre-built images
+
+	typeOver := func(text string) {
+		scr := app.cur.(*imagesScreen)
+		scr.fields[scr.focus].SetValue("")
+		for _, r := range text {
+			pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	typeOver(registry)
+	pump(t, app, key("enter")) // registry → tag
+	typeOver(tag)
+	pump(t, app, key("enter")) // tag → manifest repository
+	pump(t, app, key("enter")) // manifest repository → manifest commit
+	pump(t, app, key("enter")) // submit, keeping the offered tree
+
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	st := app.deps.Setup
+	if st.ImageRepo != registry || st.ImageTag != tag {
+		t.Fatalf("images = %s:%s, want %s:%s", st.ImageRepo, st.ImageTag, registry, tag)
+	}
+	// Still a pre-built install: someone else's registry is no more pushed to
+	// than the release one.
+	if err := st.ApplyProjectDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	if st.KoDockerRepo != "" {
+		t.Errorf("KoDockerRepo = %q, want empty for a pre-built install", st.KoDockerRepo)
+	}
+}
+
+// A tag that cannot be a version has to be caught at the prompt: it becomes the
+// node label and the atelet DaemonSet suffix, and ate-setup refuses it after
+// the cluster has already been bootstrapped.
+func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	pump(t, app, key("enter")) // welcome → doctor
+	pump(t, app, key("enter")) // doctor → images
+	pump(t, app, key("enter")) // pre-built images
+	pump(t, app, key("enter")) // registry → tag
+
+	scr := app.cur.(*imagesScreen)
+	scr.fields[scr.focus].SetValue("")
+	for _, r := range "my/team:v1" {
+		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	pump(t, app, key("enter")) // tag → manifest repository
+	pump(t, app, key("enter")) // manifest repository → manifest commit
+	pump(t, app, key("enter")) // submit
+
+	if app.mach.Current() != state.Images {
+		t.Fatalf("a tag that is not a label value must not advance: %v", app.mach.Current())
+	}
+	if scr.errText == "" {
+		t.Error("no error was shown for the rejected tag")
+	}
+	if scr.focus != 1 {
+		t.Errorf("focus = %d, want the tag field", scr.focus)
+	}
+}
+
+// ate-setup reads the manifests from a checkout, so pre-built images come with
+// the revision to read them from: a registry that is not the release one has no
+// tree published alongside it, and the user says which commit its images match.
+// Moving that revision moves the tree without turning the install into a build.
+func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	pump(t, app, key("enter")) // welcome → doctor
+	pump(t, app, key("enter")) // doctor → images
+	pump(t, app, key("enter")) // pre-built images
+	pump(t, app, key("enter")) // registry → tag
+	pump(t, app, key("enter")) // tag → manifest repository
+	pump(t, app, key("enter")) // manifest repository → manifest commit
+
+	scr := app.cur.(*imagesScreen)
+	scr.fields[scr.focus].SetValue("")
+	for _, r := range "release-0.1" {
+		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	pump(t, app, key("enter")) // submit; the dry-run resolver answers with the pin
+
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	if !app.deps.Setup.Prebuilt() {
+		t.Error("naming a manifest revision must not turn this into a build")
+	}
+	if len(app.deps.Checks) == 0 {
+		t.Error("the doctor checks were not recomputed for the chosen tree")
 	}
 }

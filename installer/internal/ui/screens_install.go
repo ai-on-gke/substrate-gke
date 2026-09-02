@@ -24,7 +24,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
-	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/steps"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/theme"
 )
@@ -109,7 +108,7 @@ type controlPlaneScreen struct {
 func newControlPlaneScreen(deps *Deps) *controlPlaneScreen {
 	return &controlPlaneScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.DeployAteSystem(deps.Setup), steps.Deploy()),
+		comp: newExecComp(deps.Runner, deps.Builder.DeployAteSystem(deps.Setup), steps.Deploy(deps.Setup.Prebuilt())),
 	}
 }
 
@@ -156,7 +155,11 @@ func (s *controlPlaneScreen) Update(msg tea.Msg) tea.Cmd {
 func (s *controlPlaneScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
-	b.WriteString(theme.Subtle.Render("Builds the control-plane images from the pinned substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet.") + "\n\n")
+	subtitle := "Builds the control-plane images from the substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet."
+	if s.deps.Setup.Prebuilt() {
+		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
+	}
+	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
 
 	if s.showDrawer {
@@ -643,11 +646,11 @@ func (s *completeScreen) View(w int) string {
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")
 
 	summary := fmt.Sprintf(
-		"project    %s\ncluster    %s (%s)%s\nbucket     gs://%s\nregistry   %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
+		"project    %s\ncluster    %s (%s)%s\nbucket     gs://%s\nimages     %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
 		st.ProjectID,
 		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
 		st.BucketName,
-		st.KoDockerRepo,
+		st.ImageSummary(),
 		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
 		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
 		map[bool]string{true: "counter demo deployed", false: "skipped"}[st.DemoDeployed],
@@ -665,7 +668,7 @@ func (s *completeScreen) View(w int) string {
 	// self-contained install command instead.
 	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
 	if s.deps.Builder.Managed {
-		installAte = snapshot.KubectlAteInstall()
+		installAte = s.deps.Builder.KubectlAteInstall()
 	}
 	next := theme.Title.Render("Next steps") + "\n" +
 		theme.CommandLine.Render("kubectl port-forward -n ate-system svc/atenet-router 8000:80") + "\n" +

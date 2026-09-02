@@ -56,7 +56,7 @@ func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
 }
 
 func TestDeployChecklistTracksAteSetupOutput(t *testing.T) {
-	items := Deploy()
+	items := Deploy(false)
 	lines := []string{
 		"[step]: deploy_ate_system",
 		"[step]: deploy_crds",
@@ -73,7 +73,7 @@ func TestDeployChecklistTracksAteSetupOutput(t *testing.T) {
 }
 
 func TestProgressNeverMovesBackward(t *testing.T) {
-	items := Deploy()
+	items := Deploy(false)
 	// A late ko "Building" line must not rewind past the wait phase.
 	if got := Progress(items, 3, "Building github.com/agent-substrate/substrate/cmd/atenet-dns"); got != 3 {
 		t.Fatalf("active = %d, want 3", got)

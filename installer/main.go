@@ -114,8 +114,8 @@ func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned boo
 		return
 	}
 	fmt.Println(theme.Good.Render("Substrate installed."))
-	fmt.Printf("  project:  %s\n  cluster:  %s (%s)\n  bucket:   gs://%s\n  registry: %s\n",
-		st.ProjectID, st.ClusterName, st.Zone, st.BucketName, st.KoDockerRepo)
+	fmt.Printf("  project:  %s\n  cluster:  %s (%s)\n  bucket:   gs://%s\n  images:   %s\n",
+		st.ProjectID, st.ClusterName, st.Zone, st.BucketName, st.ImageSummary())
 	if st.FilestoreCSIDeployed {
 		fmt.Println("  filestore: CSI driver deployed (gcp-filestore-csi-driver)")
 	}
@@ -130,7 +130,7 @@ func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned boo
 	// they left it, and the pasted `cd` is quoted — a space in the path would
 	// otherwise land it somewhere else; the prose mentions read better
 	// unquoted.
-	teardown := snapshot.TeardownCommand(st, "")
+	teardown := b.TeardownCommand(st, "")
 	switch {
 	case b.Managed && cleaned:
 		fmt.Printf("\nThe substrate tree was fetched to build your images and has been removed;\n")
@@ -140,7 +140,7 @@ func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned boo
 		fmt.Printf("it is removed once a real install succeeds. Develop against your own clone.\n")
 	default:
 		fmt.Printf("\nYour substrate checkout at %s is untouched.\n", b.Root)
-		teardown = snapshot.TeardownCommand(st, b.Root)
+		teardown = b.TeardownCommand(st, b.Root)
 	}
 	// Two teardown depths: delete only the control plane (keep the cluster),
 	// or delete everything this install created and stop the charges. The

@@ -28,6 +28,7 @@ type Step int
 const (
 	Welcome Step = iota
 	CheckSetup
+	Images
 	Project
 	Cluster
 	Provision
@@ -39,8 +40,14 @@ const (
 )
 
 // Order is the linear flow of the wizard.
+//
+// Images comes before Project because it decides what the rest of the run
+// needs: a pre-built install pushes nothing, so it is never asked for an image
+// registry. It comes after CheckSetup because it is the first step to reach
+// the network — it resolves a revision against a git remote — and the doctor
+// is what reports a missing git or an unreachable network with a fix to paste.
 var Order = []Step{
-	Welcome, CheckSetup, Project, Cluster, Provision,
+	Welcome, CheckSetup, Images, Project, Cluster, Provision,
 	ControlPlane, FilestoreCSI, Autoscaling, Demo, Complete,
 }
 
@@ -49,6 +56,8 @@ func (s Step) Title() string {
 	switch s {
 	case Welcome:
 		return "Welcome"
+	case Images:
+		return "Choose your images"
 	case CheckSetup:
 		return "Check your setup"
 	case Project:
@@ -132,6 +141,12 @@ const (
 type Setup struct {
 	Track string
 
+	// ImageRepo and ImageTag name an already-published set of Substrate
+	// images for ate-setup to install. When ImageRepo is empty the images are
+	// built from source with ko instead, which is what KoDockerRepo is for.
+	ImageRepo string
+	ImageTag  string
+
 	ProjectID     string
 	ProjectNumber string
 
@@ -175,6 +190,18 @@ func NewSetup() *Setup {
 	}
 }
 
+// Prebuilt reports whether the install pulls published images rather than
+// building them.
+func (s *Setup) Prebuilt() bool { return s.ImageRepo != "" }
+
+// ImageSummary says where this install's images come from, for the recaps.
+func (s *Setup) ImageSummary() string {
+	if s.Prebuilt() {
+		return s.ImageRepo + ":" + s.ImageTag
+	}
+	return s.KoDockerRepo + " (built from source)"
+}
+
 // Region derives the GCE region from Zone: a zonal location like us-west1-c
 // maps to us-west1, and a regional location is returned unchanged.
 func (s *Setup) Region() string {
@@ -209,7 +236,7 @@ func (s *Setup) ApplyProjectDefaults() error {
 		}
 		s.BucketName = b
 	}
-	if s.KoDockerRepo == "" {
+	if s.KoDockerRepo == "" && !s.Prebuilt() {
 		s.KoDockerRepo = "gcr.io/" + s.ProjectID + "/ate-images"
 	}
 	return nil

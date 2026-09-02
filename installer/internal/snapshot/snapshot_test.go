@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
@@ -93,7 +94,7 @@ func TestEnsureFetchesThePinnedCommitShallowly(t *testing.T) {
 	script := b.Bootstrap(testSetup(t)).Argv[2]
 
 	for _, want := range []string{
-		"fetch -q --depth 1 " + RepoURL + " " + Commit,
+		"fetch -q --depth 1 " + ShellQuote(RepoURL) + " " + Commit,
 		"checkout -q FETCH_HEAD",
 		`cd "${SUBSTRATE_DIR}"`,
 	} {
@@ -199,7 +200,7 @@ func TestCleanupNeverTouchesAnExplicitCheckout(t *testing.T) {
 // than trusting whatever kubectl context is ambient, and must reclaim its
 // temporary checkout — a paste must not strand a full tree in $TMPDIR.
 func TestTeardownCommandStandsAlone(t *testing.T) {
-	cmd := TeardownCommand(testSetup(t), "")
+	cmd := NewBuilder("/tmp/substrate-pin", true).TeardownCommand(testSetup(t), "")
 	for _, want := range []string{
 		RepoURL, Commit, "mktemp -d",
 		`trap 'rm -rf "$d"' EXIT`,
@@ -227,7 +228,7 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 // module because its go.mod replaces k8s.io/apimachinery with a local
 // third_party path. It must build from a fetched checkout instead.
 func TestKubectlAteInstallStandsAlone(t *testing.T) {
-	cmd := KubectlAteInstall()
+	cmd := NewBuilder("/tmp/substrate-pin", true).KubectlAteInstall()
 	for _, want := range []string{
 		RepoURL, Commit, "mktemp -d",
 		`trap 'rm -rf "$d"' EXIT`,
@@ -249,7 +250,7 @@ func TestKubectlAteInstallStandsAlone(t *testing.T) {
 // still pins the target cluster through the environment.
 func TestTeardownCommandUsesAnExplicitCheckout(t *testing.T) {
 	root := "/Users/John Smith/My Projects/substrate"
-	cmd := TeardownCommand(testSetup(t), root)
+	cmd := NewBuilder("/tmp/substrate-pin", true).TeardownCommand(testSetup(t), root)
 	for _, want := range []string{
 		"cd " + ShellQuote(root),
 		"CLUSTER_NAME=" + ShellQuote("substrate-test"),
@@ -529,5 +530,165 @@ func TestDeploySpecs(t *testing.T) {
 	}
 	if !slices.Contains(filestore.Env, "PROJECT_ID=acme") {
 		t.Errorf("filestore env missing project ID: %v", filestore.Env)
+	}
+}
+
+// A digest-qualified tag is a valid --image-tag upstream, but only the tag part
+// of it is a valid version label, so VERSION must be cut at the "@".
+func TestPrebuiltVersionDropsADigestQualifiedTag(t *testing.T) {
+	st := prebuiltSetup(t)
+	st.ImageTag = "v0.1.0@sha256:" + strings.Repeat("ab", 32)
+
+	env := NewBuilder("/tmp/substrate-pin", true).DeployAteSystem(st).Env
+	if want := "VERSION=v0.1.0"; !slices.Contains(env, want) {
+		t.Errorf("pre-built env missing %q: %v", want, env)
+	}
+}
+
+// The tag becomes the node label and the atelet DaemonSet suffix, so ate-setup
+// refuses one that is not a valid label value. Catching it at the prompt beats
+// finding out once the cluster is half installed.
+func TestCheckImageTag(t *testing.T) {
+	ok := []string{
+		ReleaseVersion,
+		"v0.1.0@sha256:" + strings.Repeat("ab", 32), // the digest is not part of the version
+		"40ca1ce6",
+		"1",
+		"release_2026.09.02-rc1",
+		strings.Repeat("v", 63),
+	}
+	for _, tag := range ok {
+		if err := CheckImageTag(tag); err != nil {
+			t.Errorf("CheckImageTag(%q) = %v, want nil", tag, err)
+		}
+	}
+	bad := []string{
+		"",
+		"-v0.1.0",               // must begin with an alphanumeric
+		"v0.1.0-",               // and end with one
+		"my/team:v1",            // a registry path is not a tag
+		"v0.1.0 ",               // trailing space
+		"héllo",                 // not ASCII alphanumeric
+		strings.Repeat("v", 64), // one over the label limit
+	}
+	for _, tag := range bad {
+		if err := CheckImageTag(tag); err == nil {
+			t.Errorf("CheckImageTag(%q) = nil, want an error", tag)
+		}
+	}
+}
+
+// prebuiltSetup is testSetup after the images step chose a published release.
+func prebuiltSetup(t *testing.T) *state.Setup {
+	t.Helper()
+	st := state.NewSetup()
+	st.ProjectID = "acme"
+	st.ProjectNumber = "42"
+	st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+	if err := st.ApplyProjectDefaults(); err != nil {
+		t.Fatalf("ApplyProjectDefaults: %v", err)
+	}
+	return st
+}
+
+// A pre-built install builds nothing and pushes nothing, so it must not carry
+// a registry to push to. VERSION is left out for a subtler reason: ate-setup
+// takes the Substrate version from the image tag, and that tag is what the
+// atelet actually is — a checkout's commit stamp would overwrite it with a lie.
+func TestPrebuiltEnvDropsTheBuildVariables(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	env := b.DeployAteSystem(prebuiltSetup(t)).Env
+
+	for _, unwanted := range []string{"KO_DOCKER_REPO", "KO_DEFAULTPLATFORMS"} {
+		for _, e := range env {
+			if strings.HasPrefix(e, unwanted+"=") {
+				t.Errorf("pre-built env must not set %s: %v", unwanted, env)
+			}
+		}
+	}
+	// VERSION names the atelet DaemonSet and labels the nodes, so it has to be
+	// the tag the images came from — not b.Version, which describes the
+	// checkout, and not whatever the caller's shell happens to export.
+	if want := "VERSION=" + ReleaseVersion; !slices.Contains(env, want) {
+		t.Errorf("pre-built env missing %q: %v", want, env)
+	}
+	// The rest of the dev-env contract still applies: the checkout is fetched
+	// either way, because ate-setup reads the manifests from source.
+	for _, want := range []string{"PROJECT_ID=acme", "CLUSTER_NAME=substrate-test", "NO_DEV_ENV=1"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("pre-built env missing %q: %v", want, env)
+		}
+	}
+}
+
+// The image flags are what actually point ate-setup at the published images,
+// and they are persistent flags, so the demo deploy needs them too.
+func TestPrebuiltDeployPassesTheImageFlags(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	st := prebuiltSetup(t)
+
+	// A tag is user input, so the script quotes it; Display is prose the user
+	// reads, so it does not.
+	wantArgv := " --image-repo " + ShellQuote(ReleaseRepo) + " --image-tag " + ShellQuote(ReleaseVersion)
+	wantDisplay := " --image-repo " + ReleaseRepo + " --image-tag " + ReleaseVersion
+	for _, spec := range []execx.Spec{b.DeployAteSystem(st), b.DeployDemo(st, "counter")} {
+		if !strings.Contains(spec.Argv[2], wantArgv) {
+			t.Errorf("%s argv missing the image flags:\n%s", spec.Label, spec.Argv[2])
+		}
+		if !strings.Contains(spec.Display, wantDisplay) {
+			t.Errorf("%s display missing the image flags: %q", spec.Label, spec.Display)
+		}
+		if err := exec.Command("bash", "-n", "-c", spec.Argv[2]).Run(); err != nil {
+			t.Errorf("%s script is not valid shell: %v", spec.Label, err)
+		}
+	}
+	// A build from source must not pass them; ate-setup would then skip the
+	// build it was asked for.
+	if strings.Contains(b.DeployAteSystem(testSetup(t)).Argv[2], "--image-repo") {
+		t.Error("a source build must not pass --image-repo")
+	}
+}
+
+// Two revisions must never share a cache directory or a ko version stamp, or
+// one build's images get installed as another's.
+func TestUseSourceMovesTheManagedTree(t *testing.T) {
+	const fork = "https://github.com/annapendleton/substrate.git"
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+
+	b := NewBuilder(filepath.Join(t.TempDir(), treePrefix+ShortCommit()), true)
+	before := b.Root
+	b.UseSource(Revision{Repo: fork, Commit: sha})
+
+	if b.Root == before {
+		t.Errorf("Root did not follow the revision: %s", b.Root)
+	}
+	if !strings.HasSuffix(b.Root, treePrefix+shorten(sha)) {
+		t.Errorf("Root = %q, want a tree named for %s", b.Root, shorten(sha))
+	}
+	if b.Version != "substrate-"+shorten(sha) {
+		t.Errorf("Version = %q, want the new commit's stamp", b.Version)
+	}
+	script := b.Bootstrap(testSetup(t)).Argv[2]
+	if !strings.Contains(script, "fetch -q --depth 1 "+ShellQuote(fork)+" "+sha) {
+		t.Errorf("fetch does not name the chosen fork and commit:\n%s", script)
+	}
+	// A URL is user input now, so it reaches bash as one word whatever is in it.
+	if err := exec.Command("bash", "-n", "-c", script).Run(); err != nil {
+		t.Errorf("fetch script is not valid shell: %v\n%s", err, script)
+	}
+}
+
+// A checkout the user passed with --substrate-root is theirs: the revision is
+// still recorded for the standalone teardown, but nothing moves on disk.
+func TestUseSourceLeavesAnExplicitCheckoutInPlace(t *testing.T) {
+	root := fakeCheckout(t)
+	b := NewBuilder(root, false)
+	b.UseSource(Revision{Repo: "https://example.com/substrate.git", Commit: strings.Repeat("a", 40)})
+
+	if b.Root != root {
+		t.Errorf("Root = %q, want the user's checkout %q", b.Root, root)
+	}
+	if b.Version != "substrate-local" {
+		t.Errorf("Version = %q, want substrate-local", b.Version)
 	}
 }
