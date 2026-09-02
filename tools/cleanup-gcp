@@ -16,18 +16,37 @@
 
 # cleanup-gcp deletes the GCP resources the installer's provision step
 # (upstream `setup-gcp bootstrap`) creates: monitoring dashboards, IAM
-# bindings, the snapshot bucket, and the GKE cluster — in the reverse of the
-# order bootstrap creates them. It needs only gcloud, so it works long after
-# the pinned substrate checkout the installer fetched is gone.
+# bindings, the snapshot bucket, and the GKE cluster.
+#
+# It is a thin wrapper: the deletions themselves live in upstream's
+# hack/teardown.sh, fetched at the same pinned commit the installer builds
+# from — the teardown that matches what that bootstrap actually created.
+# Keeping the resource knowledge upstream means a new bootstrap step gets its
+# teardown in the same repo, and this wrapper inherits it at every pin bump
+# instead of drifting. What stays here is the user experience: friendly
+# flags, a confirmation prompt, and project-number derivation.
 #
 # It does NOT remove the Substrate control plane from a cluster you keep; the
 # installer's exit summary prints the `ate-setup delete ate-system` command
 # for that. Deleting the cluster removes the control plane with it.
 #
-# Every deletion is idempotent (`|| true` on not-found), so re-running after
-# a partial failure is safe.
+# Upstream's deletions are idempotent, so re-running after a partial failure
+# is safe.
 
 set -o errexit -o nounset -o pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SNAPSHOT_GO="${REPO_ROOT}/installer/internal/snapshot/snapshot.go"
+
+# The pin is read from the installer source rather than copied here, so the
+# wrapper can never tear down with a different revision than the one the
+# installer provisioned with.
+pin_commit() {
+  sed -n 's/^\tCommit = "\([0-9a-f]\{40\}\)"$/\1/p' "${SNAPSHOT_GO}"
+}
+module_path() {
+  sed -n 's/^\tModulePath = "\(.*\)"$/\1/p' "${SNAPSHOT_GO}"
+}
 
 PROJECT_ID=""
 CLUSTER_NAME=""
@@ -40,13 +59,14 @@ usage() {
 Usage: tools/cleanup-gcp --project ID --cluster NAME --location ZONE --bucket NAME [--yes]
 
 Deletes everything the installer's provision step created in GCP:
-  1. The Substrate monitoring dashboards
-  2. The bucket- and project-level IAM bindings it granted
-  3. The snapshot bucket and its contents
-  4. The GKE cluster (and, with it, the Substrate control plane)
+the Substrate monitoring dashboards, the IAM bindings it granted, the
+snapshot bucket and its contents, and the GKE cluster (and, with it, the
+Substrate control plane).
 
 The values are printed by the installer's exit summary; they are the answers
-you gave the wizard. --yes skips the confirmation prompt.
+you gave the wizard. --yes skips the confirmation prompt. Needs gcloud and
+git (the deletions run from a temporary checkout of the pinned substrate
+revision).
 EOF
   exit 1
 }
@@ -58,6 +78,7 @@ while [[ "$#" -gt 0 ]]; do
     --location) CLUSTER_LOCATION="$2"; shift ;;
     --bucket) BUCKET_NAME="$2"; shift ;;
     --yes) ASSUME_YES="true" ;;
+    --print-pin) pin_commit; exit 0 ;;
     *) usage ;;
   esac
   shift
@@ -69,6 +90,13 @@ for var in PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION BUCKET_NAME; do
     usage
   fi
 done
+
+COMMIT="$(pin_commit)"
+if [ -z "${COMMIT}" ]; then
+  echo "could not read the substrate pin from ${SNAPSHOT_GO}" >&2
+  exit 1
+fi
+REPO_URL="https://$(module_path).git"
 
 # The IAM principals are keyed to the project number, not the ID.
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
@@ -85,48 +113,21 @@ if [ "${ASSUME_YES}" != "true" ]; then
   [ "${answer}" = "yes" ] || { echo "aborted"; exit 1; }
 fi
 
-ATELET="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/ate-system/sa/atelet"
-NODE_SA="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+echo "Fetching substrate@${COMMIT:0:12} for its teardown script..."
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+git -C "$d" init -q
+git -C "$d" fetch -q --depth 1 "${REPO_URL}" "${COMMIT}"
+git -C "$d" checkout -q FETCH_HEAD
+cd "$d"
 
-echo "Deleting Substrate monitoring dashboards..."
-# Matched by the display names in upstream tools/setup-gcp/dashboards/.
-declare -a DASHBOARD_NAMES=(
-  "Substrate Snapshot Size & QPS"
-  "Substrate Routing & E2E Latency"
-  "Substrate gRPC Server — latency / QPS / errors"
-)
-for display_name in "${DASHBOARD_NAMES[@]}"; do
-  for dashboard in $(gcloud monitoring dashboards list \
-      --project="${PROJECT_ID}" \
-      --filter="displayName=\"${display_name}\"" \
-      --format="value(name)" 2>/dev/null); do
-    gcloud monitoring dashboards delete "${dashboard}" \
-      --project="${PROJECT_ID}" --quiet || true
-  done
-done
-
-echo "Removing bucket-level IAM bindings..."
-for role in roles/storage.objectAdmin roles/storage.bucketViewer; do
-  gcloud storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
-    --member="${ATELET}" --role="${role}" --quiet 2>/dev/null || true
-done
-
-echo "Removing project-level IAM bindings..."
-for role in roles/storage.objectAdmin roles/artifactregistry.reader; do
-  gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-    --member="${ATELET}" --role="${role}" --condition=None --quiet >/dev/null 2>&1 || true
-done
-for role in roles/storage.objectViewer roles/artifactregistry.reader; do
-  gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-    --member="${NODE_SA}" --role="${role}" --condition=None --quiet >/dev/null 2>&1 || true
-done
-
-echo "Deleting snapshot bucket gs://${BUCKET_NAME}..."
-gcloud storage rm --recursive "gs://${BUCKET_NAME}/**" --project="${PROJECT_ID}" --quiet 2>/dev/null || true
-gcloud storage buckets delete "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --quiet || true
-
-echo "Deleting GKE cluster ${CLUSTER_NAME}..."
-gcloud container clusters delete "${CLUSTER_NAME}" \
-  --location="${CLUSTER_LOCATION}" --project="${PROJECT_ID}" --quiet || true
+# NODE_POOL_NAME stays unset on purpose: deleting the cluster removes its
+# pools, and teardown.sh skips the separate pool step without it.
+PROJECT_ID="${PROJECT_ID}" \
+PROJECT_NUMBER="${PROJECT_NUMBER}" \
+CLUSTER_NAME="${CLUSTER_NAME}" \
+CLUSTER_LOCATION="${CLUSTER_LOCATION}" \
+BUCKET_NAME="${BUCKET_NAME}" \
+  ./hack/teardown.sh --all
 
 echo "Done. APIs enabled by bootstrap were left enabled (they are free while unused)."
