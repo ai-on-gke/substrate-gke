@@ -44,7 +44,7 @@ const (
 	// Commit pins the upstream revision the installer builds from. Bump this
 	// to move to a newer Substrate, and update MinGoVersion to match the `go`
 	// directive in that revision's go.mod.
-	Commit = "4a2cb262dd62ea3504f93d5f98aad25e62d58d05"
+	Commit = "cbae8250a5ff157e1ec69618804b07b825cdf52c"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
