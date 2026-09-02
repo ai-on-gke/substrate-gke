@@ -97,6 +97,23 @@ prints the current values, and `make substrate-pin-check` verifies `MinGoVersion
 against upstream's `go.mod` at that commit — run it after every bump, since a stale
 value lets the preflight doctor pass and the install then fail mid-bootstrap.
 
+## Tearing down
+
+An install creates billable resources: the GKE cluster, the snapshot bucket, IAM
+bindings, and monitoring dashboards. Delete all of them with the values you gave the
+wizard (the exit summary prints this exact invocation for your install):
+
+```bash
+./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
+# or: make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone> BUCKET_NAME=<bucket>
+```
+
+The script only needs `gcloud`, asks for confirmation before deleting, and is safe to
+re-run after a partial failure. To remove only the Substrate control plane while
+keeping the cluster, use the `ate-setup delete ate-system` command the exit summary
+prints instead. APIs enabled by the install are left enabled; they cost nothing while
+unused.
+
 ## Development
 
 ```bash

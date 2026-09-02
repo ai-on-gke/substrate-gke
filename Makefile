@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: run doctor dry-run build test fmt verify
+.PHONY: run doctor dry-run teardown build test fmt verify
 
 # Launch the interactive installer.
 run:
 	cd installer && go run .
+
+# Delete the GCP resources a previous install created. The values are your
+# wizard answers; the installer's exit summary prints this exact invocation.
+teardown:
+	./tools/cleanup-gcp --project "$(PROJECT_ID)" --cluster "$(CLUSTER_NAME)" --location "$(CLUSTER_LOCATION)" --bucket "$(BUCKET_NAME)"
 
 # Run the preflight checks only.
 doctor:
