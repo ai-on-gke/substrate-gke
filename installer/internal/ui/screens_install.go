@@ -661,8 +661,8 @@ func (s *completeScreen) View(w int) string {
 	}
 
 	// A managed checkout is removed once the install succeeds, so its next
-	// steps cannot ask the user to run anything inside it — install the
-	// plugin straight from the pinned module instead.
+	// steps cannot ask the user to run anything inside it — offer the
+	// self-contained install command instead.
 	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
 	if s.deps.Builder.Managed {
 		installAte = snapshot.KubectlAteInstall()

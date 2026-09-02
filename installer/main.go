@@ -77,8 +77,12 @@ func main() {
 		DryRun:  *dryRun,
 	}
 	// Mark the tree as ours before anything can fetch it, so a concurrent
-	// installer finishing first cannot tidy it away mid-install.
-	deps.Builder.Lock()
+	// installer finishing first cannot tidy it away mid-install. Not under
+	// --dry-run: a simulated run fetches nothing worth guarding, and even
+	// Lock's sweep of orphaned staging directories would be a real deletion.
+	if !*dryRun {
+		deps.Builder.Lock()
+	}
 
 	app := ui.NewApp(deps)
 	if _, err := tea.NewProgram(app, tea.WithAltScreen()).Run(); err != nil {

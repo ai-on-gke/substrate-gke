@@ -225,12 +225,20 @@ func fetchAt(dir string) []string {
 	}
 }
 
+// inEphemeralTree wraps command in a pasteable subshell that fetches the
+// pinned tree into a temporary directory, runs the command inside it, and
+// reclaims the directory when the paste finishes — nothing else ever learns
+// the mktemp name.
+func inEphemeralTree(command string) string {
+	return `(d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT && ` +
+		strings.Join(fetchAt(`"$d"`), " && ") + ` && cd "$d" && ` + command + ")"
+}
+
 // TeardownCommand returns a self-contained shell command that deletes the
-// control plane. It re-fetches the pinned tree into a temporary directory
-// rather than pointing at the managed checkout, which Cleanup removes once
-// the install succeeds; the trap reclaims that directory when the paste
-// finishes, since nothing else ever learns its name. A user-supplied checkout
-// is still there, so callers pass their own root for that case instead.
+// control plane. It re-fetches the pinned tree rather than pointing at the
+// managed checkout, which Cleanup removes once the install succeeds. A
+// user-supplied checkout is still there, so callers pass their own root for
+// that case instead.
 //
 // ate-setup reads its target from the environment, so the command carries the
 // same project/cluster answers the install used — pasted into a fresh shell
@@ -242,15 +250,16 @@ func TeardownCommand(st *state.Setup, root string) string {
 	if root != "" {
 		return fmt.Sprintf("(cd %s && %s)", ShellQuote(root), del)
 	}
-	return `(d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT && ` +
-		strings.Join(fetchAt(`"$d"`), " && ") + ` && cd "$d" && ` + del + ")"
+	return inEphemeralTree(del)
 }
 
 // KubectlAteInstall returns the command that installs the kubectl-ate plugin
-// from the pinned revision, for machines where the managed checkout is
-// already gone.
+// at the pinned revision, for machines where the managed checkout is already
+// gone. It has to build from a checkout: `go install <module>@<commit>` is
+// refused for this module, whose go.mod replaces k8s.io/apimachinery with a
+// local third_party path.
 func KubectlAteInstall() string {
-	return "go install " + ModulePath + "/cmd/kubectl-ate@" + Commit
+	return inEphemeralTree("go install ./cmd/kubectl-ate")
 }
 
 // ShellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
