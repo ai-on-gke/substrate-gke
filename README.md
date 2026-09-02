@@ -7,7 +7,7 @@ Substrate control plane onto a GKE cluster.
 ## Quickstart
 
 Prerequisites: `gcloud` (authenticated, with application-default credentials), a Go
-toolchain, and `kubectl`.
+toolchain, `git`, and `kubectl`.
 
 ```bash
 gcloud auth application-default login
@@ -52,21 +52,50 @@ Exiting and re-running is always safe; every step is idempotent.
 
 ```
 installer/   The wizard (Go, bubbletea). `go run .` from this directory works too.
-substrate/   Vendored snapshot of agent-substrate/substrate — do not edit by hand.
-hack/        vendor-substrate.sh, the script that refreshes the snapshot.
 ```
 
-The `substrate/` snapshot is large on purpose: upstream's installer builds the
-control-plane images from source with [ko](https://ko.build), so the manifests alone
-are not enough — the Go source tree and its vendor directory come along.
-`substrate/VENDOR.md` records the exact upstream commit.
+## How Substrate itself is obtained
 
-## Updating the vendored substrate
+Upstream's installer builds the control-plane images from source with
+[ko](https://ko.build), so a Substrate source tree has to be on disk at install time —
+the manifests alone are not enough.
+
+Rather than vendoring it, the installer fetches it with a shallow `git` fetch pinned to
+an exact upstream commit. The first install step that needs the tree downloads it (a
+few seconds) into
+
+```
+<user cache dir>/substrate-gke/substrate-<short commit>
+```
+
+and later steps reuse it. Nothing is written into this repo, and
+`agent-substrate/substrate` is public, so the fetch needs no credentials.
+
+That tree is scratch space for one install, not somewhere to work: **it is deleted once
+the install succeeds**, and re-running the installer fetches it again. If you want to
+develop against Substrate, use your own clone (see `--substrate-root` below) — a copy
+here would be removed out from under you.
+
+Nothing is deleted while an install could still be retried, so a failed run leaves the
+tree in place and retrying it costs no download. The tree is staged under a temporary
+name and moved into place only once complete, so interrupting a fetch costs you the
+download and nothing else.
+
+To point at your own checkout instead — handy when testing an unmerged change:
 
 ```bash
-make vendor-substrate SUBSTRATE=/path/to/substrate REF=main
-cd substrate && go build ./cmd/ate-setup ./tools/setup-gcp   # sanity check
+cd installer && go run . --substrate-root=/path/to/substrate
 ```
+
+A checkout you supply this way is used as-is and never modified or deleted.
+
+### Moving to a newer Substrate
+
+Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion`
+next to it to match the `go` directive in that revision's `go.mod`. `make substrate-pin`
+prints the current values, and `make substrate-pin-check` verifies `MinGoVersion`
+against upstream's `go.mod` at that commit — run it after every bump, since a stale
+value lets the preflight doctor pass and the install then fail mid-bootstrap.
 
 ## Development
 

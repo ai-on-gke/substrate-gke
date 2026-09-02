@@ -14,8 +14,8 @@
 
 // The substrate-gke installer: an interactive wizard that provisions GCP
 // resources and installs the Agent Substrate control plane onto a GKE
-// cluster, using the vendored agent-substrate/substrate snapshot in
-// ../substrate.
+// cluster, building from a pinned agent-substrate/substrate checkout that the
+// install steps fetch on demand.
 package main
 
 import (
@@ -39,12 +39,15 @@ func main() {
 	var (
 		doctorMode    = flag.Bool("doctor", false, "run the preflight checks and exit")
 		dryRun        = flag.Bool("dry-run", false, "walk the full wizard without touching GCP (simulated commands)")
-		substrateRoot = flag.String("substrate-root", "", "path to the vendored substrate tree (default: auto-detected)")
+		substrateRoot = flag.String("substrate-root", "", "use an existing substrate checkout instead of fetching the pinned one")
 	)
 	flag.Parse()
 
-	root, err := snapshot.Find(*substrateRoot)
-	if err != nil && !*dryRun {
+	// Fail here even under --dry-run: a bad --substrate-root would otherwise
+	// leave root empty, and an empty root reaches the exit summary as a
+	// teardown command whose `cd` target is missing entirely.
+	root, managed, err := snapshot.Root(*substrateRoot)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -52,7 +55,7 @@ func main() {
 	if *doctorMode {
 		fmt.Println("substrate-gke preflight doctor")
 		fmt.Println()
-		if fatal := doctor.RunCLI(context.Background(), doctor.Checks(root)); fatal > 0 {
+		if fatal := doctor.RunCLI(context.Background(), doctor.Checks(root, managed)); fatal > 0 {
 			fmt.Printf("\n%d fatal problem(s) found.\n", fatal)
 			os.Exit(1)
 		}
@@ -69,10 +72,13 @@ func main() {
 		Setup:   state.NewSetup(),
 		Runner:  runner,
 		GCP:     &gcp.Client{DryRun: *dryRun},
-		Builder: snapshot.NewBuilder(root),
-		Checks:  doctor.Checks(root),
+		Builder: snapshot.NewBuilder(root, managed),
+		Checks:  doctor.Checks(root, managed),
 		DryRun:  *dryRun,
 	}
+	// Mark the tree as ours before anything can fetch it, so a concurrent
+	// installer finishing first cannot tidy it away mid-install.
+	deps.Builder.Lock()
 
 	app := ui.NewApp(deps)
 	if _, err := tea.NewProgram(app, tea.WithAltScreen()).Run(); err != nil {
@@ -80,12 +86,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	printSummary(app, deps.Setup)
+	// Only once the install actually worked, and never against a simulated
+	// run, which fetched nothing and would otherwise delete real caches.
+	cleaned := false
+	if app.Completed && !*dryRun {
+		if err := deps.Builder.Cleanup(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: could not tidy the substrate cache:", err)
+		} else {
+			cleaned = true
+		}
+	}
+
+	printSummary(app, deps.Setup, deps.Builder, cleaned)
 }
 
 // printSummary leaves a plain-text recap in the terminal after the alt
-// screen closes, like the prototype's exit panel.
-func printSummary(app *ui.App, st *state.Setup) {
+// screen closes, like the prototype's exit panel. cleaned reports whether
+// Cleanup actually removed the managed tree — under --dry-run it never runs,
+// and it can fail, so the summary must not claim more than happened.
+func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned bool) {
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
 		return
@@ -102,6 +121,23 @@ func printSummary(app *ui.App, st *state.Setup) {
 	if st.DemoDeployed {
 		fmt.Println("  demo: counter deployed — see the next steps printed in the wizard.")
 	}
+	// The managed checkout is scratch space, so point teardown at a command
+	// that stands on its own. A checkout the user supplied is still where
+	// they left it, and the pasted `cd` is quoted — a space in the path would
+	// otherwise land it somewhere else; the prose mentions read better
+	// unquoted.
+	teardown := snapshot.TeardownCommand(st, "")
+	switch {
+	case b.Managed && cleaned:
+		fmt.Printf("\nThe substrate tree was fetched to build your images and has been removed;\n")
+		fmt.Printf("re-running the installer fetches it again. Develop against your own clone.\n")
+	case b.Managed:
+		fmt.Printf("\nThe substrate tree, if fetched, is cached at %s;\n", b.Root)
+		fmt.Printf("it is removed once a real install succeeds. Develop against your own clone.\n")
+	default:
+		fmt.Printf("\nYour substrate checkout at %s is untouched.\n", b.Root)
+		teardown = snapshot.TeardownCommand(st, b.Root)
+	}
 	fmt.Println("\nTear down GCP resources with the upstream hack/teardown.sh, or delete")
-	fmt.Println("the control plane with: (cd substrate && go run ./cmd/ate-setup delete ate-system)")
+	fmt.Printf("the control plane with:\n  %s\n", teardown)
 }

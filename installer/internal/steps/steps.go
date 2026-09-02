@@ -17,7 +17,11 @@
 // the phase starting; when a later item matches, earlier items are complete.
 package steps
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
+)
 
 // ChecklistItem is one row of a step's progress checklist.
 type ChecklistItem struct {
@@ -41,9 +45,11 @@ func containsAny(subs ...string) func(string) bool {
 	}
 }
 
-// Bootstrap tracks the seven idempotent phases of `setup-gcp bootstrap`.
+// Bootstrap tracks the seven idempotent phases of `setup-gcp bootstrap`,
+// preceded by the pinned substrate fetch this step pays for on a cold cache.
 func Bootstrap() []ChecklistItem {
 	return []ChecklistItem{
+		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Step 1/7")},
 		{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Step 2/7")},
 		{"Create the GCS snapshot bucket", contains("Step 3/7")},

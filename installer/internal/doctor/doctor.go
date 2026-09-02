@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
 // Status classifies a check result.
@@ -66,8 +68,16 @@ func output(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// Checks returns the preflight suite for a given vendored snapshot root.
-func Checks(snapshotRoot string) []Check {
+// Checks returns the preflight suite for a given Substrate checkout root.
+// managed reports whether the installer owns that checkout and will fetch it,
+// which decides whether the tools behind the fetch are hard requirements.
+func Checks(snapshotRoot string, managed bool) []Check {
+	// git is a hard requirement only when the installer still has a fetch to
+	// do. A user-supplied tree reduces the preamble to a bare `cd`, and a
+	// managed tree that already carries its completion marker takes the
+	// cached branch — neither runs a single git command.
+	needsGit := managed && !snapshot.Fetched(snapshotRoot, managed)
+
 	return []Check{
 		{
 			Key: "gcloud", Name: "Google Cloud SDK", Fatal: true,
@@ -101,9 +111,33 @@ func Checks(snapshotRoot string) []Check {
 				have := goVersionOf(out)
 				want := requiredGoVersion(snapshotRoot)
 				if want != "" && !goVersionAtLeast(have, want) {
+					// An older Go can still build substrate if GOTOOLCHAIN
+					// lets it switch to the version go.mod asks for. Only
+					// "auto" and "<version>+auto" download one.
+					tc := goToolchainMode(ctx)
+					switch toolchainSwitching(have, tc) {
+					case switchDownloads:
+						return Result{Pass,
+							fmt.Sprintf("%s; substrate needs go >= %s, which GOTOOLCHAIN=%s will fetch automatically", out, want, tc),
+							""}
+					case switchFromPath:
+						// "path" switches only to a toolchain already
+						// installed. We cannot tell from here whether one is,
+						// so warn instead of guessing either way.
+						return Result{Warn,
+							fmt.Sprintf("go %s found, but substrate needs go >= %s; GOTOOLCHAIN=%s will only switch to a go%s already on PATH, never download one", have, want, tc, want),
+							"go env -w GOTOOLCHAIN=auto   # or install go" + want + " from https://go.dev/dl/"}
+					}
+					if !goVersionAtLeast(have, minSwitchingGo) {
+						// Setting GOTOOLCHAIN would not help here, so do not
+						// suggest it.
+						return Result{Fail,
+							fmt.Sprintf("go %s found, but substrate needs go >= %s, and toolchain switching only arrived in go %s — this go cannot fetch a newer one", have, want, minSwitchingGo),
+							"install go" + want + " from https://go.dev/dl/"}
+					}
 					return Result{Fail,
-						fmt.Sprintf("go %s found, but the vendored substrate needs go >= %s", have, want),
-						"https://go.dev/dl/"}
+						fmt.Sprintf("go %s found, but substrate needs go >= %s and GOTOOLCHAIN=%s will not fetch it", have, want, tc),
+						"go env -w GOTOOLCHAIN=auto   # or install go" + want + " from https://go.dev/dl/"}
 				}
 				return Result{Pass, out, ""}
 			},
@@ -119,10 +153,16 @@ func Checks(snapshotRoot string) []Check {
 			},
 		},
 		{
-			Key: "git", Name: "git", Fatal: false,
+			Key: "git", Name: "git", Fatal: needsGit,
 			Run: func(ctx context.Context) Result {
 				if _, err := exec.LookPath("git"); err != nil {
-					return Result{Warn, "git not found; needed for fetching external overlays like Filestore CSI",
+					if !needsGit {
+						// Still worth flagging: the optional Filestore CSI
+						// step clones with it.
+						return Result{Warn, "git not found; the substrate tree does not need it here, but the Filestore CSI step clones with it",
+							"https://git-scm.com/downloads"}
+					}
+					return Result{Fail, "git not found; the installer fetches the pinned substrate tree with it",
 						"https://git-scm.com/downloads"}
 				}
 				return Result{Pass, "git on PATH", ""}
@@ -142,11 +182,15 @@ func Checks(snapshotRoot string) []Check {
 			},
 		},
 		{
-			Key: "snapshot", Name: "Vendored substrate tree", Fatal: true,
+			Key: "snapshot", Name: "Substrate checkout", Fatal: false,
 			Run: func(ctx context.Context) Result {
-				if _, err := os.Stat(filepath.Join(snapshotRoot, "go.mod")); err != nil {
-					return Result{Fail, "vendored substrate/ tree not found at " + snapshotRoot,
-						"hack/vendor-substrate.sh <substrate-checkout> main"}
+				if !snapshot.Fetched(snapshotRoot, managed) {
+					// Not an error: the install steps fetch the pinned tree on
+					// first use. Say so, so the wait is not a surprise.
+					return Result{Warn,
+						fmt.Sprintf("not fetched yet; substrate@%s will be downloaded to %s on the first install step",
+							snapshot.ShortCommit(), snapshotRoot),
+						""}
 				}
 				return Result{Pass, snapshotRoot, ""}
 			},
@@ -164,18 +208,74 @@ func goVersionOf(versionOutput string) string {
 	return m[1]
 }
 
-// requiredGoVersion reads the `go` directive from the snapshot's go.mod.
+// goToolchainMode reports GOTOOLCHAIN, defaulting to "auto" when it cannot be
+// read. Go before 1.21 has no such variable and prints an empty line for it,
+// which lands on that default — harmless only because toolchainSwitching
+// discounts the mode entirely for those versions.
+func goToolchainMode(ctx context.Context) string {
+	out, err := output(ctx, "go", "env", "GOTOOLCHAIN")
+	if err != nil || out == "" {
+		return "auto"
+	}
+	return out
+}
+
+// minSwitchingGo is the first Go release that can switch toolchains at all.
+const minSwitchingGo = "1.21"
+
+// How a GOTOOLCHAIN value obtains a newer toolchain than the one installed.
+type switchMode int
+
+const (
+	// switchNever covers "local" and a bare pinned version like "go1.24.0":
+	// neither ever moves off the toolchain it names.
+	switchNever switchMode = iota
+	// switchDownloads covers "auto" and "<version>+auto", which fetch the
+	// version go.mod asks for.
+	switchDownloads
+	// switchFromPath covers "path" and "<version>+path", which switch only to
+	// a toolchain already installed and never download.
+	switchFromPath
+)
+
+// toolchainSwitching classifies a GOTOOLCHAIN value for the Go release named
+// by have. The suffix after "+" is what decides: "go1.21.0+auto" downloads,
+// "go1.21.0" alone does not.
+//
+// have matters because toolchain switching itself only exists from go1.21.
+// Older releases ignore GOTOOLCHAIN and print nothing for it, so reading the
+// mode alone would take a stock 1.19/1.20 for one that fetches on demand.
+func toolchainSwitching(have, mode string) switchMode {
+	if !goVersionAtLeast(have, minSwitchingGo) {
+		return switchNever
+	}
+	if _, suffix, ok := strings.Cut(mode, "+"); ok {
+		mode = suffix
+	}
+	switch mode {
+	case "auto":
+		return switchDownloads
+	case "path":
+		return switchFromPath
+	}
+	return switchNever
+}
+
+// requiredGoVersion reads the `go` directive from the checkout's go.mod. The
+// tree is usually absent on a first run — the install steps fetch it — so fall
+// back to the version recorded alongside the pin rather than skipping the
+// check and letting the build fail later on an old toolchain.
 func requiredGoVersion(root string) string {
 	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
-		return ""
+		return snapshot.MinGoVersion
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "go "); ok {
 			return strings.TrimSpace(v)
 		}
 	}
-	return ""
+	return snapshot.MinGoVersion
 }
 
 // goVersionAtLeast compares dotted version strings numerically. A missing

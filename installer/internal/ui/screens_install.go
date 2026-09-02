@@ -24,6 +24,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/steps"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/theme"
 )
@@ -155,7 +156,7 @@ func (s *controlPlaneScreen) Update(msg tea.Msg) tea.Cmd {
 func (s *controlPlaneScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
-	b.WriteString(theme.Subtle.Render("Builds the control-plane images from the vendored source with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet.") + "\n\n")
+	b.WriteString(theme.Subtle.Render("Builds the control-plane images from the pinned substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet.") + "\n\n")
 	b.WriteString(s.comp.view(w))
 
 	if s.showDrawer {
@@ -659,10 +660,17 @@ func (s *completeScreen) View(w int) string {
 		b.WriteString("\n" + theme.Subtle.Render("Press [y] to run `kubectl get pods -n ate-system` and see it live.") + "\n")
 	}
 
+	// A managed checkout is removed once the install succeeds, so its next
+	// steps cannot ask the user to run anything inside it — install the
+	// plugin straight from the pinned module instead.
+	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
+	if s.deps.Builder.Managed {
+		installAte = snapshot.KubectlAteInstall()
+	}
 	next := theme.Title.Render("Next steps") + "\n" +
 		theme.CommandLine.Render("kubectl port-forward -n ate-system svc/atenet-router 8000:80") + "\n" +
 		theme.Subtle.Render("then, if you deployed the counter demo:") + "\n" +
-		theme.CommandLine.Render(`go install ./cmd/kubectl-ate    # run inside the vendored substrate/ tree`) + "\n" +
+		theme.CommandLine.Render(installAte) + "\n" +
 		theme.CommandLine.Render("kubectl ate create atespace demo") + "\n" +
 		theme.CommandLine.Render("kubectl ate create actor my-counter-1 -a demo --template=ate-demo-counter/counter") + "\n" +
 		theme.CommandLine.Render(`curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" http://localhost:8000/`)

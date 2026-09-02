@@ -88,7 +88,7 @@ func testApp(t *testing.T) *App {
 		Runner:  execx.DryRun{Delay: time.Millisecond},
 		GCP:     &gcp.Client{DryRun: true},
 		Builder: &snapshot.Builder{Root: t.TempDir(), Version: "vendored-test"},
-		Checks:  doctor.Checks(t.TempDir()),
+		Checks:  doctor.Checks(t.TempDir(), true),
 		DryRun:  true,
 	}
 	return NewApp(deps)
@@ -214,7 +214,7 @@ func TestViewsRenderAtEveryStep(t *testing.T) {
 		Runner:  execx.DryRun{Delay: time.Millisecond},
 		GCP:     &gcp.Client{DryRun: true},
 		Builder: &snapshot.Builder{Root: t.TempDir(), Version: "vendored-test"},
-		Checks:  doctor.Checks(t.TempDir()),
+		Checks:  doctor.Checks(t.TempDir(), true),
 		DryRun:  true,
 	}
 	deps.Setup.ProjectID = "acme"
