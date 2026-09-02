@@ -110,11 +110,13 @@ wizard (the exit summary prints this exact invocation for your install):
 # or: make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone> BUCKET_NAME=<bucket>
 ```
 
-The script only needs `gcloud`, asks for confirmation before deleting, and is safe to
-re-run after a partial failure. To remove only the Substrate control plane while
-keeping the cluster, use the `ate-setup delete ate-system` command the exit summary
-prints instead. APIs enabled by the install are left enabled; they cost nothing while
-unused.
+The script asks for confirmation, then delegates the deletions to upstream's
+`hack/teardown.sh` fetched at the same pinned commit the installer built from — the
+teardown that matches what that bootstrap created — so it needs `gcloud` and `git`. It
+is safe to re-run after a partial failure. To remove only the Substrate control plane
+while keeping the cluster, use the `ate-setup delete ate-system` command the exit
+summary prints instead. APIs enabled by the install are left enabled; they cost
+nothing while unused.
 
 ## Development
 
