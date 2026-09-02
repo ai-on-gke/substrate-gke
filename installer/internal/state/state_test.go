@@ -78,6 +78,13 @@ func TestRegionDerivation(t *testing.T) {
 	}
 }
 
+func TestNewSetupDefaults(t *testing.T) {
+	s := NewSetup()
+	if s.ClusterName != "substrate-test" {
+		t.Errorf("ClusterName = %q, want substrate-test", s.ClusterName)
+	}
+}
+
 func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	s := NewSetup()
 	s.ProjectID = "acme"
