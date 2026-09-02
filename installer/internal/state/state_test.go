@@ -34,7 +34,7 @@ func TestMachineWalksTheWholeFlow(t *testing.T) {
 func TestMachinePrevUsesHistory(t *testing.T) {
 	m := NewMachine()
 	m.Next() // CheckSetup
-	m.Next() // Project
+	m.Next() // Images
 	if got, ok := m.Prev(); !ok || got != CheckSetup {
 		t.Fatalf("Prev() = %v/%v, want CheckSetup/true", got, ok)
 	}
@@ -56,8 +56,11 @@ func TestStepNumbering(t *testing.T) {
 	if n, ok := CheckSetup.Number(); !ok || n != 1 {
 		t.Fatalf("CheckSetup.Number() = %d/%v, want 1/true", n, ok)
 	}
-	if n, ok := FilestoreCSI.Number(); !ok || n != 6 {
-		t.Fatalf("FilestoreCSI.Number() = %d/%v, want 6/true", n, ok)
+	if n, ok := Images.Number(); !ok || n != 2 {
+		t.Fatalf("Images.Number() = %d/%v, want 2/true", n, ok)
+	}
+	if n, ok := FilestoreCSI.Number(); !ok || n != 7 {
+		t.Fatalf("FilestoreCSI.Number() = %d/%v, want 7/true", n, ok)
 	}
 	if n, _ := Demo.Number(); n != NumberedSteps {
 		t.Fatalf("Demo.Number() = %d, want %d", n, NumberedSteps)

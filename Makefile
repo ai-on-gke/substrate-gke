@@ -53,7 +53,7 @@ pin = $(shell grep -E '^[[:space:]]+$(1) = ' $(PIN_FILE) | sed -E 's/.*"(.*)".*/
 # fetched on demand, not vendored here.
 .PHONY: substrate-pin
 substrate-pin:
-	@grep -E '^[[:space:]]+(RepoURL|Commit|MinGoVersion) ' $(PIN_FILE)
+	@grep -E '^[[:space:]]+(RepoURL|Commit|MinGoVersion|ReleaseRepo|ReleaseVersion) ' $(PIN_FILE)
 
 # MinGoVersion is a hand-maintained mirror of upstream's go.mod at Commit, and
 # nothing else notices when the two drift — a stale value makes the doctor pass

@@ -109,6 +109,8 @@ func (a *App) screenFor(s state.Step) Screen {
 	switch s {
 	case state.Welcome:
 		return newWelcomeScreen(a.deps)
+	case state.Images:
+		return newImagesScreen(a.deps)
 	case state.CheckSetup:
 		return newDoctorScreen(a.deps)
 	case state.Project:

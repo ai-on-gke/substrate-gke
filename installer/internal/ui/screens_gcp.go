@@ -84,8 +84,14 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
 			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
 			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
-			newField("Image registry (leave empty for default)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 		)
+		// Only a build from source pushes images anywhere, so only it needs a
+		// registry to push them to.
+		if !st.Prebuilt() {
+			fields = append(fields,
+				newField("Image registry (leave empty for default)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
+			)
+		}
 	}
 	scr := &projectScreen{deps: deps, fields: fields}
 	scr.fields[0].input.Focus()
@@ -180,7 +186,7 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			f.set(st, strings.TrimSpace(f.input.Value()))
 		}
 		st.ProjectNumber = m.number
-		if st.KoDockerRepo == "" {
+		if st.KoDockerRepo == "" && !st.Prebuilt() {
 			st.KoDockerRepo = "gcr.io/" + st.ProjectID + "/ate-images"
 		}
 		return goNext

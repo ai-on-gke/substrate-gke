@@ -40,7 +40,7 @@ func TestSummaryDoesNotPointAtTheRemovedCache(t *testing.T) {
 	if strings.Contains(out, root) {
 		t.Errorf("summary points at a directory cleanup removed:\n%s", out)
 	}
-	if !strings.Contains(out, snapshot.TeardownCommand(st, "")) {
+	if !strings.Contains(out, snapshot.NewBuilder(root, true).TeardownCommand(st, "")) {
 		t.Errorf("summary does not offer a self-contained teardown:\n%s", out)
 	}
 }
