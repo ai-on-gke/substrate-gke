@@ -47,23 +47,19 @@ func TestMachinePrevUsesHistory(t *testing.T) {
 }
 
 func TestStepNumbering(t *testing.T) {
-	if _, ok := Welcome.Number(); ok {
-		t.Fatal("Welcome should not be numbered")
+	m := NewMachine()
+	for _, s := range []Step{Welcome, Complete} {
+		if _, ok := m.Position(s); ok {
+			t.Errorf("%v should not be numbered", s)
+		}
 	}
-	if _, ok := Complete.Number(); ok {
-		t.Fatal("Complete should not be numbered")
+	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, FilestoreCSI: 7} {
+		if n, ok := m.Position(step); !ok || n != want {
+			t.Errorf("Position(%v) = %d/%v, want %d/true", step, n, ok, want)
+		}
 	}
-	if n, ok := CheckSetup.Number(); !ok || n != 1 {
-		t.Fatalf("CheckSetup.Number() = %d/%v, want 1/true", n, ok)
-	}
-	if n, ok := Images.Number(); !ok || n != 2 {
-		t.Fatalf("Images.Number() = %d/%v, want 2/true", n, ok)
-	}
-	if n, ok := FilestoreCSI.Number(); !ok || n != 7 {
-		t.Fatalf("FilestoreCSI.Number() = %d/%v, want 7/true", n, ok)
-	}
-	if n, _ := Demo.Number(); n != NumberedSteps {
-		t.Fatalf("Demo.Number() = %d, want %d", n, NumberedSteps)
+	if n, _ := m.Position(Demo); n != m.NumberedSteps() {
+		t.Errorf("Position(Demo) = %d, want the last numbered step %d", n, m.NumberedSteps())
 	}
 }
 
@@ -138,6 +134,32 @@ func TestDefaultBucketName(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("defaultBucketName(%q, %q) = %q, want %q", tc.project, tc.zone, got, tc.want)
+		}
+	}
+}
+
+// The upgrade flow numbers its own steps: the sidebar counts positions in the
+// active order, not the Step constants, which belong to the install flow.
+func TestUpgradeOrderPositions(t *testing.T) {
+	m := NewMachine()
+	m.SetOrder(UpgradeOrder)
+	if m.Current() != Welcome {
+		t.Fatalf("after SetOrder: %v, want Welcome", m.Current())
+	}
+	if n := m.NumberedSteps(); n != 4 {
+		t.Errorf("NumberedSteps() = %d, want 4", n)
+	}
+	for step, want := range map[Step]int{CheckSetup: 1, UpgradeSource: 2, Images: 3, UpgradePlan: 4} {
+		if got, ok := m.Position(step); !ok || got != want {
+			t.Errorf("Position(%v) = %d/%v, want %d/true", step, got, ok, want)
+		}
+	}
+	if _, ok := m.Position(Project); ok {
+		t.Error("Project is not part of the upgrade flow")
+	}
+	for i := 1; i < len(UpgradeOrder); i++ {
+		if got := m.Next(); got != UpgradeOrder[i] {
+			t.Fatalf("Next() #%d = %v, want %v", i, got, UpgradeOrder[i])
 		}
 	}
 }

@@ -35,7 +35,15 @@ func (a *App) headerView() string {
 	if p := a.deps.Setup.ProjectID; p != "" {
 		badges = append(badges, theme.Subtle.Render("project: ")+theme.Accent.Render(p))
 	}
-	if a.mach.Current() > state.Cluster {
+	// The cluster is known once its choosing step is behind us: Cluster on
+	// an install, the installed-cluster step on an upgrade.
+	chooser := state.Cluster
+	if a.deps.Setup.Upgrade {
+		chooser = state.UpgradeSource
+	}
+	chooserPos, _ := a.mach.Position(chooser)
+	curPos, _ := a.mach.Position(a.mach.Current())
+	if a.mach.Current() == state.Complete || curPos > chooserPos {
 		badges = append(badges, theme.Subtle.Render("cluster: ")+theme.Accent.Render(a.deps.Setup.ClusterName))
 	}
 	right := strings.Join(badges, theme.Fainted.Render("  │  "))
@@ -51,34 +59,37 @@ func (a *App) headerView() string {
 // sidebarView is the step rail: progress plus the numbered timeline.
 func (a *App) sidebarView(w, h int) string {
 	cur := a.mach.Current()
+	total := a.mach.NumberedSteps()
 
 	var b strings.Builder
-	num, numbered := cur.Number()
+	num, numbered := a.mach.Position(cur)
 	switch {
+	case cur == state.Complete && a.deps.Setup.Upgrade:
+		b.WriteString(theme.Good.Render(" Upgrade prepared"))
 	case cur == state.Complete:
 		b.WriteString(theme.Good.Render(" Setup complete"))
 	case !numbered:
 		b.WriteString(theme.Subtle.Render(" Getting started"))
 	default:
-		b.WriteString(theme.Subtle.Render(fmt.Sprintf(" Step %d of %d", num, state.NumberedSteps)))
+		b.WriteString(theme.Subtle.Render(fmt.Sprintf(" Step %d of %d", num, total)))
 	}
 	b.WriteString("\n")
 
-	filled := int(cur)
+	filled := num
 	if cur == state.Complete {
-		filled = state.NumberedSteps
+		filled = total
 	}
-	bar := strings.Repeat("█", filled*2) + strings.Repeat("░", (state.NumberedSteps-filled)*2)
+	bar := strings.Repeat("█", filled*2) + strings.Repeat("░", (total-filled)*2)
 	b.WriteString(" " + theme.Accent.Render(bar) + "\n\n")
 
-	for _, s := range state.Order {
-		n, ok := s.Number()
+	for _, s := range a.mach.Order() {
+		n, ok := a.mach.Position(s)
 		if !ok {
 			continue
 		}
 		glyph, style := theme.GlyphPending, theme.Fainted
 		switch {
-		case s < cur:
+		case n < num || cur == state.Complete:
 			glyph, style = theme.GlyphDone, theme.Good
 		case s == cur:
 			glyph, style = theme.GlyphActive, theme.Title

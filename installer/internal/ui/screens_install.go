@@ -611,7 +611,7 @@ func (s *completeScreen) Init() tea.Cmd      { return nil }
 func (s *completeScreen) CapturesText() bool { return false }
 
 func (s *completeScreen) Hints() []Hint {
-	if s.comp == nil {
+	if s.comp == nil && !s.deps.Setup.Upgrade {
 		return []Hint{{"y", "verify the install"}, {"enter/q", "finish"}}
 	}
 	return []Hint{{"enter/q", "finish"}}
@@ -629,7 +629,7 @@ func (s *completeScreen) Update(msg tea.Msg) tea.Cmd {
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
 		case "y":
-			if s.comp == nil {
+			if s.comp == nil && !s.deps.Setup.Upgrade {
 				s.comp = newExecComp(s.deps.Runner, s.deps.Builder.Verify(s.deps.Setup), nil)
 				return s.comp.start()
 			}
@@ -643,6 +643,12 @@ func (s *completeScreen) Update(msg tea.Msg) tea.Cmd {
 func (s *completeScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
+	if st.Upgrade {
+		installedDir, nextDir := s.deps.Builder.UpgradeTrees(s.deps.UpgradeDir, st)
+		b.WriteString(theme.Good.Render("● UPGRADE PREPARED") + "\n\n")
+		b.WriteString(theme.Panel.Width(w-4).Render(s.deps.Builder.UpgradeSummary(st, installedDir, nextDir)) + "\n")
+		return b.String()
+	}
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")
 
 	summary := fmt.Sprintf(

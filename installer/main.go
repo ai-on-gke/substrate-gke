@@ -40,8 +40,18 @@ func main() {
 		doctorMode    = flag.Bool("doctor", false, "run the preflight checks and exit")
 		dryRun        = flag.Bool("dry-run", false, "walk the full wizard without touching GCP (simulated commands)")
 		substrateRoot = flag.String("substrate-root", "", "use an existing substrate checkout instead of fetching the pinned one")
+		fetchTree     = flag.String("fetch-substrate", "", "fetch a substrate checkout into this directory and exit (the pinned commit, or --commit)")
+		fetchCommit   = flag.String("commit", "", "with --fetch-substrate: the commit to fetch instead of the pinned one")
 	)
 	flag.Parse()
+
+	if *fetchTree != "" {
+		if err := snapshot.FetchTree(context.Background(), *fetchTree, *fetchCommit); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Fail here even under --dry-run: a bad --substrate-root would otherwise
 	// leave root empty, and an empty root reaches the exit summary as a
@@ -76,6 +86,11 @@ func main() {
 		Checks:  doctor.Checks(root, managed),
 		DryRun:  *dryRun,
 	}
+	if dir, err := snapshot.DefaultUpgradeDir(); err == nil {
+		deps.UpgradeDir = dir
+	} else {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	}
 	// Mark the tree as ours before anything can fetch it, so a concurrent
 	// installer finishing first cannot tidy it away mid-install. Not under
 	// --dry-run: a simulated run fetches nothing worth guarding, and even
@@ -93,7 +108,9 @@ func main() {
 	// Only once the install actually worked, and never against a simulated
 	// run, which fetched nothing and would otherwise delete real caches.
 	cleaned := false
-	if app.Completed && !*dryRun {
+	// An upgrade fetched nothing into the install cache, and its trees have
+	// to stay for the runbook, so there is nothing to tidy.
+	if app.Completed && !*dryRun && !deps.Setup.Upgrade {
 		if err := deps.Builder.Cleanup(); err != nil {
 			fmt.Fprintln(os.Stderr, "warning: could not tidy the substrate cache:", err)
 		} else {
@@ -101,16 +118,23 @@ func main() {
 		}
 	}
 
-	printSummary(app, deps.Setup, deps.Builder, cleaned)
+	printSummary(app, deps, cleaned)
 }
 
 // printSummary leaves a plain-text recap in the terminal after the alt
 // screen closes, like the prototype's exit panel. cleaned reports whether
 // Cleanup actually removed the managed tree — under --dry-run it never runs,
 // and it can fail, so the summary must not claim more than happened.
-func printSummary(app *ui.App, st *state.Setup, b *snapshot.Builder, cleaned bool) {
+func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
+	st, b := deps.Setup, deps.Builder
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
+		return
+	}
+	if st.Upgrade {
+		installedDir, nextDir := b.UpgradeTrees(deps.UpgradeDir, st)
+		fmt.Println(theme.Good.Render("Upgrade prepared."))
+		fmt.Println(b.UpgradeSummary(st, installedDir, nextDir))
 		return
 	}
 	fmt.Println(theme.Good.Render("Substrate installed."))

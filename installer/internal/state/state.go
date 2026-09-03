@@ -37,6 +37,12 @@ const (
 	Autoscaling
 	Demo
 	Complete
+
+	// The upgrade track's own steps. They come after Complete so the install
+	// steps keep their numbers; their position on screen comes from the
+	// Machine's order, not from these values.
+	UpgradeSource
+	UpgradePlan
 )
 
 // Order is the linear flow of the wizard.
@@ -49,6 +55,15 @@ const (
 var Order = []Step{
 	Welcome, CheckSetup, Images, Project, Cluster, Provision,
 	ControlPlane, FilestoreCSI, Autoscaling, Demo, Complete,
+}
+
+// UpgradeOrder is the flow for upgrading a cluster this installer set up. It
+// touches nothing in GCP: it reads the cluster's install record, asks where
+// the new version comes from with the same images step an install uses,
+// fetches the two source trees upstream's runbook runs from, and records the
+// new version. The upgrade itself is upstream's docs/upgrade.md.
+var UpgradeOrder = []Step{
+	Welcome, CheckSetup, UpgradeSource, Images, UpgradePlan, Complete,
 }
 
 // Title returns the heading shown for a step.
@@ -76,37 +91,59 @@ func (s Step) Title() string {
 		return "Deploy a demo workload"
 	case Complete:
 		return "Complete"
+	case UpgradeSource:
+		return "Choose the installed cluster"
+	case UpgradePlan:
+		return "Prepare the upgrade"
 	}
 	return "?"
 }
 
-// Number returns the 1-based wizard position for the numbered middle steps
-// and false for Welcome and Complete.
-func (s Step) Number() (int, bool) {
-	if s == Welcome || s == Complete {
-		return 0, false
-	}
-	return int(s), true
-}
-
-// NumberedSteps is how many numbered steps the sidebar shows.
-const NumberedSteps = int(Demo)
-
 // Machine is the linear step machine with back-navigation history.
 type Machine struct {
+	order   []Step
 	idx     int
 	history []int
 }
 
-// NewMachine starts at Welcome.
-func NewMachine() *Machine { return &Machine{} }
+// NewMachine starts at Welcome on the install flow.
+func NewMachine() *Machine { return &Machine{order: Order} }
+
+// SetOrder switches the flow, which the welcome screen does when the user
+// picks the upgrade track. Both flows start at Welcome, so switching there
+// keeps the current step in place.
+func (m *Machine) SetOrder(order []Step) {
+	m.order = order
+	m.idx = 0
+	m.history = nil
+}
+
+// Order returns the steps of the active flow.
+func (m *Machine) Order() []Step { return m.order }
+
+// Position returns the 1-based position of s among the numbered steps of the
+// active flow, and false for Welcome, Complete, and steps not in the flow.
+func (m *Machine) Position(s Step) (int, bool) {
+	if s == Welcome || s == Complete {
+		return 0, false
+	}
+	for i, o := range m.order {
+		if o == s {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// NumberedSteps is how many numbered steps the active flow has.
+func (m *Machine) NumberedSteps() int { return len(m.order) - 2 }
 
 // Current returns the active step.
-func (m *Machine) Current() Step { return Order[m.idx] }
+func (m *Machine) Current() Step { return m.order[m.idx] }
 
 // Next advances to the following step and records history for Prev.
 func (m *Machine) Next() Step {
-	if m.idx < len(Order)-1 {
+	if m.idx < len(m.order)-1 {
 		m.history = append(m.history, m.idx)
 		m.idx++
 	}
@@ -140,6 +177,21 @@ const (
 // Setup accumulates everything the user chose plus values resolved from GCP.
 type Setup struct {
 	Track string
+
+	// Upgrade selects the upgrade track: the cluster is already installed,
+	// and the run prepares upstream's rolling upgrade instead of installing.
+	Upgrade bool
+	// InstalledRepo, InstalledCommit and InstalledVersion describe the
+	// Substrate a cluster runs today, read off the cluster itself; an
+	// upgrade fetches that tree for rollback.
+	InstalledRepo    string
+	InstalledCommit  string
+	InstalledVersion string
+	// InstalledImageRepo and InstalledImageTag are set when the installed
+	// version runs published images; a build from source leaves them empty
+	// and its registry in KoDockerRepo.
+	InstalledImageRepo string
+	InstalledImageTag  string
 
 	// ImageRepo and ImageTag name an already-published set of Substrate
 	// images for ate-setup to install. When ImageRepo is empty the images are
@@ -237,7 +289,11 @@ func (s *Setup) ApplyProjectDefaults() error {
 		s.BucketName = b
 	}
 	if s.KoDockerRepo == "" && !s.Prebuilt() {
-		s.KoDockerRepo = "gcr.io/" + s.ProjectID + "/ate-images"
+		s.KoDockerRepo = s.DefaultKoDockerRepo()
 	}
 	return nil
 }
+
+// DefaultKoDockerRepo is the registry a build from source pushes to when
+// none was given: one in the project itself.
+func (s *Setup) DefaultKoDockerRepo() string { return "gcr.io/" + s.ProjectID + "/ate-images" }

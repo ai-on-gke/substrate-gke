@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -465,6 +466,67 @@ func testSetup(t *testing.T) *state.Setup {
 	return st
 }
 
+// The fetch has to produce a usable checkout of exactly the commit asked for,
+// and refuse to write into a directory that already holds one.
+func TestFetchTreeChecksOutTheCommit(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", origin}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "-q")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "first")
+	if err := os.WriteFile(filepath.Join(origin, "go.mod"), []byte("module example.com/substrate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "go.mod")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "second")
+	want := run("rev-parse", "HEAD")
+
+	dir := filepath.Join(t.TempDir(), "tree")
+	if err := fetchTree(context.Background(), dir, origin, want); err != nil {
+		t.Fatalf("fetchTree: %v", err)
+	}
+	got, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse in the fetched tree: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("fetched tree is at %s, want %s", got, want)
+	}
+	if !isCheckout(dir) {
+		t.Errorf("fetched tree has no go.mod")
+	}
+	if _, err := os.Stat(filepath.Join(dir, CompleteMarker)); err != nil {
+		t.Errorf("a fetched tree should carry the completion marker: %v", err)
+	}
+	if status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output(); err != nil || len(status) != 0 {
+		t.Errorf("the marker must not dirty the tree (%v):\n%s", err, status)
+	}
+	if err := fetchTree(context.Background(), dir, origin, want); err == nil {
+		t.Errorf("fetching over an existing checkout should be refused")
+	}
+	// An interrupted checkout has go.mod and little else; it is refused with
+	// a way out, not mistaken for a tree.
+	partial := filepath.Join(t.TempDir(), "partial")
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fetchTree(context.Background(), partial, origin, want); err == nil || !strings.Contains(err.Error(), "remove it") {
+		t.Errorf("a partial tree should be refused with instructions, got %v", err)
+	}
+}
+
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
 	spec := b.Bootstrap(testSetup(t))
@@ -690,5 +752,147 @@ func TestUseSourceLeavesAnExplicitCheckoutInPlace(t *testing.T) {
 	}
 	if b.Version != "substrate-local" {
 		t.Errorf("Version = %q, want substrate-local", b.Version)
+	}
+}
+
+// The upgrade's one command fetches the installed commit and the new one into
+// directories that stay, reuses a tree it already fetched whole, and then
+// records the new version (best effort: no cluster here, so it only warns).
+func TestFetchTreesFetchesBothCommits(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", origin}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "-q")
+	if err := os.WriteFile(filepath.Join(origin, "go.mod"), []byte("module example.com/substrate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "go.mod")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "old")
+	oldSHA := run("rev-parse", "HEAD")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "new")
+	newSHA := run("rev-parse", "HEAD")
+
+	b := NewBuilder(filepath.Join(t.TempDir(), "cache", "substrate-x"), true)
+	b.UseSource(Revision{Repo: origin, Commit: newSHA})
+	st := testSetup(t)
+	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = origin, oldSHA, "substrate-"+shorten(oldSHA)
+
+	// A path with a space and a $ in it: the script must quote it
+	// everywhere, messages included, or set -u aborts on the expansion.
+	base := filepath.Join(t.TempDir(), "up grades $HOME_x")
+	installedDir, nextDir := b.UpgradeTrees(base, st)
+	if installedDir == nextDir || !strings.HasPrefix(installedDir, base) {
+		t.Fatalf("UpgradeTrees = %q, %q", installedDir, nextDir)
+	}
+	spec := b.FetchTrees(st, installedDir, nextDir)
+	if script := spec.Argv[len(spec.Argv)-1]; strings.Contains(script, "kubectl") || strings.Contains(script, "gcloud") {
+		t.Fatalf("FetchTrees must not touch the cluster:\n%s", script)
+	}
+	// A tree left half-fetched, without its marker, is replaced whole.
+	if err := os.MkdirAll(installedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installedDir, "leftover"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		out, err := exec.Command(spec.Argv[0], spec.Argv[1:]...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("fetch run %d: %v\n%s", i, err, out)
+		}
+		if i == 1 && !strings.Contains(string(out), "Using cached") {
+			t.Errorf("second run should reuse the trees:\n%s", out)
+		}
+		if !strings.Contains(string(out), " "+installedDir) {
+			t.Errorf("run %d should print the tree's path as it is:\n%s", i, out)
+		}
+	}
+	for dir, want := range map[string]string{installedDir: oldSHA, nextDir: newSHA} {
+		got, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		if err != nil || strings.TrimSpace(string(got)) != want {
+			t.Errorf("%s is at %q (%v), want %s", dir, strings.TrimSpace(string(got)), err, want)
+		}
+		// The marker must not count as a change: Go would stamp a binary
+		// built here as dirty.
+		if status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output(); err != nil || len(status) != 0 {
+			t.Errorf("%s is not clean after the fetch (%v):\n%s", dir, err, status)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(installedDir, "leftover")); err == nil {
+		t.Errorf("a marker-less tree should have been replaced, not fetched into")
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), stageInfix) {
+			t.Errorf("staging directory left behind: %s", e.Name())
+		}
+	}
+	// The installed commit was read off the cluster, not resolved against
+	// the repository; one it cannot serve has to say so, not die in git.
+	st.InstalledCommit = "0123456789abcdef0123456789abcdef01234567"
+	missingDir, _ := b.UpgradeTrees(base, st)
+	missing := b.FetchTrees(st, missingDir, nextDir)
+	if out, err := exec.Command(missing.Argv[0], missing.Argv[1:]...).CombinedOutput(); err == nil || !strings.Contains(string(out), "is not in "+origin) {
+		t.Errorf("a commit the repository cannot serve should be reported (%v):\n%s", err, out)
+	}
+	if _, err := os.Stat(missingDir); err == nil {
+		t.Errorf("a failed fetch should leave no tree at %s", missingDir)
+	}
+	summary := b.UpgradeSummary(st, installedDir, nextDir)
+	for _, want := range []string{RunbookURL, "cd " + ShellQuote(installedDir), "cd " + ShellQuote(nextDir),
+		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
+		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
+		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
+		"export KO_DOCKER_REPO=" + ShellQuote(st.KoDockerRepo), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
+		}
+	}
+	if strings.Contains(summary, "NO_DEV_ENV") || strings.Count(summary, "export PROJECT_ID=") != 1 {
+		t.Errorf("the rollback block should carry only what changes:\n%s", summary)
+	}
+	// Every indented line is meant to be pasted into a shell, the cd lines
+	// into the trees just fetched.
+	var script []string
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
+			script = append(script, strings.TrimSpace(line))
+		}
+	}
+	script = append(script, `printf '%s|%s|%s' "$NEW_VERSION" "$VERSION" "$PWD"`)
+	out, err := exec.Command("bash", "-euo", "pipefail", "-c", strings.Join(script, "\n")).Output()
+	if err != nil || string(out) != b.SubstrateVersion(st)+"|"+st.InstalledVersion+"|"+installedDir {
+		t.Errorf("pasting the hand-over gave %q, %v", out, err)
+	}
+}
+
+// A cluster that ran pre-built images and moves to a build from source: the
+// installed side exports the images it ran, the new side a registry for the
+// build to push to, which nothing in the upgrade flow asked for.
+func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	st := testSetup(t)
+	st.KoDockerRepo = ""
+	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", ReleaseRepo, "v0.1.0"
+
+	installed := InstalledExports(st)
+	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "export KO_DOCKER_REPO") {
+		t.Errorf("installed exports:\n%s", installed)
+	}
+	next := b.NewExports(st)
+	if !strings.Contains(next, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
+		t.Errorf("new exports:\n%s", next)
 	}
 }

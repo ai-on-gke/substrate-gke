@@ -120,6 +120,13 @@ func isCheckout(dir string) bool {
 	return err == nil
 }
 
+// excludeMarker keeps CompleteMarker out of git's view of the tree: Go
+// stamps a binary built from a tree with untracked files as dirty, and the
+// marker would otherwise mark every image the installer builds that way.
+func excludeMarker(dir string) string {
+	return fmt.Sprintf(`echo %s >> %s/.git/info/exclude`, CompleteMarker, dir)
+}
+
 // CompleteMarker is written at the top of a managed checkout once its fetch
 // has finished. Presence of the marker — not of go.mod — is what makes the
 // cache trustworthy: git checks files out in path order, so an interrupted
@@ -249,19 +256,28 @@ func removeUnlessLive(base, name string) error {
 	return os.RemoveAll(filepath.Join(base, name))
 }
 
-// fetchAt returns the git commands that materialize commit from repo inside
-// dir, which must already exist. dir is spliced into shell text as-is, so
-// callers pass an already-quoted word; repo is a URL the user may have typed,
-// so it is quoted here. Fetching the URL directly instead of through a named
-// remote keeps the recipe usable both in the fetch preamble and in the
-// pasteable teardown command, which share it so the revision can never drift
-// between them.
-func fetchAt(dir, repo, commit string) []string {
-	return []string{
-		"git -C " + dir + " init -q",
-		fmt.Sprintf("git -C %s fetch -q --depth 1 %s %s", dir, ShellQuote(repo), commit),
-		"git -C " + dir + " checkout -q FETCH_HEAD",
+// gitFetchSteps is the recipe that materializes commit from repo inside an
+// existing directory, as git argument lists. Fetching the URL directly
+// instead of through a named remote keeps it usable in the fetch preamble,
+// in the pasteable teardown command and in FetchTree, which all run it so the
+// revision can never drift between them.
+func gitFetchSteps(repo, commit string) [][]string {
+	return [][]string{
+		{"init", "-q"},
+		{"fetch", "-q", "--depth", "1", repo, commit},
+		{"checkout", "-q", "FETCH_HEAD"},
 	}
+}
+
+// fetchAt renders gitFetchSteps for a shell. dir is spliced into shell text
+// as-is, so callers pass an already-quoted word; repo is a URL the user may
+// have typed, so it is quoted here.
+func fetchAt(dir, repo, commit string) []string {
+	var lines []string
+	for _, step := range gitFetchSteps(ShellQuote(repo), commit) {
+		lines = append(lines, "git -C "+dir+" "+strings.Join(step, " "))
+	}
+	return lines
 }
 
 // inEphemeralTree wraps command in a pasteable subshell that fetches the
@@ -336,8 +352,9 @@ func NewBuilder(root string, managed bool) *Builder {
 	return &Builder{Root: root, Managed: managed, Version: version, repo: RepoURL, commit: Commit}
 }
 
-// UseSource repoints the builder at another repository and commit — a fork, a
-// branch, or a hotfix the user named in the images step.
+// UseSource repoints the builder at the commit the user named in the images
+// step: a branch, a tag, or a commit of the upstream repository, which is the
+// only one either track reads.
 //
 // A managed tree is cached per commit, so the root and the ko version stamp
 // move with it: two revisions never share a directory, and the images one
@@ -495,6 +512,7 @@ func (b *Builder) ensure() []string {
 	for _, cmd := range fetchAt(`"${STAGE}"`, b.repo, b.commit) {
 		lines = append(lines, "    "+cmd)
 	}
+	lines = append(lines, "    "+excludeMarker(`"${STAGE}"`))
 	return append(lines,
 		fmt.Sprintf(`    touch "${STAGE}/%s"`, CompleteMarker),
 		// If a concurrent run published first, its tree is as good as ours;

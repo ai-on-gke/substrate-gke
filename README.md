@@ -31,8 +31,8 @@ each running the real command it shows and streaming its output:
 1. **Check your setup** — probes for gcloud, application-default credentials, Go,
    kubectl, network reachability, and git, with copy-paste fixes. It runs first
    because the next step is the first to reach the network.
-2. **Choose your images** — build them yourself from a source tree you name, or
-   install pre-built images — see
+2. **Choose your images** — build them yourself from a commit of the Substrate
+   repository, or install pre-built images — see
    [Where the images come from](#where-the-images-come-from). It comes before the
    project step because the answer decides what that step needs: a pre-built
    install pushes nothing, so it is never asked for a registry.
@@ -53,7 +53,9 @@ each running the real command it shows and streaming its output:
 9. **Deploy a demo workload** (optional) — the upstream counter demo, then a live
    verification and next steps.
 
-Exiting and re-running is always safe; every step is idempotent.
+Exiting and re-running is safe at the same pinned commit; every step is
+idempotent. Re-running at a newer pinned commit does not upgrade a cluster that is
+already installed; see [Upgrading an installed cluster](#upgrading-an-installed-cluster).
 
 ## Repository layout
 
@@ -64,12 +66,14 @@ installer/   The wizard (Go, bubbletea). `go run .` from this directory works to
 ## Where the images come from
 
 The images step chooses between two ways of getting the Substrate control-plane
-images. Both end up naming a git commit, because `ate-setup` reads the deployment
-manifests from a source tree either way.
+images. Both end up naming a commit of one repository,
+`https://github.com/agent-substrate/substrate`, because `ate-setup` reads the deployment
+manifests from a source tree either way. The repository is fixed; the commit is yours
+to choose.
 
-**Pre-built images** — four fields: the image registry, the image
-tag, the manifest repository, and the manifest commit id. All four are offered
-pre-filled and all four can be overridden. The defaults are the published release at
+**Pre-built images** — three fields: the image registry, the image tag, and the commit
+the images were built from. All three are offered pre-filled and all three can be
+overridden. The defaults are the published release at
 `us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we will host the
 release images — it is coming soon, and the step says so — and the commit pinned below,
 which is what they were built from. `ate-setup` pins every image to the digest its tag
@@ -78,28 +82,27 @@ registry of its own; the release registry in particular is pull-only.
 
 Any registry and tag work, so a team that publishes its own builds — a staging
 registry, or a private rebuild of a release — installs them by typing them here rather
-than by building from source. **Move the manifest fields with them.** Only the release
-registry is published alongside a tree known to match its tags; images from anywhere
-else need the repository and commit they were built from, or they run behind manifests
-from a different Substrate. The wizard warns about this as soon as the registry is
-changed. (Inferring the commit from the images themselves is a later change.)
+than by building from source. **Move the commit with them.** Only the release registry
+is published alongside a commit known to match its tags; images from anywhere else
+need the commit they were built from, or they run behind manifests from a different
+Substrate. The wizard warns about this as soon as the registry or tag is changed.
 
 The tag doubles as the Substrate version — it names the atelet DaemonSet and sets the
 `ate.dev/substrate-version` node label — so it has to be a valid Kubernetes label
 value, and the wizard says so at the prompt rather than letting the install discover it.
 A tag that carries its digest (`v0.1.0@sha256:…`) is fine; the version is the tag alone.
 
-**A build from source** — for a fork, a branch, or a private hotfix. You give a
-repository (defaulting to `agent-substrate/substrate`) and a revision in it: a branch, a
-tag, or a full commit SHA. The revision box is pre-filled with that repository's current
-HEAD, resolved with `git ls-remote` and shown as a commit id, so accepting it builds
-exactly what is on the default branch right now; editing the repository clears it. The
-images are built with [ko](https://ko.build) and pushed to your project's registry.
+**A build from source** — for a branch or a commit that has no published images. You
+give a revision: a branch, a tag, or a full commit SHA. The box is pre-filled with the
+repository's current HEAD, resolved with `git ls-remote` and shown as a commit id, so
+accepting it builds exactly what is on the default branch right now. The images are
+built with [ko](https://ko.build) and pushed to your project's registry. A checkout of
+your own, a fork included, is installed with `--substrate-root` instead; see below.
 
 Either way, what you name is resolved to an exact commit before the install starts, and
 that commit is checked against the remote with a filtered shallow fetch — naming a commit and
 being served it are different things, and the difference is better found at the prompt
-than ten minutes into an install. Repositories are read over https only.
+than ten minutes into an install.
 
 ## How Substrate itself is obtained
 
@@ -137,7 +140,10 @@ cd installer && go run . --substrate-root=/path/to/substrate
 
 A checkout you supply this way is used as-is and never modified or deleted.
 
-### Moving to a newer Substrate
+### Bumping the pinned commit
+
+This changes what fresh installs get. It does not upgrade clusters that are already
+installed; those follow [Upgrading an installed cluster](#upgrading-an-installed-cluster).
 
 Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion`
 next to it to match the `go` directive in that revision's `go.mod`. `make substrate-pin`
@@ -151,8 +157,30 @@ published, since `Commit` is the manifest revision offered behind those images a
 to be what they were built from.
 
 All three are defaults, not limits. The wizard accepts any registry, tag, and revision,
-and the build-from-source track never uses `Commit` at all — it offers its repository's
+and the build-from-source track never uses `Commit` at all — it offers the repository's
 live HEAD — so none of them has to change for someone installing their own build.
+
+## Upgrading an installed cluster
+
+Coming in a later release. Upgrades will be guaranteed only within a release branch.
+Until then, reinstall.
+
+Upgrades follow upstream's rolling upgrade runbook,
+[`docs/upgrade.md`](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md)
+in the Substrate tree. Do not re-run the install track against a cluster that already
+runs Substrate; run the installer and choose **Upgrade an installed cluster** instead. It
+names the cluster and reads what it runs off the cluster, takes the new version from the
+same images step an install uses, fetches the installed and the new source trees into
+`~/.cache/substrate-gke/upgrades/`, and prints the hand-over in the order the runbook reads:
+the runbook, the variables its commands use, the tree to check out and the environment for
+its `ate-setup` commands, and what a rollback changes in them. Nothing on the cluster
+changes until you follow the runbook.
+
+The installed tree is fetched at the commit the running API server reports it was built
+from; Go stamps every binary with the commit of the tree it was built in, and `ateapi
+--version` prints it. When the cluster cannot be read, or the binary carries no commit,
+the commit and version are typed in, along with the registry of the installed images when
+they were pre-built.
 
 ## Tearing down
 

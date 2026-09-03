@@ -187,7 +187,7 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		}
 		st.ProjectNumber = m.number
 		if st.KoDockerRepo == "" && !st.Prebuilt() {
-			st.KoDockerRepo = "gcr.io/" + st.ProjectID + "/ate-images"
+			st.KoDockerRepo = st.DefaultKoDockerRepo()
 		}
 		return goNext
 
