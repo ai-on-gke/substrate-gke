@@ -58,11 +58,11 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 	fetch := func(dir, repo, commit string) []string {
 		q := ShellQuote(dir)
 		return append([]string{
-			fmt.Sprintf(`if [ -e %s/%s ]; then echo "Using cached substrate@%s at %s"; else`, q, CompleteMarker, shorten(commit), dir),
+			fmt.Sprintf(`if [ -e %s/%s ]; then echo "Using cached substrate@%s at "%s; else`, q, CompleteMarker, shorten(commit), q),
 			fmt.Sprintf(`rm -rf %s && mkdir -p %s`, q, q),
 		}, append(fetchAt(q, repo, commit),
 			fmt.Sprintf(`: > %s/%s`, q, CompleteMarker),
-			fmt.Sprintf(`echo "Fetched substrate@%s into %s"`, shorten(commit), dir),
+			fmt.Sprintf(`echo "Fetched substrate@%s into "%s`, shorten(commit), q),
 			`fi`,
 		)...)
 	}

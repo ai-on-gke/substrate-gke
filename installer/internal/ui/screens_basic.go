@@ -30,8 +30,9 @@ import (
 // ─── Welcome ───────────────────────────────────────────────────────────────
 
 type welcomeScreen struct {
-	deps   *Deps
-	cursor int
+	deps    *Deps
+	cursor  int
+	errText string
 }
 
 func newWelcomeScreen(deps *Deps) *welcomeScreen {
@@ -69,6 +70,12 @@ func (s *welcomeScreen) Update(msg tea.Msg) tea.Cmd {
 	case "3":
 		s.cursor = 2
 	case "enter":
+		if s.cursor == 2 && s.deps.UpgradeDir == "" {
+			// Without it the trees would land, and be swept, relative to
+			// wherever the installer was started.
+			s.errText = "The upgrade track keeps its source trees under the user cache directory, which could not be located. Set HOME and run again."
+			return nil
+		}
 		st := s.deps.Setup
 		st.Upgrade = s.cursor == 2
 		if s.cursor == 1 {
@@ -102,6 +109,9 @@ func (s *welcomeScreen) View(w int) string {
 		b.WriteString(panel.Width(min(w-4, 70)).Render(title.Render(label)+"\n"+theme.Subtle.Render(t.desc)) + "\n")
 	}
 
+	if s.errText != "" {
+		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 70)).Render(theme.Bad.Render(s.errText)) + "\n")
+	}
 	b.WriteString("\n" + theme.Subtle.Render("This wizard provisions GCP resources, then builds and installs the"))
 	b.WriteString("\n" + theme.Subtle.Render("Substrate control plane onto a GKE cluster. Every step shows the real"))
 	b.WriteString("\n" + theme.Subtle.Render("command it runs and streams its output."))

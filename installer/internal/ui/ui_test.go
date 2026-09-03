@@ -614,12 +614,88 @@ func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
 	typeText(t, app, installed)
 	press("enter")
 	typeText(t, app, "substrate-0123456789ab")
-	press("enter", "enter") // bucket blank → submit
+	press("enter", "enter") // registry blank: a build from source
 	if app.mach.Current() != state.Images {
 		t.Fatalf("after describing the cluster: %v (%s)", app.mach.Current(), scr.errText)
 	}
 	st := app.deps.Setup
-	if st.InstalledCommit != installed || st.InstalledVersion != "substrate-0123456789ab" || st.BucketName != "ate-snapshots-acme-us-west1-c" {
+	if st.InstalledCommit != installed || st.InstalledVersion != "substrate-0123456789ab" || st.InstalledImageRepo != "" {
 		t.Fatalf("described cluster not recorded: %+v", st)
+	}
+	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") {
+		t.Errorf("a build from source described by hand rolls back through the project's registry:\n%s", exports)
+	}
+}
+
+// A pre-built cluster described by hand names its registry, so the rollback
+// environment carries the images it runs rather than a build. Leaving the
+// images step at the release it already runs is then refused: the runbook
+// cannot roll a version onto itself.
+func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.Runner = noRecordRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter", "enter")
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter", "m")
+	typeText(t, app, snapshot.Commit)
+	press("enter")
+	typeText(t, app, snapshot.ReleaseVersion)
+	press("enter")
+	typeText(t, app, "gcr.io/acme/mirror")
+	press("enter")
+	if app.mach.Current() != state.Images {
+		t.Fatalf("after describing the cluster: %v", app.mach.Current())
+	}
+	st := app.deps.Setup
+	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != snapshot.ReleaseVersion {
+		t.Fatalf("pre-built install not recorded: %+v", st)
+	}
+	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(snapshot.ReleaseVersion)) || strings.Contains(exports, "KO_DOCKER_REPO") {
+		t.Errorf("rollback exports for a pre-built install:\n%s", exports)
+	}
+
+	press("enter", "enter", "enter", "enter", "enter") // the release again, as installed
+	if app.mach.Current() != state.UpgradePlan {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	plan := app.cur.(*upgradePlanScreen)
+	if plan.blocked == "" || plan.comp != nil {
+		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", snapshot.ReleaseVersion, plan.blocked)
+	}
+	if view := app.View(); !strings.Contains(view, "same as the installed one") {
+		t.Errorf("plan view should say why:\n%s", view)
+	}
+	press("b")
+	if app.mach.Current() != state.Images {
+		t.Fatalf("back from the refusal should return to the images step, got %v", app.mach.Current())
+	}
+}
+
+// Without a cache directory the trees would land relative to the working
+// directory, and be swept from there; the track is refused up front.
+func TestUpgradeTrackNeedsACacheDirectory(t *testing.T) {
+	app := testApp(t)
+	app.deps.UpgradeDir = ""
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	pump(t, app, key("3"))
+	pump(t, app, key("enter"))
+	if app.mach.Current() != state.Welcome {
+		t.Fatalf("the upgrade track should not start: %v", app.mach.Current())
+	}
+	if view := app.View(); !strings.Contains(view, "could not be located") {
+		t.Errorf("welcome should say why:\n%s", view)
+	}
+	pump(t, app, key("1"))
+	pump(t, app, key("enter"))
+	if app.mach.Current() != state.CheckSetup {
+		t.Fatalf("the install track should still start: %v", app.mach.Current())
 	}
 }

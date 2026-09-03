@@ -249,19 +249,28 @@ func removeUnlessLive(base, name string) error {
 	return os.RemoveAll(filepath.Join(base, name))
 }
 
-// fetchAt returns the git commands that materialize commit from repo inside
-// dir, which must already exist. dir is spliced into shell text as-is, so
-// callers pass an already-quoted word; repo is a URL the user may have typed,
-// so it is quoted here. Fetching the URL directly instead of through a named
-// remote keeps the recipe usable both in the fetch preamble and in the
-// pasteable teardown command, which share it so the revision can never drift
-// between them.
-func fetchAt(dir, repo, commit string) []string {
-	return []string{
-		"git -C " + dir + " init -q",
-		fmt.Sprintf("git -C %s fetch -q --depth 1 %s %s", dir, ShellQuote(repo), commit),
-		"git -C " + dir + " checkout -q FETCH_HEAD",
+// gitFetchSteps is the recipe that materializes commit from repo inside an
+// existing directory, as git argument lists. Fetching the URL directly
+// instead of through a named remote keeps it usable in the fetch preamble,
+// in the pasteable teardown command and in FetchTree, which all run it so the
+// revision can never drift between them.
+func gitFetchSteps(repo, commit string) [][]string {
+	return [][]string{
+		{"init", "-q"},
+		{"fetch", "-q", "--depth", "1", repo, commit},
+		{"checkout", "-q", "FETCH_HEAD"},
 	}
+}
+
+// fetchAt renders gitFetchSteps for a shell. dir is spliced into shell text
+// as-is, so callers pass an already-quoted word; repo is a URL the user may
+// have typed, so it is quoted here.
+func fetchAt(dir, repo, commit string) []string {
+	var lines []string
+	for _, step := range gitFetchSteps(ShellQuote(repo), commit) {
+		lines = append(lines, "git -C "+dir+" "+strings.Join(step, " "))
+	}
+	return lines
 }
 
 // inEphemeralTree wraps command in a pasteable subshell that fetches the

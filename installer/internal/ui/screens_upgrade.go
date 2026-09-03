@@ -81,7 +81,7 @@ func (s *upgradeSourceScreen) Hints() []Hint {
 		}
 		return nil
 	case "resolving":
-		return nil
+		return []Hint{{"m", "describe the installed Substrate by hand"}}
 	case "choose":
 		return []Hint{{"↑/↓", "choose"}, {"enter", "confirm"}, {"b", "back"}}
 	}
@@ -101,19 +101,20 @@ func (s *upgradeSourceScreen) enterTarget() tea.Cmd {
 }
 
 // enterManual asks for what could not be read or resolved: the installed
-// commit and version, and the snapshot bucket.
+// commit and version, and the registry of its images when they were
+// pre-built. Whatever the read did learn is offered back.
 func (s *upgradeSourceScreen) enterManual() tea.Cmd {
 	st := s.deps.Setup
 	s.mode, s.focus, s.errText, s.comp = "manual", 0, "", nil
 	s.labels = []string{
 		"Installed Substrate commit (full SHA)",
 		"Installed version (the ate.dev/substrate-version node label)",
-		"Snapshot bucket (blank for the default)",
+		"Installed image registry (blank for a build from source)",
 	}
 	s.fields = []textinput.Model{
 		newInput(st.InstalledCommit, "40 hex characters"),
 		newInput(st.InstalledVersion, "kubectl get nodes -L ate.dev/substrate-version"),
-		newInput(st.BucketName, "ate-snapshots-<project>-<location>"),
+		newInput(st.InstalledImageRepo, snapshot.ReleaseRepo),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
@@ -181,7 +182,7 @@ func (s *upgradeSourceScreen) use(version string) tea.Cmd {
 }
 
 func (s *upgradeSourceScreen) submitManual() tea.Cmd {
-	commit, version, bucket := s.value(0), s.value(1), s.value(2)
+	commit, version, registry := s.value(0), s.value(1), s.value(2)
 	switch {
 	case !fullSHA.MatchString(strings.ToLower(commit)):
 		s.errText = "The installed commit has to be a full 40-character SHA. A build from source shows its first 12 characters in the version, substrate-<commit>; a pre-built install used the commit this repository pinned for that release."
@@ -196,10 +197,11 @@ func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 	}
 	st := s.deps.Setup
 	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = snapshot.RepoURL, strings.ToLower(commit), version
-	st.BucketName = bucket
-	if err := st.ApplyProjectDefaults(); err != nil {
-		s.errText = err.Error()
-		return s.setFocus(2)
+	// Pre-built images are tagged with their version; a build from source
+	// has no registry to name here and gets the project's default.
+	st.InstalledImageRepo, st.InstalledImageTag = registry, ""
+	if registry != "" {
+		st.InstalledImageTag = version
 	}
 	return goNext
 }
@@ -240,6 +242,10 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 	}
 	switch s.mode {
 	case "resolving":
+		// The answer, if it still arrives, is dropped: the mode has moved on.
+		if key.String() == "m" || key.String() == "esc" {
+			return s.enterManual()
+		}
 		return nil
 	case "reading":
 		switch key.String() {
@@ -309,7 +315,8 @@ func (s *upgradeSourceScreen) View(w int) string {
 		}
 		return b.String()
 	case "resolving":
-		b.WriteString(theme.Accent.Render(fmt.Sprintf("Finding the commit %s was built from…", s.deps.Setup.InstalledVersion)))
+		b.WriteString(theme.Accent.Render(fmt.Sprintf("Finding the commit %s was built from…", s.deps.Setup.InstalledVersion)) + "\n\n")
+		b.WriteString(theme.Subtle.Render("Press [m] to describe it by hand instead."))
 		return b.String()
 	case "choose":
 		b.WriteString(theme.Subtle.Render("The cluster runs two versions, as it does mid-upgrade; pick the one to treat as installed.") + "\n\n")
@@ -338,7 +345,7 @@ func (s *upgradeSourceScreen) View(w int) string {
 	case s.mode == "manual" && s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
 	case s.mode == "manual":
-		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. For a build\nfrom source it reads substrate-<commit>; the full commit it abbreviates is at\ngithub.com/agent-substrate/substrate/commit/<those 12 characters>."))
+		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. For a build\nfrom source it reads substrate-<commit>; the full commit it abbreviates is at\ngithub.com/agent-substrate/substrate/commit/<those 12 characters>. Pre-built\nimages came from a registry; the release registry is offered."))
 	default:
 		b.WriteString(theme.Subtle.Render("The installer reads the running version and images off the cluster.\nCredentials are fetched with gcloud."))
 	}
@@ -348,28 +355,42 @@ func (s *upgradeSourceScreen) View(w int) string {
 // ─── Prepare the upgrade ───────────────────────────────────────────────────
 
 // upgradePlanScreen fetches the two trees the runbook runs from and hands
-// over: it changes nothing on the cluster.
+// over: it changes nothing on the cluster. It refuses to prepare an upgrade
+// to the installed version, which the runbook cannot roll.
 type upgradePlanScreen struct {
 	deps                  *Deps
 	comp                  *execComp
 	installedDir, nextDir string
+	// blocked says why nothing was fetched; the only way on is back.
+	blocked string
 }
 
 func newUpgradePlanScreen(deps *Deps) *upgradePlanScreen {
-	installedDir, nextDir := deps.Builder.UpgradeTrees(deps.UpgradeDir, deps.Setup)
-	return &upgradePlanScreen{
-		deps:         deps,
-		installedDir: installedDir,
-		nextDir:      nextDir,
-		comp:         newExecComp(deps.Runner, deps.Builder.FetchTrees(deps.Setup, installedDir, nextDir), nil),
+	s := &upgradePlanScreen{deps: deps}
+	st := deps.Setup
+	if v := deps.Builder.SubstrateVersion(st); v == st.InstalledVersion {
+		s.blocked = fmt.Sprintf("The new version is %s, the same as the installed one. The runbook needs them to differ, "+
+			"or its dataplane step rolls the running atelet in place instead of adding a second DaemonSet. "+
+			"Go back and choose another image tag or source revision.", v)
+		return s
 	}
+	s.installedDir, s.nextDir = deps.Builder.UpgradeTrees(deps.UpgradeDir, st)
+	s.comp = newExecComp(deps.Runner, deps.Builder.FetchTrees(st, s.installedDir, s.nextDir), nil)
+	return s
 }
 
-func (s *upgradePlanScreen) Init() tea.Cmd      { return s.comp.start() }
+func (s *upgradePlanScreen) Init() tea.Cmd {
+	if s.comp == nil {
+		return nil
+	}
+	return s.comp.start()
+}
 func (s *upgradePlanScreen) CapturesText() bool { return false }
 
 func (s *upgradePlanScreen) Hints() []Hint {
 	switch {
+	case s.comp == nil:
+		return []Hint{{"b", "back"}}
 	case s.comp.ok():
 		return []Hint{{"enter", "finish"}}
 	case s.comp.failed != nil:
@@ -379,6 +400,12 @@ func (s *upgradePlanScreen) Hints() []Hint {
 }
 
 func (s *upgradePlanScreen) Update(msg tea.Msg) tea.Cmd {
+	if s.comp == nil {
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "b" || key.String() == "esc") {
+			return goBack
+		}
+		return nil
+	}
 	if cmd, handled := s.comp.update(msg); handled {
 		return cmd
 	}
@@ -406,6 +433,10 @@ func (s *upgradePlanScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Prepare the upgrade") + "\n")
+	if s.blocked != "" {
+		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.blocked)))
+		return b.String()
+	}
 	b.WriteString(theme.Subtle.Render(fmt.Sprintf(
 		"Fetching the installed tree and the new one for %s. Nothing on the cluster changes here.", st.ClusterName)) + "\n\n")
 	b.WriteString(s.comp.view(w))

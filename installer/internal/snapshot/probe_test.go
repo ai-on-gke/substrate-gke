@@ -18,7 +18,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -125,5 +127,73 @@ func TestInstalledCommit(t *testing.T) {
 	}
 	if owner, repo, ok := gitHubOwnerRepo(RepoURL); !ok || owner != "agent-substrate" || repo != "substrate" {
 		t.Errorf("gitHubOwnerRepo = %q %q %v", owner, repo, ok)
+	}
+}
+
+// A kubectl that cannot reach or read the cluster has to fail the read with
+// its own error, not print bare markers that parse as "nothing installed".
+func TestProbeClusterFailsWhenKubectlFails(t *testing.T) {
+	bin := t.TempDir()
+	fake := "#!/bin/sh\necho 'error: You must be logged in to the server (Unauthorized)' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := ProbeCluster(testSetup(t), false)
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the read should fail with kubectl:\n%s", out)
+	}
+	if !strings.Contains(string(out), "Unauthorized") || strings.Contains(string(out), versionsMarker) {
+		t.Errorf("the read should show kubectl's error and no markers:\n%s", out)
+	}
+}
+
+// The probe reads one image, the API server's; the version it pairs with
+// is the one chosen, which mid-upgrade may be the other running one, and
+// which a digest-only reference does not name at all.
+func TestApplyPairsTheImageTagWithTheChosenVersion(t *testing.T) {
+	const digest = "@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
+	pre, err := ParseProbe([]string{versionsMarker + "v0.1.0 v0.1.1", imageMarker + ReleaseRepo + "/ateapi:v0.1.1" + digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"v0.1.0", "v0.1.1"} {
+		st := state.NewSetup()
+		pre.Apply(st, version)
+		if st.InstalledImageRepo != ReleaseRepo || st.InstalledImageTag != version {
+			t.Errorf("Apply(%s) recorded %s:%s", version, st.InstalledImageRepo, st.InstalledImageTag)
+		}
+	}
+
+	pinned, err := ParseProbe([]string{versionsMarker + "v0.1.0", imageMarker + ReleaseRepo + "/ateapi" + digest})
+	if err != nil {
+		t.Fatalf("a digest-only reference should parse: %v", err)
+	}
+	if !pinned.Prebuilt() || pinned.ImageRepo != ReleaseRepo || pinned.ImageTag != "" {
+		t.Errorf("digest-only probe = %+v", pinned)
+	}
+	st := testSetup(t)
+	pinned.Apply(st, "v0.1.0")
+	if exports := InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.0'") || !strings.Contains(exports, "export ATE_IMAGE_REPO="+ShellQuote(ReleaseRepo)) {
+		t.Errorf("digest-only exports:\n%s", exports)
+	}
+}
+
+// A build from source needs a registry to push to. A cluster that ran
+// pre-built images never had one, and a cluster described by hand names
+// none; the block then carries the project's default rather than an empty
+// value that fails the first ko push.
+func TestExportsDefaultTheRegistryForABuildFromSource(t *testing.T) {
+	st := testSetup(t)
+	st.KoDockerRepo = ""
+	for name, exports := range map[string]string{
+		"probe":     Probe{}.Exports(st, "substrate-0123456789ab"),
+		"installed": InstalledExports(st),
+	} {
+		if !strings.Contains(exports, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(exports, "KO_DOCKER_REPO=''") {
+			t.Errorf("%s exports:\n%s", name, exports)
+		}
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
@@ -61,9 +62,14 @@ func ProbeCluster(st *state.Setup, credentials bool) execx.Spec {
 			ShellQuote(st.ClusterName), ShellQuote(st.Zone), ShellQuote(st.ProjectID)))
 		display = "gcloud container clusters get-credentials " + st.ClusterName + " && " + display
 	}
+	// Assignments rather than substitutions inside echo: a kubectl that
+	// fails then stops the script with its own error, instead of printing
+	// bare markers that read as "nothing installed".
 	lines = append(lines,
-		fmt.Sprintf(`echo "%s$(kubectl -n ate-system get daemonsets -l app=atelet -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version} {end}')"`, versionsMarker),
-		fmt.Sprintf(`echo "%s$(kubectl -n ate-system get deployment ate-api-server -o jsonpath='{.spec.template.spec.containers[0].image}')"`, imageMarker),
+		`versions=$(kubectl -n ate-system get daemonsets -l app=atelet -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version} {end}')`,
+		`image=$(kubectl -n ate-system get deployment ate-api-server -o jsonpath='{.spec.template.spec.containers[0].image}')`,
+		fmt.Sprintf(`echo "%s$versions"`, versionsMarker),
+		fmt.Sprintf(`echo "%s$image"`, imageMarker),
 	)
 	return execx.Spec{
 		Label:   "read the installed Substrate",
@@ -92,10 +98,12 @@ type Probe struct {
 func (p Probe) Prebuilt() bool { return p.ImageRepo != "" }
 
 // ko names an image after its import path plus an md5 of it; a published
-// image is named after the import path alone and carries a tag.
+// image is named after the import path alone and carries a tag, unless an
+// admission policy rewrote the reference to its digest alone.
 var (
 	koImage       = regexp.MustCompile(`^(.+)/ateapi-[0-9a-f]{32}(@sha256:[0-9a-f]{64})?$`)
 	prebuiltImage = regexp.MustCompile(`^(.+)/ateapi:([^@]+)(@sha256:[0-9a-f]{64})?$`)
+	digestImage   = regexp.MustCompile(`^(.+)/ateapi@sha256:[0-9a-f]{64}$`)
 )
 
 // ParseProbe reads what ProbeCluster printed.
@@ -121,6 +129,9 @@ func ParseProbe(lines []string) (Probe, error) {
 	case prebuiltImage.MatchString(image):
 		m := prebuiltImage.FindStringSubmatch(image)
 		p.ImageRepo, p.ImageTag = m[1], m[2]
+	case digestImage.MatchString(image):
+		// The tag is gone from the reference; the running version is it.
+		p.ImageRepo = digestImage.FindStringSubmatch(image)[1]
 	default:
 		return Probe{}, fmt.Errorf("cannot tell where image %s came from", image)
 	}
@@ -140,7 +151,14 @@ func (p Probe) Exports(st *state.Setup, version string) string {
 	if p.Prebuilt() {
 		lines = append(lines, "export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
 	} else {
-		lines = append(lines, "export KO_DOCKER_REPO="+ShellQuote(p.KoDockerRepo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
+		// A build from source needs a registry to push to. A cluster that
+		// ran pre-built images never had one, and one described by hand
+		// names none; both get the project's default, as an install does.
+		repo := p.KoDockerRepo
+		if repo == "" {
+			repo = st.DefaultKoDockerRepo()
+		}
+		lines = append(lines, "export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -152,6 +170,12 @@ func (p Probe) Apply(st *state.Setup, version string) {
 	st.InstalledVersion = version
 	st.InstalledRepo = RepoURL
 	st.InstalledImageRepo, st.InstalledImageTag = p.ImageRepo, p.ImageTag
+	if p.Prebuilt() && imageVersion(p.ImageTag) != version {
+		// The probe read one image, the API server's. Mid-upgrade it may
+		// carry the other running version, and a digest-only reference
+		// carries none; the tag is the version either way.
+		st.InstalledImageTag = version
+	}
 	if !p.Prebuilt() {
 		st.KoDockerRepo = p.KoDockerRepo
 	}
@@ -169,8 +193,12 @@ func InstalledExports(st *state.Setup) string {
 var sourceVersion = regexp.MustCompile(`^substrate-([0-9a-f]{12})$`)
 
 // gitHubAPI is the endpoint InstalledCommit expands short commits through;
-// tests point it at a stub.
-var gitHubAPI = "https://api.github.com"
+// tests point it at a stub. The client is bounded so a network that
+// blackholes it hands the flow back within seconds.
+var (
+	gitHubAPI    = "https://api.github.com"
+	gitHubClient = &http.Client{Timeout: 15 * time.Second}
+)
 
 // InstalledCommit finds the full commit the installed version was built
 // from, which the upgrade fetches for rollback. A build from source names its
@@ -202,7 +230,7 @@ func expandCommit(ctx context.Context, short string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github.sha")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := gitHubClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("expanding commit %s: %w", short, err)
 	}

@@ -173,7 +173,8 @@ on the cluster changes until you follow the runbook.
 
 The installed tree is fetched at the commit the running version names: a build from
 source abbreviates it in the version, and a release tag maps to the commit this repository
-pinned for it. When neither applies, the commit and version are typed in.
+pinned for it. When neither applies, the commit and version are typed in, along with the
+registry of the installed images when they were pre-built.
 
 ## Tearing down
 

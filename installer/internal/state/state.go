@@ -301,7 +301,11 @@ func (s *Setup) ApplyProjectDefaults() error {
 		s.BucketName = b
 	}
 	if s.KoDockerRepo == "" && !s.Prebuilt() {
-		s.KoDockerRepo = "gcr.io/" + s.ProjectID + "/ate-images"
+		s.KoDockerRepo = s.DefaultKoDockerRepo()
 	}
 	return nil
 }
+
+// DefaultKoDockerRepo is the registry a build from source pushes to when
+// none was given: one in the project itself.
+func (s *Setup) DefaultKoDockerRepo() string { return "gcr.io/" + s.ProjectID + "/ate-images" }

@@ -42,11 +42,7 @@ func fetchTree(ctx context.Context, dir, repoURL, commit string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	for _, args := range [][]string{
-		{"init", "-q"},
-		{"fetch", "-q", "--depth", "1", repoURL, commit},
-		{"checkout", "-q", "FETCH_HEAD"},
-	} {
+	for _, args := range gitFetchSteps(repoURL, commit) {
 		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

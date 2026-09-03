@@ -768,7 +768,9 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	st := testSetup(t)
 	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = origin, oldSHA, "substrate-"+shorten(oldSHA)
 
-	base := filepath.Join(t.TempDir(), "upgrades")
+	// A path with a space and a $ in it: the script must quote it
+	// everywhere, messages included, or set -u aborts on the expansion.
+	base := filepath.Join(t.TempDir(), "up grades $HOME_x")
 	installedDir, nextDir := b.UpgradeTrees(base, st)
 	if installedDir == nextDir || !strings.HasPrefix(installedDir, base) {
 		t.Fatalf("UpgradeTrees = %q, %q", installedDir, nextDir)
@@ -785,6 +787,9 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		if i == 1 && !strings.Contains(string(out), "Using cached") {
 			t.Errorf("second run should reuse the trees:\n%s", out)
 		}
+		if !strings.Contains(string(out), " "+installedDir) {
+			t.Errorf("run %d should print the tree's path as it is:\n%s", i, out)
+		}
 	}
 	for dir, want := range map[string]string{installedDir: oldSHA, nextDir: newSHA} {
 		got, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
@@ -799,5 +804,24 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
+	}
+}
+
+// A cluster that ran pre-built images and moves to a build from source: the
+// installed side exports the images it ran, the new side a registry for the
+// build to push to, which nothing in the upgrade flow asked for.
+func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	st := testSetup(t)
+	st.KoDockerRepo = ""
+	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", ReleaseRepo, "v0.1.0"
+
+	installed := InstalledExports(st)
+	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "KO_DOCKER_REPO") {
+		t.Errorf("installed exports:\n%s", installed)
+	}
+	next := b.NewExports(st)
+	if !strings.Contains(next, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(next, "ATE_IMAGE_TAG") {
+		t.Errorf("new exports:\n%s", next)
 	}
 }
