@@ -41,13 +41,12 @@ func DefaultUpgradeDir() (string, error) {
 }
 
 // UpgradeTrees returns where the installed tree and the new tree go under
-// base: one directory per cluster, one tree per commit.
+// base: one tree per commit. A tree depends on nothing but its commit, so
+// clusters share them, and the paths stay short enough to read off a screen
+// and paste whole.
 func (b *Builder) UpgradeTrees(base string, st *state.Setup) (installed, next string) {
-	cluster := strings.NewReplacer("/", "_", string(os.PathSeparator), "_").Replace(
-		st.ProjectID + "--" + st.ClusterName + "--" + st.Zone)
-	dir := filepath.Join(base, cluster)
-	return filepath.Join(dir, "substrate-"+shorten(st.InstalledCommit)),
-		filepath.Join(dir, "substrate-"+shorten(b.commit))
+	return filepath.Join(base, "substrate-"+shorten(st.InstalledCommit)),
+		filepath.Join(base, "substrate-"+shorten(b.commit))
 }
 
 // FetchTrees is the upgrade track's one command: the installer's shallow

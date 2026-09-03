@@ -405,9 +405,11 @@ func (s *upgradePlanScreen) View(w int) string {
 		"Fetching the installed tree and the new one for %s. Nothing on the cluster changes here.", st.ClusterName)) + "\n\n")
 	b.WriteString(s.comp.view(w))
 	if s.comp.ok() {
-		b.WriteString("\n" + theme.AccentPanel.Width(min(w-4, 96)).Render(
+		// Full width: a wrapped path is copied short. The same text is
+		// printed unwrapped once the installer exits.
+		b.WriteString("\n" + theme.AccentPanel.Width(w-4).Render(
 			s.deps.Builder.UpgradeSummary(st, s.installedDir, s.nextDir)) + "\n")
-		b.WriteString("\n" + theme.Good.Render("Press [enter] to finish."))
+		b.WriteString("\n" + theme.Good.Render("Press [enter] to finish.") + theme.Subtle.Render("  The hand-over is printed again when the installer exits."))
 	}
 	return b.String()
 }
