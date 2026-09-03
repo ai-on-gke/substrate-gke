@@ -31,8 +31,8 @@ each running the real command it shows and streaming its output:
 1. **Check your setup** — probes for gcloud, application-default credentials, Go,
    kubectl, network reachability, and git, with copy-paste fixes. It runs first
    because the next step is the first to reach the network.
-2. **Choose your images** — install pre-built images, or build them yourself from a
-   source tree you name — see
+2. **Choose your images** — build them yourself from a source tree you name, or
+   install pre-built images — see
    [Where the images come from](#where-the-images-come-from). It comes before the
    project step because the answer decides what that step needs: a pre-built
    install pushes nothing, so it is never asked for a registry.
@@ -67,14 +67,14 @@ The images step chooses between two ways of getting the Substrate control-plane
 images. Both end up naming a git commit, because `ate-setup` reads the deployment
 manifests from a source tree either way.
 
-**Pre-built images** — the default, and four fields: the image registry, the image
+**Pre-built images** — four fields: the image registry, the image
 tag, the manifest repository, and the manifest commit id. All four are offered
 pre-filled and all four can be overridden. The defaults are the published release at
-`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we host the release
-images, and the commit pinned below, which is what they were built from. `ate-setup`
-pins every image to the digest its tag resolves to. Nothing is built and nothing is
-pushed, so your project needs no image registry of its own; the release registry in
-particular is pull-only.
+`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we will host the
+release images — it is coming soon, and the step says so — and the commit pinned below,
+which is what they were built from. `ate-setup` pins every image to the digest its tag
+resolves to. Nothing is built and nothing is pushed, so your project needs no image
+registry of its own; the release registry in particular is pull-only.
 
 Any registry and tag work, so a team that publishes its own builds — a staging
 registry, or a private rebuild of a release — installs them by typing them here rather
