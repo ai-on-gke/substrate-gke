@@ -56,13 +56,18 @@ func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
 	if !pre.Prebuilt() || pre.ImageRepo != ReleaseRepo || pre.ImageTag != "v0.1.1" || len(pre.Running) != 2 {
 		t.Errorf("prebuilt probe = %+v", pre)
 	}
-	if exports := pre.Exports(st, "v0.1.1"); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.1'") || strings.Contains(exports, "KO_DOCKER_REPO") {
+	if exports := pre.Exports(st, "v0.1.1"); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.1'") || strings.Contains(exports, "export KO_DOCKER_REPO") {
 		t.Errorf("prebuilt exports:\n%s", exports)
 	}
 	got := state.NewSetup()
 	src.Apply(got, "substrate-5f0ef402d9c4")
 	if got.InstalledVersion != "substrate-5f0ef402d9c4" || got.KoDockerRepo != "gcr.io/acme/ate-images" || got.InstalledRepo != RepoURL {
 		t.Errorf("Apply() = %+v", got)
+	}
+	// A registry read off one cluster must not survive a read of another.
+	pre.Apply(got, "v0.1.1")
+	if got.KoDockerRepo != "" {
+		t.Errorf("Apply(prebuilt) left KoDockerRepo = %q", got.KoDockerRepo)
 	}
 	if got.InstalledCommit != "" {
 		t.Errorf("a read without the binary's report cannot know the commit, got %q", got.InstalledCommit)
@@ -193,6 +198,26 @@ func TestParseProbeReadsTheCommitOffTheRunningBinary(t *testing.T) {
 		two.Apply(st, version)
 		if st.InstalledCommit != want {
 			t.Errorf("Apply(%s) with the API server on v0.1.1 recorded commit %q, want %q", version, st.InstalledCommit, want)
+		}
+	}
+}
+
+// ate-setup installs pre-built images whenever ATE_IMAGE_REPO is set, and an
+// upgrade's blocks are pasted into one shell when it rolls back, so each block
+// has to unset the other family or a rollback would deploy the new images
+// under the old version.
+func TestExportsUnsetTheOtherImageFamily(t *testing.T) {
+	st := testSetup(t)
+	prebuilt := Probe{ImageRepo: ReleaseRepo, ImageTag: "v0.1.0"}.Exports(st, "v0.1.0")
+	source := Probe{KoDockerRepo: "gcr.io/acme/ate-images"}.Exports(st, "substrate-0123456789ab")
+	probe := `; printf '%s|%s|%s|%s' "${ATE_IMAGE_REPO:-unset}" "${ATE_IMAGE_TAG:-unset}" "${KO_DOCKER_REPO:-unset}" "$VERSION"`
+	for name, tc := range map[string]struct{ script, want string }{
+		"prebuilt then source": {prebuilt + "\n" + source, "unset|unset|gcr.io/acme/ate-images|substrate-0123456789ab"},
+		"source then prebuilt": {source + "\n" + prebuilt, ReleaseRepo + "|v0.1.0|unset|v0.1.0"},
+	} {
+		out, err := exec.Command("bash", "-euo", "pipefail", "-c", tc.script+probe).Output()
+		if err != nil || string(out) != tc.want {
+			t.Errorf("%s: shell saw %q (%v), want %q", name, out, err, tc.want)
 		}
 	}
 }

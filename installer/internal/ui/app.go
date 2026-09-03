@@ -170,6 +170,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, a.cur.Init()
 		case navBack:
 			if step, ok := a.mach.Prev(); ok {
+				// A screen with a command in flight ends it; the summary
+				// printed on exit describes the final screen only if the
+				// user is still there.
+				if s, ok := a.cur.(interface{ Stop() }); ok {
+					s.Stop()
+				}
+				a.Completed = false
 				a.cur = a.screenFor(step)
 				return a, a.cur.Init()
 			}

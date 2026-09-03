@@ -504,8 +504,26 @@ func TestFetchTreeChecksOutTheCommit(t *testing.T) {
 	if !isCheckout(dir) {
 		t.Errorf("fetched tree has no go.mod")
 	}
+	if _, err := os.Stat(filepath.Join(dir, CompleteMarker)); err != nil {
+		t.Errorf("a fetched tree should carry the completion marker: %v", err)
+	}
+	if status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output(); err != nil || len(status) != 0 {
+		t.Errorf("the marker must not dirty the tree (%v):\n%s", err, status)
+	}
 	if err := fetchTree(context.Background(), dir, origin, want); err == nil {
 		t.Errorf("fetching over an existing checkout should be refused")
+	}
+	// An interrupted checkout has go.mod and little else; it is refused with
+	// a way out, not mistaken for a tree.
+	partial := filepath.Join(t.TempDir(), "partial")
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fetchTree(context.Background(), partial, origin, want); err == nil || !strings.Contains(err.Error(), "remove it") {
+		t.Errorf("a partial tree should be refused with instructions, got %v", err)
 	}
 }
 
@@ -779,6 +797,13 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if script := spec.Argv[len(spec.Argv)-1]; strings.Contains(script, "kubectl") || strings.Contains(script, "gcloud") {
 		t.Fatalf("FetchTrees must not touch the cluster:\n%s", script)
 	}
+	// A tree left half-fetched, without its marker, is replaced whole.
+	if err := os.MkdirAll(installedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installedDir, "leftover"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
 		out, err := exec.Command(spec.Argv[0], spec.Argv[1:]...).CombinedOutput()
 		if err != nil {
@@ -801,6 +826,29 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		if status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output(); err != nil || len(status) != 0 {
 			t.Errorf("%s is not clean after the fetch (%v):\n%s", dir, err, status)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(installedDir, "leftover")); err == nil {
+		t.Errorf("a marker-less tree should have been replaced, not fetched into")
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), stageInfix) {
+			t.Errorf("staging directory left behind: %s", e.Name())
+		}
+	}
+	// The installed commit was read off the cluster, not resolved against
+	// the repository; one it cannot serve has to say so, not die in git.
+	st.InstalledCommit = "0123456789abcdef0123456789abcdef01234567"
+	missingDir, _ := b.UpgradeTrees(base, st)
+	missing := b.FetchTrees(st, missingDir, nextDir)
+	if out, err := exec.Command(missing.Argv[0], missing.Argv[1:]...).CombinedOutput(); err == nil || !strings.Contains(string(out), "is not in "+origin) {
+		t.Errorf("a commit the repository cannot serve should be reported (%v):\n%s", err, out)
+	}
+	if _, err := os.Stat(missingDir); err == nil {
+		t.Errorf("a failed fetch should leave no tree at %s", missingDir)
 	}
 	summary := b.UpgradeSummary(st, installedDir, nextDir)
 	for _, want := range []string{RunbookURL, "cd " + ShellQuote(installedDir), "cd " + ShellQuote(nextDir),
@@ -840,11 +888,11 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", ReleaseRepo, "v0.1.0"
 
 	installed := InstalledExports(st)
-	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "KO_DOCKER_REPO") {
+	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "export KO_DOCKER_REPO") {
 		t.Errorf("installed exports:\n%s", installed)
 	}
 	next := b.NewExports(st)
-	if !strings.Contains(next, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(next, "ATE_IMAGE_TAG") {
+	if !strings.Contains(next, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
 		t.Errorf("new exports:\n%s", next)
 	}
 }

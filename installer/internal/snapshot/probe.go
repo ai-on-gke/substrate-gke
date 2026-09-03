@@ -172,9 +172,14 @@ func (p Probe) Exports(st *state.Setup, version string) string {
 // versionExports is the part of the environment that names a version: the
 // version itself and where its images come from.
 func (p Probe) versionExports(st *state.Setup, version string) []string {
+	// ate-setup installs pre-built images whenever ATE_IMAGE_REPO is set, so
+	// each block unsets the other family: the two are pasted into one shell
+	// when an upgrade rolls back, and a leftover would silently deploy the
+	// wrong images under the right version.
 	lines := []string{"export VERSION=" + ShellQuote(version)}
 	if p.Prebuilt() {
-		lines = append(lines, "export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
+		lines = append(lines, "unset KO_DOCKER_REPO KO_DEFAULTPLATFORMS",
+			"export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
 	} else {
 		// A build from source needs a registry to push to. A cluster that
 		// ran pre-built images never had one, and one described by hand
@@ -183,7 +188,8 @@ func (p Probe) versionExports(st *state.Setup, version string) []string {
 		if repo == "" {
 			repo = st.DefaultKoDockerRepo()
 		}
-		lines = append(lines, "export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
+		lines = append(lines, "unset ATE_IMAGE_REPO ATE_IMAGE_TAG",
+			"export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
 	}
 	return lines
 }
@@ -209,9 +215,9 @@ func (p Probe) Apply(st *state.Setup, version string) {
 		// carries none; the tag is the version either way.
 		st.InstalledImageTag = version
 	}
-	if !p.Prebuilt() {
-		st.KoDockerRepo = p.KoDockerRepo
-	}
+	// Empty for pre-built images: the exports fall back to the project's
+	// default, and a registry probed off an earlier cluster must not leak.
+	st.KoDockerRepo = p.KoDockerRepo
 }
 
 // InstalledExports is what a rollback changes in the environment: the

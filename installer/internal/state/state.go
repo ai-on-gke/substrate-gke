@@ -99,18 +99,6 @@ func (s Step) Title() string {
 	return "?"
 }
 
-// Number returns the 1-based wizard position for the numbered middle steps
-// and false for Welcome and Complete.
-func (s Step) Number() (int, bool) {
-	if s == Welcome || s == Complete {
-		return 0, false
-	}
-	return int(s), true
-}
-
-// NumberedSteps is how many numbered steps the sidebar shows.
-const NumberedSteps = int(Demo)
-
 // Machine is the linear step machine with back-navigation history.
 type Machine struct {
 	order   []Step

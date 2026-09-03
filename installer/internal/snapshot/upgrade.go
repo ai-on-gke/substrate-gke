@@ -53,22 +53,42 @@ func (b *Builder) UpgradeTrees(base string, st *state.Setup) (installed, next st
 // fetch, done for the installed commit and for the new one, into directories
 // that stay. A tree already fetched whole is reused; a partial one is fetched
 // again.
+//
+// Trees are shared between clusters and runs, so each is fetched into a
+// staging directory beside its final name and published whole with a
+// rename, the way the install cache does it: a concurrent run never sees a
+// half-fetched tree, and never deletes one from under a fetch in progress.
 func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) execx.Spec {
-	fetch := func(dir, repo, commit string) []string {
-		q := ShellQuote(dir)
-		return append([]string{
+	fetch := func(stage, dir, repo, commit, missing string) []string {
+		q, s := ShellQuote(dir), `"${`+stage+`}"`
+		steps := fetchAt(s, repo, commit)
+		if missing != "" {
+			steps[1] += " || { echo " + ShellQuote(missing) + " >&2; exit 1; }"
+		}
+		return append(append([]string{
 			fmt.Sprintf(`if [ -e %s/%s ]; then echo "Using cached substrate@%s at "%s; else`, q, CompleteMarker, shorten(commit), q),
-			fmt.Sprintf(`rm -rf %s && mkdir -p %s`, q, q),
-		}, append(fetchAt(q, repo, commit),
-			excludeMarker(q),
-			fmt.Sprintf(`: > %s/%s`, q, CompleteMarker),
-			fmt.Sprintf(`echo "Fetched substrate@%s into "%s`, shorten(commit), q),
+			fmt.Sprintf(`mkdir -p %s`, ShellQuote(filepath.Dir(dir))),
+			fmt.Sprintf(`%s=$(mktemp -d %s)`, stage, ShellQuote(dir+stageInfix+"XXXXXX")),
+		}, steps...),
+			excludeMarker(s),
+			fmt.Sprintf(`: > %s/%s`, s, CompleteMarker),
+			// A run that published first has a tree as good as ours.
+			fmt.Sprintf(`if [ -e %s/%s ]; then rm -rf %s; echo "Using cached substrate@%s at "%s; else`, q, CompleteMarker, s, shorten(commit), q),
+			fmt.Sprintf(`rm -rf %s; mv %s %s; rm -rf %s/"${%s##*/}"`, q, s, q, q, stage),
+			fmt.Sprintf(`echo "Fetched substrate@%s into "%s; fi`, shorten(commit), q),
 			`fi`,
-		)...)
+		)
 	}
-	lines := []string{"set -euo pipefail"}
-	lines = append(lines, fetch(installedDir, st.InstalledRepo, st.InstalledCommit)...)
-	lines = append(lines, fetch(nextDir, b.repo, b.commit)...)
+	// The installed commit was read off the cluster, not resolved against
+	// upstream like the new one; a fork or a private hotfix fails here.
+	notUpstream := fmt.Sprintf("Commit %s is not in %s: the installed Substrate was built from a fork or a private hotfix. Follow the runbook from a checkout of your own instead.", st.InstalledCommit, st.InstalledRepo)
+	lines := []string{
+		"set -euo pipefail",
+		`trap 'rm -rf "${stage_installed:-}" "${stage_next:-}"' EXIT`,
+		`trap 'exit 130' INT TERM`,
+	}
+	lines = append(lines, fetch("stage_installed", installedDir, st.InstalledRepo, st.InstalledCommit, notUpstream)...)
+	lines = append(lines, fetch("stage_next", nextDir, b.repo, b.commit, "")...)
 	return execx.Spec{
 		Label:   "fetch the installed and the new Substrate trees",
 		Display: fmt.Sprintf("git fetch substrate@%s (installed) and substrate@%s (new)", shorten(st.InstalledCommit), shorten(b.commit)),

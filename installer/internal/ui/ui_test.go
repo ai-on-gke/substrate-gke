@@ -659,7 +659,7 @@ func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T
 	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != snapshot.ReleaseVersion {
 		t.Fatalf("pre-built install not recorded: %+v", st)
 	}
-	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(snapshot.ReleaseVersion)) || strings.Contains(exports, "KO_DOCKER_REPO") {
+	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(snapshot.ReleaseVersion)) || strings.Contains(exports, "export KO_DOCKER_REPO") {
 		t.Errorf("rollback exports for a pre-built install:\n%s", exports)
 	}
 
@@ -764,5 +764,136 @@ func TestUpgradeTrackNeedsACacheDirectory(t *testing.T) {
 	pump(t, app, key("enter"))
 	if app.mach.Current() != state.CheckSetup {
 		t.Fatalf("the install track should still start: %v", app.mach.Current())
+	}
+}
+
+// hangingRunner never finishes the cluster read until its context ends, as a
+// gcloud or kubectl that hangs would; it replays everything else.
+type hangingRunner struct {
+	inner execx.Runner
+	ctx   context.Context
+}
+
+func (r *hangingRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	if spec.Label != "read the installed Substrate" {
+		return r.inner.Start(ctx, spec)
+	}
+	r.ctx = ctx
+	ch := make(chan execx.Event, 1)
+	go func() {
+		<-ctx.Done()
+		ch <- execx.Event{Done: true, Err: ctx.Err()}
+		close(ch)
+	}()
+	return ch
+}
+
+// A read that hangs can be cancelled with esc, which ends the process behind
+// it rather than leaving a late get-credentials to retarget kubectl.
+func TestUpgradeTrackCancelsAHangingRead(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	runner := &hangingRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+	app.deps.Runner = runner
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter", "enter")
+	typeText(t, app, "acme")
+	scr := app.cur.(*upgradeSourceScreen)
+	press("enter", "enter") // cluster and location keep their defaults
+	// The submit is fed by hand and its command dropped: start() has
+	// already handed the runner its context, and the read command would
+	// block on a channel that only closes with that context.
+	app.Update(key("enter"))
+	if scr.mode != "reading" || runner.ctx == nil || runner.ctx.Err() != nil {
+		t.Fatalf("the read should be running: mode=%s ctx=%v", scr.mode, runner.ctx)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if scr.mode != "target" || runner.ctx.Err() == nil {
+		t.Errorf("esc should cancel the read and return to the form: mode=%s ctxErr=%v", scr.mode, runner.ctx.Err())
+	}
+}
+
+// failsForRunner fails the cluster read of one cluster and replays the rest.
+type failsForRunner struct {
+	inner   execx.Runner
+	cluster string
+}
+
+func (r failsForRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	if spec.Label != "read the installed Substrate" || !strings.Contains(spec.Display, r.cluster) {
+		return r.inner.Start(ctx, spec)
+	}
+	ch := make(chan execx.Event, 1)
+	ch <- execx.Event{Done: true, Err: errors.New("error: Unauthorized")}
+	close(ch)
+	return ch
+}
+
+// What a read learned belongs to the cluster it named: retargeting another
+// cluster whose read fails must not offer the first cluster's facts as the
+// second's.
+func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.Runner = failsForRunner{inner: execx.DryRun{Delay: time.Millisecond}, cluster: "other-cluster"}
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter", "enter")
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter")
+	st := app.deps.Setup
+	if app.mach.Current() != state.Images || st.InstalledCommit == "" || st.KoDockerRepo == "" {
+		t.Fatalf("first read should have succeeded: %v %+v", app.mach.Current(), st)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the cluster form
+	scr := app.cur.(*upgradeSourceScreen)
+	if app.mach.Current() != state.UpgradeSource || scr.mode != "target" {
+		t.Fatalf("esc from images should return to the cluster form: %v mode=%s", app.mach.Current(), scr.mode)
+	}
+	press("enter") // project → cluster
+	scr.fields[scr.focus].SetValue("")
+	typeText(t, app, "other-cluster")
+	press("enter", "enter") // location → read, which fails
+	if scr.mode != "reading" || scr.comp.failed == nil {
+		t.Fatalf("second read should fail: mode=%s failed=%v", scr.mode, scr.comp.failed)
+	}
+	press("m")
+	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" || st.KoDockerRepo != "" {
+		t.Errorf("manual form offers the first cluster's facts: %q %q %q ko=%q", scr.value(0), scr.value(1), scr.value(2), st.KoDockerRepo)
+	}
+}
+
+// Backing out of the final screen takes its summary with it: what is printed
+// on exit describes the screen the user left from.
+func TestBackFromCompleteClearsCompleted(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter", "enter")
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter", "2", "enter", "enter", "enter", "enter", "enter")
+	if app.mach.Current() != state.Complete || !app.Completed {
+		t.Fatalf("expected the upgrade to be prepared: %v completed=%v", app.mach.Current(), app.Completed)
+	}
+	pump(t, app, navBack)
+	if app.mach.Current() != state.UpgradePlan || app.Completed {
+		t.Errorf("back from Complete: %v completed=%v", app.mach.Current(), app.Completed)
 	}
 }

@@ -36,8 +36,13 @@ func FetchTree(ctx context.Context, dir, commit string) error {
 }
 
 func fetchTree(ctx context.Context, dir, repoURL, commit string) error {
-	if isCheckout(dir) {
-		return fmt.Errorf("%s already holds a checkout", dir)
+	// The marker, not go.mod, says a tree is whole: git checks files out
+	// in path order, so an interrupted checkout has go.mod and little else.
+	if _, err := os.Stat(filepath.Join(dir, CompleteMarker)); err == nil {
+		return fmt.Errorf("%s already holds a fetched tree; remove it to fetch again", dir)
+	}
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+		return fmt.Errorf("%s is not empty and holds no complete tree, as after an interrupted fetch; remove it to fetch again", dir)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -47,6 +52,12 @@ func fetchTree(ctx context.Context, dir, repoURL, commit string) error {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "info", "exclude"), []byte(CompleteMarker+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, CompleteMarker), nil, 0o644); err != nil {
+		return err
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {

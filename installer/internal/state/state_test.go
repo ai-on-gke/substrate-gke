@@ -47,23 +47,19 @@ func TestMachinePrevUsesHistory(t *testing.T) {
 }
 
 func TestStepNumbering(t *testing.T) {
-	if _, ok := Welcome.Number(); ok {
-		t.Fatal("Welcome should not be numbered")
+	m := NewMachine()
+	for _, s := range []Step{Welcome, Complete} {
+		if _, ok := m.Position(s); ok {
+			t.Errorf("%v should not be numbered", s)
+		}
 	}
-	if _, ok := Complete.Number(); ok {
-		t.Fatal("Complete should not be numbered")
+	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, FilestoreCSI: 7} {
+		if n, ok := m.Position(step); !ok || n != want {
+			t.Errorf("Position(%v) = %d/%v, want %d/true", step, n, ok, want)
+		}
 	}
-	if n, ok := CheckSetup.Number(); !ok || n != 1 {
-		t.Fatalf("CheckSetup.Number() = %d/%v, want 1/true", n, ok)
-	}
-	if n, ok := Images.Number(); !ok || n != 2 {
-		t.Fatalf("Images.Number() = %d/%v, want 2/true", n, ok)
-	}
-	if n, ok := FilestoreCSI.Number(); !ok || n != 7 {
-		t.Fatalf("FilestoreCSI.Number() = %d/%v, want 7/true", n, ok)
-	}
-	if n, _ := Demo.Number(); n != NumberedSteps {
-		t.Fatalf("Demo.Number() = %d, want %d", n, NumberedSteps)
+	if n, _ := m.Position(Demo); n != m.NumberedSteps() {
+		t.Errorf("Position(Demo) = %d, want the last numbered step %d", n, m.NumberedSteps())
 	}
 }
 
