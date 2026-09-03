@@ -30,13 +30,17 @@ import (
 // ─── Welcome ───────────────────────────────────────────────────────────────
 
 type welcomeScreen struct {
-	deps   *Deps
-	cursor int
+	deps    *Deps
+	cursor  int
+	errText string
 }
 
 func newWelcomeScreen(deps *Deps) *welcomeScreen {
 	cursor := 0
-	if deps.Setup.Track == state.TrackAdvanced {
+	switch {
+	case deps.Setup.Upgrade:
+		cursor = 2
+	case deps.Setup.Track == state.TrackAdvanced:
 		cursor = 1
 	}
 	return &welcomeScreen{deps: deps, cursor: cursor}
@@ -46,7 +50,7 @@ func (s *welcomeScreen) Init() tea.Cmd      { return nil }
 func (s *welcomeScreen) CapturesText() bool { return false }
 
 func (s *welcomeScreen) Hints() []Hint {
-	return []Hint{{"1/2", "choose a track"}, {"enter", "begin"}}
+	return []Hint{{"1/2/3", "choose a track"}, {"enter", "begin"}}
 }
 
 func (s *welcomeScreen) Update(msg tea.Msg) tea.Cmd {
@@ -55,15 +59,29 @@ func (s *welcomeScreen) Update(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 	switch key.String() {
-	case "up", "k", "1":
+	case "up", "k":
+		s.cursor = max(s.cursor-1, 0)
+	case "down", "j":
+		s.cursor = min(s.cursor+1, 2)
+	case "1":
 		s.cursor = 0
-	case "down", "j", "2":
+	case "2":
 		s.cursor = 1
+	case "3":
+		s.cursor = 2
 	case "enter":
-		if s.cursor == 0 {
-			s.deps.Setup.Track = state.TrackQuickstart
+		if s.cursor == 2 && s.deps.UpgradeDir == "" {
+			// Without it the trees would land, and be swept, relative to
+			// wherever the installer was started.
+			s.errText = "The upgrade track keeps its source trees under the user cache directory, which could not be located. Set HOME and run again."
+			return nil
+		}
+		st := s.deps.Setup
+		st.Upgrade = s.cursor == 2
+		if s.cursor == 1 {
+			st.Track = state.TrackAdvanced
 		} else {
-			s.deps.Setup.Track = state.TrackAdvanced
+			st.Track = state.TrackQuickstart
 		}
 		return goNext
 	}
@@ -74,11 +92,15 @@ func (s *welcomeScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString("\n" + theme.Logo() + "\n\n")
 	b.WriteString(theme.Subtle.Render("High-density AI agent sandboxing on Kubernetes — GKE installer") + "\n")
-	b.WriteString(theme.Fainted.Render("vendored substrate: "+s.deps.Builder.Version) + "\n\n")
+	b.WriteString(theme.Fainted.Render("substrate: "+s.deps.Builder.Version) + "\n\n")
 
-	tracks := []struct{ name, desc string }{
-		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster."},
-		{"Advanced", "Also configure machine type, network, bucket, and image registry."},
+	tracks := []struct{ name, desc, note string }{
+		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster.", ""},
+		{"Advanced", "Also configure machine type, network, bucket, and image registry.", ""},
+		{"Upgrade an installed cluster", "Fetch the trees and write the environment for upstream's rolling\nupgrade runbook. Nothing in GCP is touched.",
+			// The track is ahead of the releases: nothing available today
+			// upgrades to anything else yet.
+			"Coming in a later release. Upgrades will be guaranteed only within a\nrelease branch. Until then, reinstall."},
 	}
 	for i, t := range tracks {
 		label := fmt.Sprintf("[%d] %s", i+1, t.name)
@@ -87,9 +109,16 @@ func (s *welcomeScreen) View(w int) string {
 		if i == s.cursor {
 			panel, title = theme.AccentPanel, theme.Title
 		}
-		b.WriteString(panel.Width(min(w-4, 70)).Render(title.Render(label)+"\n"+theme.Subtle.Render(t.desc)) + "\n")
+		body := title.Render(label) + "\n" + theme.Subtle.Render(t.desc)
+		if t.note != "" {
+			body += "\n" + theme.Warning.Render(t.note)
+		}
+		b.WriteString(panel.Width(min(w-4, 70)).Render(body) + "\n")
 	}
 
+	if s.errText != "" {
+		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 70)).Render(theme.Bad.Render(s.errText)) + "\n")
+	}
 	b.WriteString("\n" + theme.Subtle.Render("This wizard provisions GCP resources, then builds and installs the"))
 	b.WriteString("\n" + theme.Subtle.Render("Substrate control plane onto a GKE cluster. Every step shows the real"))
 	b.WriteString("\n" + theme.Subtle.Render("command it runs and streams its output."))

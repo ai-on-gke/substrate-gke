@@ -45,6 +45,10 @@ type projValidMsg struct {
 	owner  *projectScreen
 	number string
 	err    error
+	// missing are bootstrap permissions the credentials provably lack;
+	// permErr means the permission probe itself could not run.
+	missing []gcp.RequiredPermission
+	permErr error
 }
 
 type projectScreen struct {
@@ -53,6 +57,10 @@ type projectScreen struct {
 	focus      int
 	validating bool
 	errText    string
+	// permAcked is set once a permission problem has been shown, so the next
+	// enter proceeds anyway: the probe is advisory (a role might be granted
+	// minutes from now), but failing here beats failing mid-bootstrap.
+	permAcked bool
 }
 
 func newField(label, value, placeholder string, set func(*state.Setup, string)) field {
@@ -69,15 +77,21 @@ func newProjectScreen(deps *Deps) *projectScreen {
 	fields := []field{
 		newField("GCP project ID", st.ProjectID, "my-project", func(s *state.Setup, v string) { s.ProjectID = v }),
 		newField("Cluster location (zone)", st.Zone, "us-west1-c", func(s *state.Setup, v string) { s.Zone = v }),
+		newField("Snapshot bucket (leave empty for default)", st.BucketName, "ate-snapshots-<project>-<zone>", func(s *state.Setup, v string) { s.BucketName = v }),
 	}
 	if st.Track == state.TrackAdvanced {
 		fields = append(fields,
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
 			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
 			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
-			newField("Snapshot bucket (blank = derived)", st.BucketName, "ate-snapshots-<project>-<cluster-hash>", func(s *state.Setup, v string) { s.BucketName = v }),
-			newField("Image registry (blank = derived)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 		)
+		// Only a build from source pushes images anywhere, so only it needs a
+		// registry to push them to.
+		if !st.Prebuilt() {
+			fields = append(fields,
+				newField("Image registry (leave empty for default)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
+			)
+		}
 	}
 	scr := &projectScreen{deps: deps, fields: fields}
 	scr.fields[0].input.Focus()
@@ -114,10 +128,35 @@ func (s *projectScreen) submit() tea.Cmd {
 	}
 	s.errText = ""
 	s.validating = true
+	acked := s.permAcked
 	return func() tea.Msg {
-		num, err := s.deps.GCP.ProjectNumber(context.Background(), pid)
-		return projValidMsg{s, num, err}
+		msg := projValidMsg{owner: s}
+		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
+		// Check the bootstrap permissions now rather than failing three
+		// screens later, mid-provision. Skipped once acknowledged.
+		if msg.err == nil && !acked {
+			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
+		}
+		return msg
 	}
+}
+
+// permProblem renders a missing-permission report (or a probe failure) with
+// the fix, ending with the escape hatch: the probe is authoritative about
+// today's policy but not about what an admin grants five minutes from now.
+func permProblem(projectID string, missing []gcp.RequiredPermission, permErr error) string {
+	var b strings.Builder
+	if permErr != nil {
+		fmt.Fprintf(&b, "Could not verify your IAM permissions on %s:\n%v\n", projectID, permErr)
+	} else {
+		fmt.Fprintf(&b, "Your application-default credentials lack permissions setup-gcp needs on %s:\n", projectID)
+		for _, p := range missing {
+			fmt.Fprintf(&b, "  %s — grant %s\n", p.Permission, p.Role)
+		}
+		fmt.Fprintf(&b, "Grant them with: gcloud projects add-iam-policy-binding %s --member=user:YOU --role=ROLE\n", projectID)
+	}
+	b.WriteString("Press [enter] again to continue anyway; the provision step may fail.")
+	return b.String()
 }
 
 func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
@@ -137,13 +176,18 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			s.errText = m.err.Error()
 			return nil
 		}
+		if len(m.missing) > 0 || m.permErr != nil {
+			s.permAcked = true
+			s.errText = permProblem(strings.TrimSpace(s.fields[0].input.Value()), m.missing, m.permErr)
+			return nil
+		}
 		st := s.deps.Setup
 		for _, f := range s.fields {
 			f.set(st, strings.TrimSpace(f.input.Value()))
 		}
 		st.ProjectNumber = m.number
-		if st.KoDockerRepo == "" {
-			st.KoDockerRepo = "gcr.io/" + st.ProjectID + "/ate-images"
+		if st.KoDockerRepo == "" && !st.Prebuilt() {
+			st.KoDockerRepo = st.DefaultKoDockerRepo()
 		}
 		return goNext
 
@@ -253,7 +297,10 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.ClusterName = c.Name
 	st.Zone = c.Location
 	st.ClusterIsNew = false
-	st.ApplyProjectDefaults()
+	if err := st.ApplyProjectDefaults(); err != nil {
+		s.err = err
+		return nil
+	}
 	return goNext
 }
 
@@ -284,7 +331,10 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st := s.deps.Setup
 				st.ClusterName = name
 				st.ClusterIsNew = true
-				st.ApplyProjectDefaults()
+				if err := st.ApplyProjectDefaults(); err != nil {
+					s.err = err
+					return nil
+				}
 				return goNext
 			}
 			var cmd tea.Cmd

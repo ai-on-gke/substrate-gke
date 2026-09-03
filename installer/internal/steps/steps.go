@@ -17,7 +17,11 @@
 // the phase starting; when a later item matches, earlier items are complete.
 package steps
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
+)
 
 // ChecklistItem is one row of a step's progress checklist.
 type ChecklistItem struct {
@@ -41,9 +45,11 @@ func containsAny(subs ...string) func(string) bool {
 	}
 }
 
-// Bootstrap tracks the seven idempotent phases of `setup-gcp bootstrap`.
+// Bootstrap tracks the seven idempotent phases of `setup-gcp bootstrap`,
+// preceded by the pinned substrate fetch this step pays for on a cold cache.
 func Bootstrap() []ChecklistItem {
 	return []ChecklistItem{
+		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Step 1/7")},
 		{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Step 2/7")},
 		{"Create the GCS snapshot bucket", contains("Step 3/7")},
@@ -55,14 +61,22 @@ func Bootstrap() []ChecklistItem {
 }
 
 // Deploy tracks the phases of `ate-setup deploy ate-system`, keyed off its
-// `[step]:` markers and ko's build progress.
-func Deploy() []ChecklistItem {
-	return []ChecklistItem{
+// `[step]:` markers and ko's build progress. A pre-built install has no build
+// phase at all — resolving a published tag to a digest prints nothing — so
+// that row is left out rather than left permanently unlit.
+func Deploy(prebuilt bool) []ChecklistItem {
+	items := []ChecklistItem{
 		{"Apply namespace, CRDs, and RBAC", contains("deploy_crds")},
 		{"Generate CAs, JWT pools, and API server config", contains("ensure_apiserver_prerequisites")},
-		{"Build control-plane images from source (ko)", containsAny("Building github.com/", "Publishing ")},
-		{"Wait for components: postgres, api-server, controller, atenet, atelet", contains("Waiting for ATE system components")},
 	}
+	if !prebuilt {
+		items = append(items, ChecklistItem{
+			"Build control-plane images from source (ko)", containsAny("Building github.com/", "Publishing "),
+		})
+	}
+	return append(items, ChecklistItem{
+		"Wait for components: postgres, api-server, controller, atenet, atelet", contains("Waiting for ATE system components"),
+	})
 }
 
 // FilestoreCSI tracks the phases of deploying the Filestore CSI driver substrate overlay.

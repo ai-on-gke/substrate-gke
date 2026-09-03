@@ -108,7 +108,7 @@ type controlPlaneScreen struct {
 func newControlPlaneScreen(deps *Deps) *controlPlaneScreen {
 	return &controlPlaneScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.DeployAteSystem(deps.Setup), steps.Deploy()),
+		comp: newExecComp(deps.Runner, deps.Builder.DeployAteSystem(deps.Setup), steps.Deploy(deps.Setup.Prebuilt())),
 	}
 }
 
@@ -155,7 +155,11 @@ func (s *controlPlaneScreen) Update(msg tea.Msg) tea.Cmd {
 func (s *controlPlaneScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
-	b.WriteString(theme.Subtle.Render("Builds the control-plane images from the vendored source with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet.") + "\n\n")
+	subtitle := "Builds the control-plane images from the substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet."
+	if s.deps.Setup.Prebuilt() {
+		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
+	}
+	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
 
 	if s.showDrawer {
@@ -607,7 +611,7 @@ func (s *completeScreen) Init() tea.Cmd      { return nil }
 func (s *completeScreen) CapturesText() bool { return false }
 
 func (s *completeScreen) Hints() []Hint {
-	if s.comp == nil {
+	if s.comp == nil && !s.deps.Setup.Upgrade {
 		return []Hint{{"y", "verify the install"}, {"enter/q", "finish"}}
 	}
 	return []Hint{{"enter/q", "finish"}}
@@ -625,7 +629,7 @@ func (s *completeScreen) Update(msg tea.Msg) tea.Cmd {
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
 		case "y":
-			if s.comp == nil {
+			if s.comp == nil && !s.deps.Setup.Upgrade {
 				s.comp = newExecComp(s.deps.Runner, s.deps.Builder.Verify(s.deps.Setup), nil)
 				return s.comp.start()
 			}
@@ -639,14 +643,20 @@ func (s *completeScreen) Update(msg tea.Msg) tea.Cmd {
 func (s *completeScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
+	if st.Upgrade {
+		installedDir, nextDir := s.deps.Builder.UpgradeTrees(s.deps.UpgradeDir, st)
+		b.WriteString(theme.Good.Render("● UPGRADE PREPARED") + "\n\n")
+		b.WriteString(theme.Panel.Width(w-4).Render(s.deps.Builder.UpgradeSummary(st, installedDir, nextDir)) + "\n")
+		return b.String()
+	}
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")
 
 	summary := fmt.Sprintf(
-		"project    %s\ncluster    %s (%s)%s\nbucket     gs://%s\nregistry   %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
+		"project    %s\ncluster    %s (%s)%s\nbucket     gs://%s\nimages     %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
 		st.ProjectID,
 		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
 		st.BucketName,
-		st.KoDockerRepo,
+		st.ImageSummary(),
 		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
 		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
 		map[bool]string{true: "counter demo deployed", false: "skipped"}[st.DemoDeployed],
@@ -659,10 +669,17 @@ func (s *completeScreen) View(w int) string {
 		b.WriteString("\n" + theme.Subtle.Render("Press [y] to run `kubectl get pods -n ate-system` and see it live.") + "\n")
 	}
 
+	// A managed checkout is removed once the install succeeds, so its next
+	// steps cannot ask the user to run anything inside it — offer the
+	// self-contained install command instead.
+	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
+	if s.deps.Builder.Managed {
+		installAte = s.deps.Builder.KubectlAteInstall()
+	}
 	next := theme.Title.Render("Next steps") + "\n" +
 		theme.CommandLine.Render("kubectl port-forward -n ate-system svc/atenet-router 8000:80") + "\n" +
 		theme.Subtle.Render("then, if you deployed the counter demo:") + "\n" +
-		theme.CommandLine.Render(`go install ./cmd/kubectl-ate    # run inside the vendored substrate/ tree`) + "\n" +
+		theme.CommandLine.Render(installAte) + "\n" +
 		theme.CommandLine.Render("kubectl ate create atespace demo") + "\n" +
 		theme.CommandLine.Render("kubectl ate create actor my-counter-1 -a demo --template=ate-demo-counter/counter") + "\n" +
 		theme.CommandLine.Render(`curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" http://localhost:8000/`)
