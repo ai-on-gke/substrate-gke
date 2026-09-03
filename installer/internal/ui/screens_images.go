@@ -283,9 +283,9 @@ func (s *imagesScreen) Update(msg tea.Msg) tea.Cmd {
 				s.cursor = 1
 			case "enter":
 				if s.cursor == 0 {
-					return s.enterRelease()
+					return s.enterSource()
 				}
-				return s.enterSource()
+				return s.enterRelease()
 			case "b", "esc":
 				return goBack
 			}
@@ -343,10 +343,10 @@ func (s *imagesScreen) View(w int) string {
 
 	if s.mode == "choose" {
 		options := []struct{ name, desc string }{
-			{"[1] Install pre-built images (recommended)",
-				"Defaults to the published release (coming soon) at\n" + snapshot.ReleaseRepo + ";\nany registry and tag can be given instead. Nothing is built or pushed."},
-			{"[2] Build from source",
+			{"[1] Build from source",
 				"Builds every image with ko from a Substrate tree and pushes them\nto your own registry. Pick this for a fork, a branch, or a hotfix."},
+			{"[2] Install pre-built images (coming soon)",
+				"Defaults to the published release at\n" + snapshot.ReleaseRepo + ";\nany registry and tag can be given instead. Nothing is built or pushed."},
 		}
 		for i, o := range options {
 			panel, title := theme.Panel, theme.Subtle

@@ -119,10 +119,10 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.Images {
 		t.Fatalf("after doctor: %v", app.mach.Current())
 	}
-	// Take the pre-built images: enter picks them, then the offered registry,
+	// Take the pre-built images: [2] picks them, then the offered registry,
 	// tag, manifest repository, and manifest commit are accepted in turn.
 	// Nothing is built, so the project is never asked for a registry to push to.
-	press("enter", "enter", "enter", "enter", "enter")
+	press("2", "enter", "enter", "enter", "enter", "enter")
 	if app.mach.Current() != state.Project {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
@@ -188,12 +188,12 @@ func TestCreateNewClusterPath(t *testing.T) {
 		}
 	}
 
-	press("enter")                                     // welcome
-	press("enter")                                     // doctor
-	press("enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
-	press("enter", "enter", "enter")                   // project fields (pid, zone, bucket)
-	press("3", "enter")                                // "create a new cluster" row (2 clusters + create)
-	pump(t, app, key("enter"))                         // accept the default name
+	press("enter")                                          // welcome
+	press("enter")                                          // doctor
+	press("2", "enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
+	press("enter", "enter", "enter")                        // project fields (pid, zone, bucket)
+	press("3", "enter")                                     // "create a new cluster" row (2 clusters + create)
+	pump(t, app, key("enter"))                              // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
 	}
@@ -254,10 +254,10 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 		}
 	}
 
-	press("enter")                                     // welcome
-	press("enter")                                     // doctor
-	press("enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
-	press("enter", "enter", "enter")                   // project fields (pid, zone, bucket)
+	press("enter")                                          // welcome
+	press("enter")                                          // doctor
+	press("2", "enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
+	press("enter", "enter", "enter")                        // project fields (pid, zone, bucket)
 	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
 	press("2", "enter")
 	press("y")
@@ -289,7 +289,7 @@ func TestCustomBucketNameQuickstartTrack(t *testing.T) {
 	// Doctor: continue (enter)
 	press("enter")
 	// Images: pre-built, then the offered registry, tag, repository, and commit
-	press("enter", "enter", "enter", "enter", "enter")
+	press("2", "enter", "enter", "enter", "enter", "enter")
 	// Project screen:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket
 	press("enter", "enter")
@@ -326,7 +326,7 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("enter")
 	// Images: build from source, keeping the offered repository and the HEAD
 	// commit the screen resolved. Only this path asks for a registry.
-	press("2", "enter")
+	press("1", "enter")
 	press("enter", "enter")
 	// Project screen in Advanced track:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo
@@ -378,7 +378,7 @@ func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {
 
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
-	pump(t, app, key("2"))     // build from source
+	pump(t, app, key("1"))     // build from source
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter")) // repository → revision
 	pump(t, app, key("enter")) // submit
@@ -404,7 +404,8 @@ func TestImagesScreenAcceptsAnOverriddenRegistry(t *testing.T) {
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
-	pump(t, app, key("enter")) // pre-built images
+	pump(t, app, key("2"))     // pre-built images
+	pump(t, app, key("enter"))
 
 	typeOver := func(text string) {
 		scr := app.cur.(*imagesScreen)
@@ -445,7 +446,8 @@ func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
-	pump(t, app, key("enter")) // pre-built images
+	pump(t, app, key("2"))     // pre-built images
+	pump(t, app, key("enter"))
 	pump(t, app, key("enter")) // registry → tag
 
 	scr := app.cur.(*imagesScreen)
@@ -478,7 +480,8 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
-	pump(t, app, key("enter")) // pre-built images
+	pump(t, app, key("2"))     // pre-built images
+	pump(t, app, key("enter"))
 	pump(t, app, key("enter")) // registry → tag
 	pump(t, app, key("enter")) // tag → manifest repository
 	pump(t, app, key("enter")) // manifest repository → manifest commit
