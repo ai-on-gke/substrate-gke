@@ -94,10 +94,13 @@ func (s *welcomeScreen) View(w int) string {
 	b.WriteString(theme.Subtle.Render("High-density AI agent sandboxing on Kubernetes — GKE installer") + "\n")
 	b.WriteString(theme.Fainted.Render("substrate: "+s.deps.Builder.Version) + "\n\n")
 
-	tracks := []struct{ name, desc string }{
-		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster."},
-		{"Advanced", "Also configure machine type, network, bucket, and image registry."},
-		{"Upgrade an installed cluster", "Fetch the trees and write the environment for upstream's rolling\nupgrade runbook. Nothing in GCP is touched."},
+	tracks := []struct{ name, desc, note string }{
+		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster.", ""},
+		{"Advanced", "Also configure machine type, network, bucket, and image registry.", ""},
+		{"Upgrade an installed cluster", "Fetch the trees and write the environment for upstream's rolling\nupgrade runbook. Nothing in GCP is touched.",
+			// The track is ahead of the releases: nothing available today
+			// upgrades to anything else yet.
+			"Coming in a later release. Upgrades will be guaranteed only within a\nrelease branch. Until then, reinstall."},
 	}
 	for i, t := range tracks {
 		label := fmt.Sprintf("[%d] %s", i+1, t.name)
@@ -106,7 +109,11 @@ func (s *welcomeScreen) View(w int) string {
 		if i == s.cursor {
 			panel, title = theme.AccentPanel, theme.Title
 		}
-		b.WriteString(panel.Width(min(w-4, 70)).Render(title.Render(label)+"\n"+theme.Subtle.Render(t.desc)) + "\n")
+		body := title.Render(label) + "\n" + theme.Subtle.Render(t.desc)
+		if t.note != "" {
+			body += "\n" + theme.Warning.Render(t.note)
+		}
+		b.WriteString(panel.Width(min(w-4, 70)).Render(body) + "\n")
 	}
 
 	if s.errText != "" {

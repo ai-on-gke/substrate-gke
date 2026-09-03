@@ -162,6 +162,9 @@ live HEAD — so none of them has to change for someone installing their own bui
 
 ## Upgrading an installed cluster
 
+Coming in a later release. Upgrades will be guaranteed only within a release branch.
+Until then, reinstall.
+
 Upgrades follow upstream's rolling upgrade runbook,
 [`docs/upgrade.md`](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md)
 in the Substrate tree. Do not re-run the install track against a cluster that already

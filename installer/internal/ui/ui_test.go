@@ -736,6 +736,16 @@ func TestUpgradeTrackAsksForTheCommitWhenTheAPIServerRunsTheOtherVersion(t *test
 	}
 }
 
+// The upgrade track is ahead of the releases, and the first screen says so
+// before anyone picks it.
+func TestWelcomeSaysUpgradesAreNotYetSupported(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 50})
+	if view := app.View(); !strings.Contains(view, "Coming in a later release") || !strings.Contains(view, "reinstall") {
+		t.Errorf("welcome should say the upgrade track is not yet supported:\n%s", view)
+	}
+}
+
 // Without a cache directory the trees would land relative to the working
 // directory, and be swept from there; the track is refused up front.
 func TestUpgradeTrackNeedsACacheDirectory(t *testing.T) {
