@@ -736,3 +736,68 @@ func TestUseSourceLeavesAnExplicitCheckoutInPlace(t *testing.T) {
 		t.Errorf("Version = %q, want substrate-local", b.Version)
 	}
 }
+
+// The upgrade's one command fetches the installed commit and the new one into
+// directories that stay, reuses a tree it already fetched whole, and then
+// records the new version (best effort: no cluster here, so it only warns).
+func TestFetchTreesFetchesBothCommits(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", origin}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "-q")
+	if err := os.WriteFile(filepath.Join(origin, "go.mod"), []byte("module example.com/substrate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "go.mod")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "old")
+	oldSHA := run("rev-parse", "HEAD")
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "new")
+	newSHA := run("rev-parse", "HEAD")
+
+	b := NewBuilder(filepath.Join(t.TempDir(), "cache", "substrate-x"), true)
+	b.UseSource(Revision{Repo: origin, Commit: newSHA})
+	st := testSetup(t)
+	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = origin, oldSHA, "substrate-"+shorten(oldSHA)
+
+	base := filepath.Join(t.TempDir(), "upgrades")
+	installedDir, nextDir := b.UpgradeTrees(base, st)
+	if installedDir == nextDir || !strings.HasPrefix(installedDir, base) {
+		t.Fatalf("UpgradeTrees = %q, %q", installedDir, nextDir)
+	}
+	spec := b.FetchTrees(st, installedDir, nextDir)
+	if script := spec.Argv[len(spec.Argv)-1]; strings.Contains(script, "kubectl") || strings.Contains(script, "gcloud") {
+		t.Fatalf("FetchTrees must not touch the cluster:\n%s", script)
+	}
+	for i := 0; i < 2; i++ {
+		out, err := exec.Command(spec.Argv[0], spec.Argv[1:]...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("fetch run %d: %v\n%s", i, err, out)
+		}
+		if i == 1 && !strings.Contains(string(out), "Using cached") {
+			t.Errorf("second run should reuse the trees:\n%s", out)
+		}
+	}
+	for dir, want := range map[string]string{installedDir: oldSHA, nextDir: newSHA} {
+		got, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		if err != nil || strings.TrimSpace(string(got)) != want {
+			t.Errorf("%s is at %q (%v), want %s", dir, strings.TrimSpace(string(got)), err, want)
+		}
+	}
+	summary := b.UpgradeSummary(st, installedDir, nextDir)
+	for _, want := range []string{RunbookURL, "Path: " + installedDir, "Path: " + nextDir, "$OLD_VERSION is " + st.InstalledVersion,
+		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
+		"export KO_DOCKER_REPO=" + ShellQuote(st.KoDockerRepo), "$NEW_VERSION is " + b.SubstrateVersion(st)} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
+		}
+	}
+}

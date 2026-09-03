@@ -15,7 +15,10 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -501,5 +504,122 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	}
 	if len(app.deps.Checks) == 0 {
 		t.Error("the doctor checks were not recomputed for the chosen tree")
+	}
+}
+
+func typeText(t *testing.T, app *App, text string) {
+	t.Helper()
+	for _, r := range text {
+		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+}
+
+// TestDryRunUpgradeEndToEnd walks the upgrade track: welcome (upgrade) →
+// doctor → the cluster named and its record read → images (the release) →
+// fetch (dry-run) → complete. Nothing in GCP is touched, and the new version
+// is the release the images step offers.
+func TestDryRunUpgradeEndToEnd(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+
+	press("3", "enter") // upgrade track
+	if app.mach.Current() != state.CheckSetup || !app.deps.Setup.Upgrade {
+		t.Fatalf("after welcome: %v upgrade=%v", app.mach.Current(), app.deps.Setup.Upgrade)
+	}
+	press("enter") // doctor → installed cluster
+	if app.mach.Current() != state.UpgradeSource {
+		t.Fatalf("after doctor: %v", app.mach.Current())
+	}
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter") // cluster and location keep their defaults; the record is read
+	if app.mach.Current() != state.Images {
+		scr := app.cur.(*upgradeSourceScreen)
+		t.Fatalf("after the installed cluster: %v mode=%s err=%q", app.mach.Current(), scr.mode, scr.errText)
+	}
+	st := app.deps.Setup
+	want := "substrate-" + snapshot.ShortCommit()
+	if st.ProjectID != "acme" || st.InstalledCommit != snapshot.Commit || st.InstalledVersion != want || st.KoDockerRepo != "gcr.io/acme/ate-images" {
+		t.Fatalf("installed cluster not read off the cluster: %+v", st)
+	}
+
+	press("enter", "enter", "enter", "enter", "enter") // the release, all four fields accepted
+	if app.mach.Current() != state.UpgradePlan {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	if !st.Prebuilt() || st.ImageTag != snapshot.ReleaseVersion {
+		t.Fatalf("images step did not record the release: %+v", st)
+	}
+	plan := app.cur.(*upgradePlanScreen)
+	if !plan.comp.ok() {
+		t.Fatalf("dry-run fetch did not finish: failed=%v", plan.comp.failed)
+	}
+	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "Path:") {
+		t.Errorf("plan view lacks the hand-over:\n%s", view)
+	}
+	press("enter")
+	if app.mach.Current() != state.Complete || !app.Completed {
+		t.Fatalf("after plan: %v completed=%v", app.mach.Current(), app.Completed)
+	}
+	if view := app.View(); !strings.Contains(view, "UPGRADE PREPARED") || !strings.Contains(view, snapshot.ReleaseVersion) {
+		t.Errorf("final view:\n%s", view)
+	}
+}
+
+// noRecordRunner fails the cluster read and replays everything else,
+// standing in for a cluster the installer cannot reach or read.
+type noRecordRunner struct{ inner execx.Runner }
+
+func (r noRecordRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	if spec.Label != "read the installed Substrate" {
+		return r.inner.Start(ctx, spec)
+	}
+	ch := make(chan execx.Event, 1)
+	ch <- execx.Event{Done: true, Err: errors.New("error: no atelet daemonset")}
+	close(ch)
+	return ch
+}
+
+// A cluster that cannot be read can still be upgraded: the installed commit
+// and version are typed in instead.
+func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.Runner = noRecordRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter", "enter") // upgrade, doctor
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter") // read fails
+	scr := app.cur.(*upgradeSourceScreen)
+	if scr.mode != "reading" || scr.comp.failed == nil {
+		t.Fatalf("expected the read to fail: mode=%s failed=%v", scr.mode, scr.comp.failed)
+	}
+	press("m")
+	if scr.mode != "manual" {
+		t.Fatalf("m should describe by hand, mode=%s", scr.mode)
+	}
+	const installed = "0123456789abcdef0123456789abcdef01234567"
+	typeText(t, app, installed)
+	press("enter")
+	typeText(t, app, "substrate-0123456789ab")
+	press("enter", "enter") // bucket blank → submit
+	if app.mach.Current() != state.Images {
+		t.Fatalf("after describing the cluster: %v (%s)", app.mach.Current(), scr.errText)
+	}
+	st := app.deps.Setup
+	if st.InstalledCommit != installed || st.InstalledVersion != "substrate-0123456789ab" || st.BucketName != "ate-snapshots-acme-us-west1-c" {
+		t.Fatalf("described cluster not recorded: %+v", st)
 	}
 }

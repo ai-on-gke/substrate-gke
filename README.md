@@ -53,7 +53,9 @@ each running the real command it shows and streaming its output:
 9. **Deploy a demo workload** (optional) — the upstream counter demo, then a live
    verification and next steps.
 
-Exiting and re-running is always safe; every step is idempotent.
+Exiting and re-running is safe at the same pinned commit; every step is
+idempotent. Re-running at a newer pinned commit does not upgrade a cluster that is
+already installed; see [Upgrading an installed cluster](#upgrading-an-installed-cluster).
 
 ## Repository layout
 
@@ -137,7 +139,10 @@ cd installer && go run . --substrate-root=/path/to/substrate
 
 A checkout you supply this way is used as-is and never modified or deleted.
 
-### Moving to a newer Substrate
+### Bumping the pinned commit
+
+This changes what fresh installs get. It does not upgrade clusters that are already
+installed; those follow [Upgrading an installed cluster](#upgrading-an-installed-cluster).
 
 Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion`
 next to it to match the `go` directive in that revision's `go.mod`. `make substrate-pin`
@@ -153,6 +158,22 @@ to be what they were built from.
 All three are defaults, not limits. The wizard accepts any registry, tag, and revision,
 and the build-from-source track never uses `Commit` at all — it offers its repository's
 live HEAD — so none of them has to change for someone installing their own build.
+
+## Upgrading an installed cluster
+
+Upgrades follow upstream's rolling upgrade runbook,
+[`docs/upgrade.md`](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md)
+in the Substrate tree. Do not re-run the install track against a cluster that already
+runs Substrate; run the installer and choose **Upgrade an installed cluster** instead. It
+names the cluster and reads what it runs off the cluster, takes the new version from the
+same images step an install uses, fetches the installed and the new source trees into
+`~/.cache/substrate-gke/upgrades/`, and prints the hand-over: the two versions with their
+trees, the runbook, and the environment for its `ate-setup` commands on each side. Nothing
+on the cluster changes until you follow the runbook.
+
+The installed tree is fetched at the commit the running version names: a build from
+source abbreviates it in the version, and a release tag maps to the commit this repository
+pinned for it. When neither applies, the commit and version are typed in.
 
 ## Tearing down
 

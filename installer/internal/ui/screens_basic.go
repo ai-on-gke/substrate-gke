@@ -36,7 +36,10 @@ type welcomeScreen struct {
 
 func newWelcomeScreen(deps *Deps) *welcomeScreen {
 	cursor := 0
-	if deps.Setup.Track == state.TrackAdvanced {
+	switch {
+	case deps.Setup.Upgrade:
+		cursor = 2
+	case deps.Setup.Track == state.TrackAdvanced:
 		cursor = 1
 	}
 	return &welcomeScreen{deps: deps, cursor: cursor}
@@ -46,7 +49,7 @@ func (s *welcomeScreen) Init() tea.Cmd      { return nil }
 func (s *welcomeScreen) CapturesText() bool { return false }
 
 func (s *welcomeScreen) Hints() []Hint {
-	return []Hint{{"1/2", "choose a track"}, {"enter", "begin"}}
+	return []Hint{{"1/2/3", "choose a track"}, {"enter", "begin"}}
 }
 
 func (s *welcomeScreen) Update(msg tea.Msg) tea.Cmd {
@@ -55,15 +58,23 @@ func (s *welcomeScreen) Update(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 	switch key.String() {
-	case "up", "k", "1":
+	case "up", "k":
+		s.cursor = max(s.cursor-1, 0)
+	case "down", "j":
+		s.cursor = min(s.cursor+1, 2)
+	case "1":
 		s.cursor = 0
-	case "down", "j", "2":
+	case "2":
 		s.cursor = 1
+	case "3":
+		s.cursor = 2
 	case "enter":
-		if s.cursor == 0 {
-			s.deps.Setup.Track = state.TrackQuickstart
+		st := s.deps.Setup
+		st.Upgrade = s.cursor == 2
+		if s.cursor == 1 {
+			st.Track = state.TrackAdvanced
 		} else {
-			s.deps.Setup.Track = state.TrackAdvanced
+			st.Track = state.TrackQuickstart
 		}
 		return goNext
 	}
@@ -79,6 +90,7 @@ func (s *welcomeScreen) View(w int) string {
 	tracks := []struct{ name, desc string }{
 		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster."},
 		{"Advanced", "Also configure machine type, network, bucket, and image registry."},
+		{"Upgrade an installed cluster", "Fetch the trees and write the environment for upstream's rolling\nupgrade runbook. Nothing in GCP is touched."},
 	}
 	for i, t := range tracks {
 		label := fmt.Sprintf("[%d] %s", i+1, t.name)

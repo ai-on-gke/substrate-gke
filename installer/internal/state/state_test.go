@@ -141,3 +141,29 @@ func TestDefaultBucketName(t *testing.T) {
 		}
 	}
 }
+
+// The upgrade flow numbers its own steps: the sidebar counts positions in the
+// active order, not the Step constants, which belong to the install flow.
+func TestUpgradeOrderPositions(t *testing.T) {
+	m := NewMachine()
+	m.SetOrder(UpgradeOrder)
+	if m.Current() != Welcome {
+		t.Fatalf("after SetOrder: %v, want Welcome", m.Current())
+	}
+	if n := m.NumberedSteps(); n != 4 {
+		t.Errorf("NumberedSteps() = %d, want 4", n)
+	}
+	for step, want := range map[Step]int{CheckSetup: 1, UpgradeSource: 2, Images: 3, UpgradePlan: 4} {
+		if got, ok := m.Position(step); !ok || got != want {
+			t.Errorf("Position(%v) = %d/%v, want %d/true", step, got, ok, want)
+		}
+	}
+	if _, ok := m.Position(Project); ok {
+		t.Error("Project is not part of the upgrade flow")
+	}
+	for i := 1; i < len(UpgradeOrder); i++ {
+		if got := m.Next(); got != UpgradeOrder[i] {
+			t.Fatalf("Next() #%d = %v, want %v", i, got, UpgradeOrder[i])
+		}
+	}
+}

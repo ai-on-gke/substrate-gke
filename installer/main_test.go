@@ -34,7 +34,7 @@ func TestSummaryDoesNotPointAtTheRemovedCache(t *testing.T) {
 	st := state.NewSetup()
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, st, snapshot.NewBuilder(root, true), true)
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(root, true)}, true)
 	})
 
 	if strings.Contains(out, root) {
@@ -52,7 +52,7 @@ func TestSummaryDoesNotClaimARemovalThatDidNotHappen(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "substrate-4a2cb262dd62")
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, true), false)
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: state.NewSetup(), Builder: snapshot.NewBuilder(root, true)}, false)
 	})
 
 	if strings.Contains(out, "has been removed") {
@@ -73,7 +73,7 @@ func TestSummaryTeardownCommandSurvivesAPaste(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, state.NewSetup(), snapshot.NewBuilder(root, false), false)
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: state.NewSetup(), Builder: snapshot.NewBuilder(root, false)}, false)
 	})
 
 	var teardown string
@@ -125,7 +125,7 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	st.BucketName = "ate-snapshots-acme-us-west1-c"
 
 	out := captureStdout(t, func() {
-		printSummary(&ui.App{Completed: true}, st, snapshot.NewBuilder(t.TempDir(), true), true)
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(t.TempDir(), true)}, true)
 	})
 
 	for _, want := range []string{
@@ -187,5 +187,27 @@ func TestCleanupGcpDelegatesAtThePin(t *testing.T) {
 	}
 	if strings.Contains(string(script), "remove-iam-policy-binding") {
 		t.Errorf("cleanup-gcp still carries its own IAM deletions; that knowledge belongs upstream")
+	}
+}
+
+// An upgrade's summary hands over to the runbook: the two versions with their
+// trees and the runbook itself, instead of an install recap.
+func TestSummaryForAnUpgrade(t *testing.T) {
+	st := state.NewSetup()
+	st.Upgrade = true
+	st.ProjectID, st.ClusterName = "acme", "prod"
+	st.InstalledCommit, st.InstalledVersion = "0123456789abcdef0123456789abcdef01234567", "substrate-0123456789ab"
+	deps := &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(t.TempDir(), true), UpgradeDir: "/cache/upgrades"}
+
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, deps, false)
+	})
+	for _, want := range []string{"Upgrade prepared", snapshot.RunbookURL, "substrate-0123456789ab", "Path: /cache/upgrades"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("upgrade summary is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Substrate installed") {
+		t.Errorf("upgrade summary reads like an install:\n%s", out)
 	}
 }

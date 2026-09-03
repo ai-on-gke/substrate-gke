@@ -38,6 +38,9 @@ type Deps struct {
 	Builder *snapshot.Builder
 	Checks  []doctor.Check
 	DryRun  bool
+
+	// UpgradeDir is where the upgrade track keeps the two source trees.
+	UpgradeDir string
 }
 
 // Screen is one wizard page. Update returns commands; navigation happens by
@@ -129,6 +132,10 @@ func (a *App) screenFor(s state.Step) Screen {
 		return newDemoScreen(a.deps)
 	case state.Complete:
 		return newCompleteScreen(a.deps)
+	case state.UpgradeSource:
+		return newUpgradeSourceScreen(a.deps)
+	case state.UpgradePlan:
+		return newUpgradePlanScreen(a.deps)
 	}
 	return newWelcomeScreen(a.deps)
 }
@@ -146,6 +153,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case navMsg:
 		switch m {
 		case navNext:
+			// The welcome screen picks the flow; both start at Welcome, so
+			// the switch happens before the first step forward.
+			if a.mach.Current() == state.Welcome {
+				if a.deps.Setup.Upgrade {
+					a.mach.SetOrder(state.UpgradeOrder)
+				} else {
+					a.mach.SetOrder(state.Order)
+				}
+			}
 			step := a.mach.Next()
 			if step == state.Complete {
 				a.Completed = true
