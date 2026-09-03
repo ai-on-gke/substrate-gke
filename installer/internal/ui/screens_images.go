@@ -344,7 +344,7 @@ func (s *imagesScreen) View(w int) string {
 	if s.mode == "choose" {
 		options := []struct{ name, desc string }{
 			{"[1] Install pre-built images (recommended)",
-				"Defaults to the published release at " + snapshot.ReleaseRepo + ";\nany registry and tag can be given instead. Nothing is built or pushed."},
+				"Defaults to the published release at " + snapshot.ReleaseRepo + "\n(coming soon); any registry and tag can be given instead. Nothing is\nbuilt or pushed."},
 			{"[2] Build from source",
 				"Builds every image with ko from a Substrate tree and pushes them\nto your own registry. Pick this for a fork, a branch, or a hotfix."},
 		}
@@ -384,7 +384,8 @@ func (s *imagesScreen) View(w int) string {
 				"is published with manifests known to match. Point the two manifest\n" +
 				"fields at the repository and commit these images were built from."))
 	case s.mode == "release":
-		b.WriteString(theme.Subtle.Render("Defaults to the published release; override any of these to install your\nown build. Every image is pulled at this tag and pinned to the digest it\nnames, and ate-setup reads the manifests from the commit below."))
+		b.WriteString(theme.Accent.Render("The published release is coming soon; until then, give a registry and\ntag you have published to.\n") +
+			theme.Subtle.Render("Override any of these to install your own build. Every image is pulled\nat this tag and pinned to the digest it names, and ate-setup reads the\nmanifests from the commit below."))
 	default:
 		b.WriteString(theme.Subtle.Render("Defaults to the repository's current HEAD, shown as a commit id.\nOverride it with a branch, a tag, or a full commit SHA."))
 	}

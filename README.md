@@ -70,11 +70,11 @@ manifests from a source tree either way.
 **Pre-built images** — the default, and four fields: the image registry, the image
 tag, the manifest repository, and the manifest commit id. All four are offered
 pre-filled and all four can be overridden. The defaults are the published release at
-`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we host the release
-images, and the commit pinned below, which is what they were built from. `ate-setup`
-pins every image to the digest its tag resolves to. Nothing is built and nothing is
-pushed, so your project needs no image registry of its own; the release registry in
-particular is pull-only.
+`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we will host the
+release images — it is coming soon, and the step says so — and the commit pinned below,
+which is what they were built from. `ate-setup` pins every image to the digest its tag
+resolves to. Nothing is built and nothing is pushed, so your project needs no image
+registry of its own; the release registry in particular is pull-only.
 
 Any registry and tag work, so a team that publishes its own builds — a staging
 registry, or a private rebuild of a release — installs them by typing them here rather
