@@ -10,6 +10,14 @@ Prerequisites: `gcloud` (authenticated, with application-default credentials), a
 toolchain, `git`, and `kubectl`.
 
 ```bash
+
+# One-line install and launch:
+curl -sSL https://raw.githubusercontent.com/ai-on-gke/substrate-gke/main/install.sh | bash
+```
+
+Or from a local clone:
+
+```bash
 git clone https://github.com/ai-on-gke/substrate-gke.git
 cd substrate-gke
 gcloud auth application-default login
