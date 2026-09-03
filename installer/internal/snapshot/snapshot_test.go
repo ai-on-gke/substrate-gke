@@ -796,6 +796,11 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		if err != nil || strings.TrimSpace(string(got)) != want {
 			t.Errorf("%s is at %q (%v), want %s", dir, strings.TrimSpace(string(got)), err, want)
 		}
+		// The marker must not count as a change: Go would stamp a binary
+		// built here as dirty.
+		if status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output(); err != nil || len(status) != 0 {
+			t.Errorf("%s is not clean after the fetch (%v):\n%s", dir, err, status)
+		}
 	}
 	summary := b.UpgradeSummary(st, installedDir, nextDir)
 	for _, want := range []string{RunbookURL, "Path: " + installedDir, "Path: " + nextDir, "$OLD_VERSION is " + st.InstalledVersion,

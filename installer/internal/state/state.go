@@ -194,8 +194,8 @@ type Setup struct {
 	// and the run prepares upstream's rolling upgrade instead of installing.
 	Upgrade bool
 	// InstalledRepo, InstalledCommit and InstalledVersion describe the
-	// Substrate a cluster runs today, read from the record the install left
-	// in the cluster; an upgrade fetches that tree for rollback.
+	// Substrate a cluster runs today, read off the cluster itself; an
+	// upgrade fetches that tree for rollback.
 	InstalledRepo    string
 	InstalledCommit  string
 	InstalledVersion string

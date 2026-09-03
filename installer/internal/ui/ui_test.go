@@ -123,9 +123,9 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 		t.Fatalf("after doctor: %v", app.mach.Current())
 	}
 	// Take the pre-built images: [2] picks them, then the offered registry,
-	// tag, manifest repository, and manifest commit are accepted in turn.
-	// Nothing is built, so the project is never asked for a registry to push to.
-	press("2", "enter", "enter", "enter", "enter", "enter")
+	// tag and commit are accepted in turn. Nothing is built, so the project is
+	// never asked for a registry to push to.
+	press("2", "enter", "enter", "enter", "enter")
 	if app.mach.Current() != state.Project {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
@@ -191,12 +191,12 @@ func TestCreateNewClusterPath(t *testing.T) {
 		}
 	}
 
-	press("enter")                                          // welcome
-	press("enter")                                          // doctor
-	press("2", "enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
-	press("enter", "enter", "enter")                        // project fields (pid, zone, bucket)
-	press("3", "enter")                                     // "create a new cluster" row (2 clusters + create)
-	pump(t, app, key("enter"))                              // accept the default name
+	press("enter")                                 // welcome
+	press("enter")                                 // doctor
+	press("2", "enter", "enter", "enter", "enter") // images: pre-built, then its three fields
+	press("enter", "enter", "enter")               // project fields (pid, zone, bucket)
+	press("3", "enter")                            // "create a new cluster" row (2 clusters + create)
+	pump(t, app, key("enter"))                     // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
 	}
@@ -257,10 +257,10 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 		}
 	}
 
-	press("enter")                                          // welcome
-	press("enter")                                          // doctor
-	press("2", "enter", "enter", "enter", "enter", "enter") // images: pre-built, then its four fields
-	press("enter", "enter", "enter")                        // project fields (pid, zone, bucket)
+	press("enter")                                 // welcome
+	press("enter")                                 // doctor
+	press("2", "enter", "enter", "enter", "enter") // images: pre-built, then its three fields
+	press("enter", "enter", "enter")               // project fields (pid, zone, bucket)
 	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
 	press("2", "enter")
 	press("y")
@@ -291,8 +291,8 @@ func TestCustomBucketNameQuickstartTrack(t *testing.T) {
 	press("enter")
 	// Doctor: continue (enter)
 	press("enter")
-	// Images: pre-built, then the offered registry, tag, repository, and commit
-	press("2", "enter", "enter", "enter", "enter", "enter")
+	// Images: pre-built, then the offered registry, tag and commit
+	press("2", "enter", "enter", "enter", "enter")
 	// Project screen:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket
 	press("enter", "enter")
@@ -327,10 +327,10 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("2", "enter")
 	// Doctor: continue
 	press("enter")
-	// Images: build from source, keeping the offered repository and the HEAD
-	// commit the screen resolved. Only this path asks for a registry.
+	// Images: build from source, keeping the HEAD commit the screen resolved.
+	// Only this path asks for a registry.
 	press("1", "enter")
-	press("enter", "enter")
+	press("enter")
 	// Project screen in Advanced track:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo
 	press("enter", "enter")
@@ -383,7 +383,11 @@ func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("1"))     // build from source
 	pump(t, app, key("enter"))
-	pump(t, app, key("enter")) // repository → revision
+	// The repository is not a field: only the revision in it is asked.
+	scr := app.cur.(*imagesScreen)
+	if len(scr.fields) != 1 || !strings.Contains(app.View(), snapshot.RepoURL) {
+		t.Fatalf("source mode should ask for a revision of %s only, got %d fields:\n%s", snapshot.RepoURL, len(scr.fields), app.View())
+	}
 	pump(t, app, key("enter")) // submit
 
 	if app.mach.Current() != state.Project {
@@ -420,9 +424,8 @@ func TestImagesScreenAcceptsAnOverriddenRegistry(t *testing.T) {
 	typeOver(registry)
 	pump(t, app, key("enter")) // registry → tag
 	typeOver(tag)
-	pump(t, app, key("enter")) // tag → manifest repository
-	pump(t, app, key("enter")) // manifest repository → manifest commit
-	pump(t, app, key("enter")) // submit, keeping the offered tree
+	pump(t, app, key("enter")) // tag → commit
+	pump(t, app, key("enter")) // submit, keeping the offered commit
 
 	if app.mach.Current() != state.Project {
 		t.Fatalf("after images: %v", app.mach.Current())
@@ -458,8 +461,7 @@ func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
 	for _, r := range "my/team:v1" {
 		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	pump(t, app, key("enter")) // tag → manifest repository
-	pump(t, app, key("enter")) // manifest repository → manifest commit
+	pump(t, app, key("enter")) // tag → commit
 	pump(t, app, key("enter")) // submit
 
 	if app.mach.Current() != state.Images {
@@ -474,9 +476,9 @@ func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
 }
 
 // ate-setup reads the manifests from a checkout, so pre-built images come with
-// the revision to read them from: a registry that is not the release one has no
-// tree published alongside it, and the user says which commit its images match.
-// Moving that revision moves the tree without turning the install into a build.
+// the commit to read them from: a registry that is not the release one has no
+// commit published alongside it, and the user says which one its images match.
+// Moving that commit moves the tree without turning the install into a build.
 func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
@@ -486,8 +488,7 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	pump(t, app, key("2"))     // pre-built images
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter")) // registry → tag
-	pump(t, app, key("enter")) // tag → manifest repository
-	pump(t, app, key("enter")) // manifest repository → manifest commit
+	pump(t, app, key("enter")) // tag → commit
 
 	scr := app.cur.(*imagesScreen)
 	scr.fields[scr.focus].SetValue("")
@@ -549,7 +550,7 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 		t.Fatalf("installed cluster not read off the cluster: %+v", st)
 	}
 
-	press("enter", "enter", "enter", "enter", "enter") // the release, all four fields accepted
+	press("2", "enter", "enter", "enter", "enter") // the release, all three fields accepted
 	if app.mach.Current() != state.UpgradePlan {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
@@ -662,7 +663,7 @@ func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T
 		t.Errorf("rollback exports for a pre-built install:\n%s", exports)
 	}
 
-	press("enter", "enter", "enter", "enter", "enter") // the release again, as installed
+	press("2", "enter", "enter", "enter", "enter") // the release again, as installed
 	if app.mach.Current() != state.UpgradePlan {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
@@ -676,6 +677,62 @@ func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T
 	press("b")
 	if app.mach.Current() != state.Images {
 		t.Fatalf("back from the refusal should return to the images step, got %v", app.mach.Current())
+	}
+}
+
+// midUpgradeRunner replays the dry-run read with a second version running,
+// as a cluster looks partway through a roll.
+type midUpgradeRunner struct{ inner execx.Runner }
+
+func (r midUpgradeRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	if spec.Label == "read the installed Substrate" {
+		lines := slices.Clone(spec.SimLines)
+		lines[0] += " v9.9.9"
+		spec.SimLines = lines
+	}
+	return r.inner.Start(ctx, spec)
+}
+
+// With two versions running, the commit read off the API server belongs to
+// the version it reports being. Choosing the other one is allowed, but its
+// commit has to be typed in, with everything else already filled.
+func TestUpgradeTrackAsksForTheCommitWhenTheAPIServerRunsTheOtherVersion(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.Runner = midUpgradeRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter", "enter")
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter")
+	scr := app.cur.(*upgradeSourceScreen)
+	if scr.mode != "choose" || len(scr.choices) != 2 {
+		t.Fatalf("two running versions should be offered, mode=%s choices=%v", scr.mode, scr.choices)
+	}
+	press("enter") // the API server's own version: its commit is known
+	if app.mach.Current() != state.Images || app.deps.Setup.InstalledCommit != snapshot.Commit {
+		t.Fatalf("choosing the API server's version: %v commit=%q", app.mach.Current(), app.deps.Setup.InstalledCommit)
+	}
+
+	app = testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.Runner = midUpgradeRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press("3", "enter", "enter")
+	typeText(t, app, "acme")
+	press("enter", "enter", "enter", "j", "enter") // the other version
+	scr = app.cur.(*upgradeSourceScreen)
+	if scr.mode != "manual" || !strings.Contains(scr.note, "not v9.9.9") {
+		t.Fatalf("the other version's commit should be asked for: mode=%s note=%q", scr.mode, scr.note)
+	}
+	if scr.value(0) != "" || scr.value(1) != "v9.9.9" {
+		t.Errorf("manual form should offer the version and an empty commit, got %q / %q", scr.value(0), scr.value(1))
 	}
 }
 

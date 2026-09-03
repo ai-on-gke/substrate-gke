@@ -15,9 +15,6 @@
 package snapshot
 
 import (
-	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +64,9 @@ func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
 	if got.InstalledVersion != "substrate-5f0ef402d9c4" || got.KoDockerRepo != "gcr.io/acme/ate-images" || got.InstalledRepo != RepoURL {
 		t.Errorf("Apply() = %+v", got)
 	}
+	if got.InstalledCommit != "" {
+		t.Errorf("a read without the binary's report cannot know the commit, got %q", got.InstalledCommit)
+	}
 
 	for _, bad := range [][]string{
 		{imageMarker + "gcr.io/acme/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025"},
@@ -77,8 +77,8 @@ func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
 			t.Errorf("ParseProbe(%v) should fail", bad)
 		}
 	}
-	// The dry run replays a probe of the pin.
-	if p, err := ParseProbe(ProbeCluster(st, false).SimLines); err != nil || p.Running[0] != "substrate-"+ShortCommit() || p.Prebuilt() {
+	// The dry run replays a probe of the pin, commit included.
+	if p, err := ParseProbe(ProbeCluster(st, false).SimLines); err != nil || p.Running[0] != "substrate-"+ShortCommit() || p.Prebuilt() || p.Commit != Commit {
 		t.Errorf("dry-run probe = %+v, %v", p, err)
 	}
 	for _, credentials := range []bool{true, false} {
@@ -86,47 +86,6 @@ func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
 		if err := exec.Command("bash", "-n", "-c", spec.Argv[len(spec.Argv)-1]).Run(); err != nil {
 			t.Errorf("ProbeCluster(credentials=%v) is not valid shell: %v", credentials, err)
 		}
-	}
-}
-
-// git cannot fetch an abbreviated commit from a remote, so the 12 characters
-// in a build-from-source version are expanded through GitHub; a release tag
-// maps to the commit this repository pinned for it.
-func TestInstalledCommit(t *testing.T) {
-	const full = "5f0ef402d9c4dfab84bdf9ebef1ed762168f9c9c"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Accept") != "application/vnd.github.sha" {
-			t.Errorf("Accept = %q", r.Header.Get("Accept"))
-		}
-		switch r.URL.Path {
-		case "/repos/agent-substrate/substrate/commits/5f0ef402d9c4":
-			w.Write([]byte(full))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-	old := gitHubAPI
-	gitHubAPI = srv.URL
-	defer func() { gitHubAPI = old }()
-
-	if got, err := InstalledCommit(context.Background(), "substrate-5f0ef402d9c4", false); err != nil || got != full {
-		t.Errorf("InstalledCommit(source) = %q, %v", got, err)
-	}
-	if _, err := InstalledCommit(context.Background(), "substrate-000000000000", false); err == nil {
-		t.Error("an unknown abbreviation should be an error, not a guess")
-	}
-	if got, err := InstalledCommit(context.Background(), "dev-haoyu", false); err != nil || got != "" {
-		t.Errorf("a version that names no commit = %q, %v; want empty, nil", got, err)
-	}
-	if got, err := InstalledCommit(context.Background(), ReleaseVersion, true); err != nil || got != Commit {
-		t.Errorf("InstalledCommit(release) = %q, %v; want the pin", got, err)
-	}
-	if got := releasePinIn("\tCommit = \"" + full + "\"\n"); got != full {
-		t.Errorf("releasePinIn = %q", got)
-	}
-	if owner, repo, ok := gitHubOwnerRepo(RepoURL); !ok || owner != "agent-substrate" || repo != "substrate" {
-		t.Errorf("gitHubOwnerRepo = %q %q %v", owner, repo, ok)
 	}
 }
 
@@ -194,6 +153,46 @@ func TestExportsDefaultTheRegistryForABuildFromSource(t *testing.T) {
 	} {
 		if !strings.Contains(exports, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(exports, "KO_DOCKER_REPO=''") {
 			t.Errorf("%s exports:\n%s", name, exports)
+		}
+	}
+}
+
+// The commit comes from the running binary, which Go stamps with the
+// vcs.revision of the tree it was built from. A tree with an untracked file
+// in it reports dirty, which does not change the commit; a binary that was
+// not built from a checkout reports none, and the commit is then typed in.
+// With two versions running, the commit belongs to the version the binary
+// reports being.
+func TestParseProbeReadsTheCommitOffTheRunningBinary(t *testing.T) {
+	const full = "5f0ef402d9c4dfab84bdf9ebef1ed762168f9c9c"
+	image := imageMarker + "gcr.io/acme/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
+
+	p, err := ParseProbe([]string{versionsMarker + "substrate-5f0ef402d9c4", image,
+		buildMarker + "substrate-5f0ef402d9c4 commit=" + full + "-dirty built=2026-09-03T02:29:02Z linux/amd64"})
+	if err != nil || p.Commit != full || p.BuildVersion != "substrate-5f0ef402d9c4" {
+		t.Fatalf("ParseProbe(dirty build) = %+v, %v", p, err)
+	}
+	st := state.NewSetup()
+	p.Apply(st, "substrate-5f0ef402d9c4")
+	if st.InstalledCommit != full {
+		t.Errorf("Apply should record the binary's commit, got %q", st.InstalledCommit)
+	}
+
+	unknown, err := ParseProbe([]string{versionsMarker + "v0.1.0", image, buildMarker + "v0.1.0 commit=unknown built=unknown linux/amd64"})
+	if err != nil || unknown.Commit != "" {
+		t.Errorf("ParseProbe(unknown commit) = %+v, %v; want no commit", unknown, err)
+	}
+
+	two, err := ParseProbe([]string{versionsMarker + "v0.1.0 v0.1.1", image,
+		buildMarker + "v0.1.1 commit=" + full + " built=2026-09-03T02:29:02Z linux/amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version, want := range map[string]string{"v0.1.1": full, "v0.1.0": ""} {
+		st := state.NewSetup()
+		two.Apply(st, version)
+		if st.InstalledCommit != want {
+			t.Errorf("Apply(%s) with the API server on v0.1.1 recorded commit %q, want %q", version, st.InstalledCommit, want)
 		}
 	}
 }

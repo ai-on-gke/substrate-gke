@@ -15,7 +15,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -29,24 +28,16 @@ import (
 
 // ─── Choose the installed cluster ──────────────────────────────────────────
 
-// commitMsg carries the outcome of finding the installed version's commit.
-type commitMsg struct {
-	owner *upgradeSourceScreen
-	sha   string
-	err   error
-}
-
 // upgradeSourceScreen names the cluster to upgrade and reads what it runs
 // off the cluster itself: the version from the atelet DaemonSet, the images
-// from the running API server. It ends with the installed tree and version
-// known: the upgrade fetches that tree for rollback, and the runbook reads
-// that version as the old one. The commit comes from the version (a build
-// from source names it) or from this repository's release pins; when neither
-// yields it, it is typed in.
+// and the commit from the running API server. It ends with the installed
+// tree and version known: the upgrade fetches that tree for rollback, and the
+// runbook reads that version as the old one. What the cluster cannot say is
+// typed in.
 type upgradeSourceScreen struct {
 	deps *Deps
 	// mode: "target" (project, cluster, location), "reading", "choose"
-	// (several running versions), "resolving" (the commit), "manual".
+	// (several running versions), "manual".
 	mode   string
 	fields []textinput.Model
 	labels []string
@@ -80,8 +71,6 @@ func (s *upgradeSourceScreen) Hints() []Hint {
 			return []Hint{{"r", "retry"}, {"m", "describe the installed Substrate by hand"}, {"b", "back"}}
 		}
 		return nil
-	case "resolving":
-		return []Hint{{"m", "describe the installed Substrate by hand"}}
 	case "choose":
 		return []Hint{{"↑/↓", "choose"}, {"enter", "confirm"}, {"b", "back"}}
 	}
@@ -164,28 +153,28 @@ func (s *upgradeSourceScreen) readDone() tea.Cmd {
 	return nil
 }
 
-// use takes version as the installed one and goes looking for its commit.
-// A dry run resolves nothing and takes the pin.
+// use takes version as the installed one. The commit comes with it from the
+// running API server; when that binary runs the other version, or could not
+// say, the commit is typed in.
 func (s *upgradeSourceScreen) use(version string) tea.Cmd {
 	st := s.deps.Setup
 	s.probe.Apply(st, version)
-	if s.deps.DryRun {
-		st.InstalledCommit = snapshot.Commit
+	if st.InstalledCommit != "" {
 		return goNext
 	}
-	s.mode = "resolving"
-	prebuilt := s.probe.Prebuilt()
-	return func() tea.Msg {
-		sha, err := snapshot.InstalledCommit(context.Background(), version, prebuilt)
-		return commitMsg{s, sha, err}
+	if s.probe.Commit != "" {
+		s.note = fmt.Sprintf("The API server runs %s, not %s; enter the commit %s was built from.", s.probe.BuildVersion, version, version)
+	} else {
+		s.note = fmt.Sprintf("The API server did not report the commit %s was built from; enter it here.", version)
 	}
+	return s.enterManual()
 }
 
 func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 	commit, version, registry := s.value(0), s.value(1), s.value(2)
 	switch {
 	case !fullSHA.MatchString(strings.ToLower(commit)):
-		s.errText = "The installed commit has to be a full 40-character SHA. A build from source shows its first 12 characters in the version, substrate-<commit>; a pre-built install used the commit this repository pinned for that release."
+		s.errText = "The installed commit has to be a full 40-character SHA. The running API server prints it: kubectl -n ate-system exec deploy/ate-api-server -- /ko-app/ateapi --version."
 		return s.setFocus(0)
 	case version == "":
 		s.errText = "The installed version is required; it is the ate.dev/substrate-version label on the nodes."
@@ -207,21 +196,6 @@ func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 }
 
 func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
-	if m, ok := msg.(commitMsg); ok {
-		if m.owner != s || s.mode != "resolving" {
-			return nil
-		}
-		if m.err == nil && m.sha != "" {
-			s.deps.Setup.InstalledCommit = m.sha
-			return goNext
-		}
-		if m.err != nil {
-			s.note = m.err.Error()
-		} else {
-			s.note = fmt.Sprintf("Could not find the commit %s was built from; enter it here.", s.deps.Setup.InstalledVersion)
-		}
-		return s.enterManual()
-	}
 	if s.comp != nil {
 		if cmd, handled := s.comp.update(msg); handled {
 			if s.comp.ok() && s.mode == "reading" && !s.parsed {
@@ -241,12 +215,6 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 	switch s.mode {
-	case "resolving":
-		// The answer, if it still arrives, is dropped: the mode has moved on.
-		if key.String() == "m" || key.String() == "esc" {
-			return s.enterManual()
-		}
-		return nil
 	case "reading":
 		switch key.String() {
 		case "r":
@@ -314,10 +282,6 @@ func (s *upgradeSourceScreen) View(w int) string {
 			b.WriteString("\n" + theme.Subtle.Render("Could not read the installed Substrate. Press [r] to retry, or [m] to describe it by hand."))
 		}
 		return b.String()
-	case "resolving":
-		b.WriteString(theme.Accent.Render(fmt.Sprintf("Finding the commit %s was built from…", s.deps.Setup.InstalledVersion)) + "\n\n")
-		b.WriteString(theme.Subtle.Render("Press [m] to describe it by hand instead."))
-		return b.String()
 	case "choose":
 		b.WriteString(theme.Subtle.Render("The cluster runs two versions, as it does mid-upgrade; pick the one to treat as installed.") + "\n\n")
 		for i, v := range s.choices {
@@ -345,9 +309,9 @@ func (s *upgradeSourceScreen) View(w int) string {
 	case s.mode == "manual" && s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
 	case s.mode == "manual":
-		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. For a build\nfrom source it reads substrate-<commit>; the full commit it abbreviates is at\ngithub.com/agent-substrate/substrate/commit/<those 12 characters>. Pre-built\nimages came from a registry; the release registry is offered."))
+		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. The commit is\nwhat the running API server prints for --version, or what the images were\nbuilt from. Pre-built images came from a registry; the release registry is offered."))
 	default:
-		b.WriteString(theme.Subtle.Render("The installer reads the running version and images off the cluster.\nCredentials are fetched with gcloud."))
+		b.WriteString(theme.Subtle.Render("The installer reads the running version, images and commit off the cluster.\nCredentials are fetched with gcloud."))
 	}
 	return b.String()
 }

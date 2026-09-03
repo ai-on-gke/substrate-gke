@@ -120,6 +120,13 @@ func isCheckout(dir string) bool {
 	return err == nil
 }
 
+// excludeMarker keeps CompleteMarker out of git's view of the tree: Go
+// stamps a binary built from a tree with untracked files as dirty, and the
+// marker would otherwise mark every image the installer builds that way.
+func excludeMarker(dir string) string {
+	return fmt.Sprintf(`echo %s >> %s/.git/info/exclude`, CompleteMarker, dir)
+}
+
 // CompleteMarker is written at the top of a managed checkout once its fetch
 // has finished. Presence of the marker — not of go.mod — is what makes the
 // cache trustworthy: git checks files out in path order, so an interrupted
@@ -504,6 +511,7 @@ func (b *Builder) ensure() []string {
 	for _, cmd := range fetchAt(`"${STAGE}"`, b.repo, b.commit) {
 		lines = append(lines, "    "+cmd)
 	}
+	lines = append(lines, "    "+excludeMarker(`"${STAGE}"`))
 	return append(lines,
 		fmt.Sprintf(`    touch "${STAGE}/%s"`, CompleteMarker),
 		// If a concurrent run published first, its tree is as good as ours;
