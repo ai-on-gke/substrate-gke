@@ -19,10 +19,18 @@ REPO_URL="${REPO_URL:-https://github.com/ai-on-gke/substrate-gke.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 
 main() {
-    # If standard input is piped (e.g. curl ... | bash), redirect from /dev/tty
-    # so the interactive Bubble Tea TUI can receive keyboard input.
-    if [ ! -t 0 ] && [ -r /dev/tty ]; then
-        exec < /dev/tty
+    # If standard input is piped (e.g. curl ... | bash), the interactive
+    # Bubble Tea TUI still needs keyboard input — but the shell's own stdin
+    # must be left alone: bash reads this script from that pipe, so an
+    # `exec < /dev/tty` would make bash read the REST of the script from the
+    # terminal once main returns, hanging the session and executing whatever
+    # is typed. The tty is handed to the installer process alone, below.
+    # `-r /dev/tty` is not enough to know the tty is usable (the node exists
+    # without a controlling terminal in CI and containers), so actually try
+    # opening it.
+    local tty_in=""
+    if [ ! -t 0 ] && (exec < /dev/tty) 2>/dev/null; then
+        tty_in="/dev/tty"
     fi
 
     # Check for basic required prerequisites
@@ -47,7 +55,7 @@ main() {
     local target_dir
     if [ -n "${script_dir}" ] && [ -f "${script_dir}/installer/main.go" ]; then
         target_dir="${script_dir}"
-    elif [ -f "./installer/main.go" ] && [ -d "./substrate" ]; then
+    elif [ -f "./installer/main.go" ] && [ -f "./Makefile" ]; then
         target_dir="$(pwd)"
     else
         target_dir="${SUBSTRATE_DIR:-$HOME/.substrate-gke}"
@@ -64,10 +72,17 @@ main() {
     fi
 
     echo "==> Launching substrate-gke installer..."
-    if command -v make >/dev/null 2>&1 && [ $# -eq 0 ]; then
-        make -C "${target_dir}" run
+    launch() {
+        if command -v make >/dev/null 2>&1 && [ "$#" -eq 0 ]; then
+            make -C "${target_dir}" run
+        else
+            (cd "${target_dir}/installer" && go run . "$@")
+        fi
+    }
+    if [ -n "${tty_in}" ]; then
+        launch "$@" < "${tty_in}"
     else
-        (cd "${target_dir}/installer" && go run . "$@")
+        launch "$@"
     fi
 }
 
