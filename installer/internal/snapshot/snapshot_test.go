@@ -803,12 +803,30 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		}
 	}
 	summary := b.UpgradeSummary(st, installedDir, nextDir)
-	for _, want := range []string{RunbookURL, "Path: " + installedDir, "Path: " + nextDir, "$OLD_VERSION is " + st.InstalledVersion,
+	for _, want := range []string{RunbookURL, "cd " + ShellQuote(installedDir), "cd " + ShellQuote(nextDir),
+		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
+		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
 		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(st.KoDockerRepo), "$NEW_VERSION is " + b.SubstrateVersion(st)} {
+		"export KO_DOCKER_REPO=" + ShellQuote(st.KoDockerRepo), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
+	}
+	if strings.Contains(summary, "NO_DEV_ENV") || strings.Count(summary, "export PROJECT_ID=") != 1 {
+		t.Errorf("the rollback block should carry only what changes:\n%s", summary)
+	}
+	// Every indented line is meant to be pasted into a shell, the cd lines
+	// into the trees just fetched.
+	var script []string
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
+			script = append(script, strings.TrimSpace(line))
+		}
+	}
+	script = append(script, `printf '%s|%s|%s' "$NEW_VERSION" "$VERSION" "$PWD"`)
+	out, err := exec.Command("bash", "-euo", "pipefail", "-c", strings.Join(script, "\n")).Output()
+	if err != nil || string(out) != b.SubstrateVersion(st)+"|"+st.InstalledVersion+"|"+installedDir {
+		t.Errorf("pasting the hand-over gave %q, %v", out, err)
 	}
 }
 

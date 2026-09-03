@@ -171,9 +171,10 @@ in the Substrate tree. Do not re-run the install track against a cluster that al
 runs Substrate; run the installer and choose **Upgrade an installed cluster** instead. It
 names the cluster and reads what it runs off the cluster, takes the new version from the
 same images step an install uses, fetches the installed and the new source trees into
-`~/.cache/substrate-gke/upgrades/`, and prints the hand-over: the two versions with their
-trees, the runbook, and the environment for its `ate-setup` commands on each side. Nothing
-on the cluster changes until you follow the runbook.
+`~/.cache/substrate-gke/upgrades/`, and prints the hand-over in the order the runbook reads:
+the runbook, the variables its commands use, the tree to check out and the environment for
+its `ate-setup` commands, and what a rollback changes in them. Nothing on the cluster
+changes until you follow the runbook.
 
 The installed tree is fetched at the commit the running API server reports it was built
 from; Go stamps every binary with the commit of the tree it was built in, and `ateapi

@@ -152,16 +152,27 @@ func ParseProbe(lines []string) (Probe, error) {
 	return p, nil
 }
 
-// Exports renders the environment for running upstream's ate-setup against
-// the cluster st names, at the given running version.
-func (p Probe) Exports(st *state.Setup, version string) string {
-	lines := []string{
+// clusterExports names the cluster to ate-setup, which fetches credentials
+// for it before touching it and derives the API server's token issuer from
+// it; without them it deploys to whatever the current context is.
+func clusterExports(st *state.Setup) []string {
+	return []string{
 		"export PROJECT_ID=" + ShellQuote(st.ProjectID),
 		"export CLUSTER_NAME=" + ShellQuote(st.ClusterName),
 		"export CLUSTER_LOCATION=" + ShellQuote(st.Zone),
-		"export NO_DEV_ENV='1'",
-		"export VERSION=" + ShellQuote(version),
 	}
+}
+
+// Exports renders the environment for running upstream's ate-setup against
+// the cluster st names, at the given running version.
+func (p Probe) Exports(st *state.Setup, version string) string {
+	return strings.Join(append(clusterExports(st), p.versionExports(st, version)...), "\n")
+}
+
+// versionExports is the part of the environment that names a version: the
+// version itself and where its images come from.
+func (p Probe) versionExports(st *state.Setup, version string) []string {
+	lines := []string{"export VERSION=" + ShellQuote(version)}
 	if p.Prebuilt() {
 		lines = append(lines, "export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
 	} else {
@@ -174,7 +185,7 @@ func (p Probe) Exports(st *state.Setup, version string) string {
 		}
 		lines = append(lines, "export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
 // Apply records what the probe found as the installed side of an upgrade:
@@ -203,9 +214,9 @@ func (p Probe) Apply(st *state.Setup, version string) {
 	}
 }
 
-// InstalledExports is the environment for the runbook's ate-setup commands
-// from the installed tree, which a rollback runs.
+// InstalledExports is what a rollback changes in the environment: the
+// installed version and where its images come from. The cluster stays.
 func InstalledExports(st *state.Setup) string {
 	installed := Probe{KoDockerRepo: st.KoDockerRepo, ImageRepo: st.InstalledImageRepo, ImageTag: st.InstalledImageTag}
-	return installed.Exports(st, st.InstalledVersion)
+	return strings.Join(installed.versionExports(st, st.InstalledVersion), "\n")
 }

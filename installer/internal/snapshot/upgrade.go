@@ -82,7 +82,7 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 
 // NewExports is the environment for the runbook's ate-setup commands from
 // the new tree: the cluster, and the new version with where its images come
-// from. It is the block the runbook calls $NEW_VERSION's environment.
+// from.
 func (b *Builder) NewExports(st *state.Setup) string {
 	next := Probe{KoDockerRepo: st.KoDockerRepo}
 	if st.Prebuilt() {
@@ -91,21 +91,28 @@ func (b *Builder) NewExports(st *state.Setup) string {
 	return next.Exports(st, b.SubstrateVersion(st))
 }
 
-// UpgradeSummary is the hand-over: the two versions with their trees, the
-// runbook to run from the new one, and the environment for each side.
+// UpgradeSummary is the hand-over, in the order the runbook reads: the
+// runbook, the variables its own commands use, then for its "Checkout and
+// environment" section the new tree and the ate-setup environment, and for
+// a rollback what changes in them.
 func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Installed  %s\n  Path: %s\n", st.InstalledVersion, installedDir)
-	fmt.Fprintf(&sb, "New        %s\n  Path: %s\n\n", b.SubstrateVersion(st), nextDir)
-	sb.WriteString("Run upstream's rolling upgrade runbook from the new tree:\n")
-	sb.WriteString("  " + RunbookURL + "\n\n")
-	fmt.Fprintf(&sb, "Environment for its ate-setup commands from the new tree ($NEW_VERSION is %s):\n", b.SubstrateVersion(st))
-	for _, line := range strings.Split(b.NewExports(st), "\n") {
-		sb.WriteString("  " + line + "\n")
+	block := func(heading string, lines ...string) {
+		sb.WriteString(heading + "\n")
+		for _, line := range lines {
+			sb.WriteString("  " + line + "\n")
+		}
+		sb.WriteString("\n")
 	}
-	fmt.Fprintf(&sb, "\nFor a rollback, from the installed tree ($OLD_VERSION is %s):\n", st.InstalledVersion)
-	for _, line := range strings.Split(InstalledExports(st), "\n") {
-		sb.WriteString("  " + line + "\n")
-	}
+	block("Run upstream's rolling upgrade runbook:", RunbookURL)
+	block("Variables the runbook uses. The rest of its Preflight table ($NODEPOOL, $NS,\n$OLD_WORKERPOOL, $NEW_WORKERPOOL, $NODE) is yours to fill in.",
+		"export CLUSTER="+ShellQuote(st.ClusterName),
+		"export ZONE="+ShellQuote(st.Zone),
+		"export OLD_VERSION="+ShellQuote(st.InstalledVersion),
+		"export NEW_VERSION="+ShellQuote(b.SubstrateVersion(st)))
+	block("When you reach its \"Checkout and environment\" section, check out the new release\nand set this for every ate-setup command of the upgrade:",
+		append([]string{"cd " + ShellQuote(nextDir)}, strings.Split(b.NewExports(st), "\n")...)...)
+	block("A rollback runs the same commands from the installed release, with its version:",
+		append([]string{"cd " + ShellQuote(installedDir)}, strings.Split(InstalledExports(st), "\n")...)...)
 	return strings.TrimRight(sb.String(), "\n")
 }

@@ -561,7 +561,7 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 	if !plan.comp.ok() {
 		t.Fatalf("dry-run fetch did not finish: failed=%v", plan.comp.failed)
 	}
-	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "Path:") {
+	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "Checkout and environment") {
 		t.Errorf("plan view lacks the hand-over:\n%s", view)
 	}
 	press("enter")
