@@ -352,8 +352,9 @@ func NewBuilder(root string, managed bool) *Builder {
 	return &Builder{Root: root, Managed: managed, Version: version, repo: RepoURL, commit: Commit}
 }
 
-// UseSource repoints the builder at another repository and commit — a fork, a
-// branch, or a hotfix the user named in the images step.
+// UseSource repoints the builder at the commit the user named in the images
+// step: a branch, a tag, or a commit of the upstream repository, which is the
+// only one either track reads.
 //
 // A managed tree is cached per commit, so the root and the ko version stamp
 // move with it: two revisions never share a directory, and the images one

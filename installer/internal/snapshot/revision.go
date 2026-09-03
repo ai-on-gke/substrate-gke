@@ -45,9 +45,10 @@ var (
 	shortSHA = regexp.MustCompile(`^[0-9a-fA-F]{7,39}$`)
 )
 
-// Resolve turns a repository and a revision the user typed into an exact
-// commit the install can be run against. An empty ref means the repository's
-// current HEAD.
+// Resolve turns a revision of the upstream repository into an exact commit
+// the install can be run against. An empty ref means its current HEAD. The
+// repository is a parameter because the tests point it at a local one; the
+// wizard always passes RepoURL.
 //
 // Accepted: a branch, a tag, or a full commit SHA. Whatever it was, the commit
 // it names is then verified against the remote, because naming a commit and
@@ -142,8 +143,8 @@ func lookup(ctx context.Context, repo, ref string) (Revision, error) {
 
 // checkRepoURL rejects anything that is not an https git URL. That is narrower
 // than what git understands, deliberately: https is the one transport the
-// installer needs, it is how both the upstream repository and a fork of it are
-// read, and every form left out is a form nobody has to reason about.
+// installer needs to read the upstream repository, and every form left out is
+// a form nobody has to reason about.
 //
 // It also rejects anything git would read as an option rather than a remote.
 // The URL reaches `git ls-remote` as an argument and the fetch script as a
