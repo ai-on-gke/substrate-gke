@@ -885,7 +885,7 @@ func TestBackFromCompleteClearsCompleted(t *testing.T) {
 	}
 	press("3", "enter", "enter")
 	typeText(t, app, "acme")
-	press("enter", "enter", "enter", "2", "enter", "enter", "enter", "enter", "enter")
+	press("enter", "enter", "enter", "enter", "enter", "enter", "enter", "enter")
 	if app.mach.Current() != state.Complete || !app.Completed {
 		t.Fatalf("expected the upgrade to be prepared: %v completed=%v", app.mach.Current(), app.Completed)
 	}
