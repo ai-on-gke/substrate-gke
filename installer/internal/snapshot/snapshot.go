@@ -54,9 +54,13 @@ const (
 	// build-from-source track offers its repository's live HEAD instead and
 	// only falls back here for --dry-run, which resolves nothing.
 	//
+	// It tracks the release branch rather than main, because that is where
+	// the released images are built from: a commit of
+	// https://github.com/agent-substrate/substrate/tree/release-0.1.
+	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "cbae8250a5ff157e1ec69618804b07b825cdf52c"
+	Commit = "6011a8b848f5d536a72bfe014858c125ab3ea4fe"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -79,7 +83,7 @@ const (
 	// never has to fall back to building from source. It asks such a team for
 	// a manifest revision as well, since only this registry is published
 	// alongside a tree known to match.
-	ReleaseVersion = "v0.1.0"
+	ReleaseVersion = "v0.1.0-gke.1"
 )
 
 // ShortCommit is Commit abbreviated for display.

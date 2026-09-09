@@ -39,8 +39,8 @@ each running the real command it shows and streaming its output:
 1. **Check your setup** — probes for gcloud, application-default credentials, Go,
    kubectl, network reachability, and git, with copy-paste fixes. It runs first
    because the next step is the first to reach the network.
-2. **Choose your images** — build them yourself from a commit of the Substrate
-   repository, or install pre-built images — see
+2. **Choose your images** — install pre-built images, or build them yourself from a
+   commit of the Substrate repository — see
    [Where the images come from](#where-the-images-come-from). It comes before the
    project step because the answer decides what that step needs: a pre-built
    install pushes nothing, so it is never asked for a registry.
@@ -79,14 +79,16 @@ images. Both end up naming a commit of one repository,
 manifests from a source tree either way. The repository is fixed; the commit is yours
 to choose.
 
-**Pre-built images** — three fields: the image registry, the image tag, and the commit
-the images were built from. All three are offered pre-filled and all three can be
-overridden. The defaults are the published release at
-`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we will host the
-release images — it is coming soon, and the step says so — and the commit pinned below,
-which is what they were built from. `ate-setup` pins every image to the digest its tag
-resolves to. Nothing is built and nothing is pushed, so your project needs no image
-registry of its own; the release registry in particular is pull-only.
+**Pre-built images** — the default, and three fields: the image registry, the image
+tag, and the commit the images were built from. All three are offered pre-filled and
+all three can be overridden. The defaults are the published `v0.1.0-gke.1` release at
+`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we host the release
+images, and the commit pinned below, which is what they were built from — a commit of
+the [`release-0.1`](https://github.com/agent-substrate/substrate/tree/release-0.1)
+branch, since that is the branch the release is cut from. `ate-setup` pins every image
+to the digest its tag resolves to. Nothing is built and nothing is pushed, so your
+project needs no image registry of its own; the release registry in particular is
+pull-only.
 
 Any registry and tag work, so a team that publishes its own builds — a staging
 registry, or a private rebuild of a release — installs them by typing them here rather
@@ -98,7 +100,8 @@ Substrate. The wizard warns about this as soon as the registry or tag is changed
 The tag doubles as the Substrate version — it names the atelet DaemonSet and sets the
 `ate.dev/substrate-version` node label — so it has to be a valid Kubernetes label
 value, and the wizard says so at the prompt rather than letting the install discover it.
-A tag that carries its digest (`v0.1.0@sha256:…`) is fine; the version is the tag alone.
+A tag that carries its digest (`v0.1.0-gke.1@sha256:…`) is fine; the version is the tag
+alone.
 
 **A build from source** — for a branch or a commit that has no published images. You
 give a revision: a branch, a tag, or a full commit SHA. The box is pre-filled with the
@@ -162,7 +165,8 @@ value lets the preflight doctor pass and the install then fail mid-bootstrap.
 `ReleaseRepo` and `ReleaseVersion` next to it are the registry and tag the images step
 offers by default; bump `ReleaseVersion` and `Commit` together when a newer release is
 published, since `Commit` is the manifest revision offered behind those images and has
-to be what they were built from.
+to be what they were built from. That makes `Commit` a commit of the release branch the
+images were cut from — `release-0.1` for `v0.1.0-gke.1` — not of `main`.
 
 All three are defaults, not limits. The wizard accepts any registry, tag, and revision,
 and the build-from-source track never uses `Commit` at all — it offers the repository's
