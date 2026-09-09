@@ -83,10 +83,10 @@ to choose.
 tag, and the commit the images were built from. All three are offered pre-filled and
 all three can be overridden. The defaults are the published `v0.1.0-gke.1` release at
 `us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we host the release
-images, and the commit pinned below, which is what they were built from — a commit of
-the [`release-0.1`](https://github.com/agent-substrate/substrate/tree/release-0.1)
-branch, since that is the branch the release is cut from. `ate-setup` pins every image
-to the digest its tag resolves to. Nothing is built and nothing is pushed, so your
+images, and the commit pinned below, which is what they were built from — the commit
+upstream's [`v0.1.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.1.0)
+tag names, `v0.1.0-gke.1` being the GKE build of that release. `ate-setup` pins every
+image to the digest its tag resolves to. Nothing is built and nothing is pushed, so your
 project needs no image registry of its own; the release registry in particular is
 pull-only.
 
@@ -165,8 +165,10 @@ value lets the preflight doctor pass and the install then fail mid-bootstrap.
 `ReleaseRepo` and `ReleaseVersion` next to it are the registry and tag the images step
 offers by default; bump `ReleaseVersion` and `Commit` together when a newer release is
 published, since `Commit` is the manifest revision offered behind those images and has
-to be what they were built from. That makes `Commit` a commit of the release branch the
-images were cut from — `release-0.1` for `v0.1.0-gke.1` — not of `main`.
+to be what they were built from. That makes `Commit` the commit upstream's release tag
+names — `v0.1.0` for the `v0.1.0-gke.1` images — rather than a commit of `main`. Record
+the SHA the tag resolves to, not the tag itself: `Commit` is fetched by SHA and names the
+cache directory, and a tag can be moved.
 
 All three are defaults, not limits. The wizard accepts any registry, tag, and revision,
 and the build-from-source track never uses `Commit` at all — it offers the repository's

@@ -54,9 +54,9 @@ const (
 	// build-from-source track offers its repository's live HEAD instead and
 	// only falls back here for --dry-run, which resolves nothing.
 	//
-	// It tracks the release branch rather than main, because that is where
-	// the released images are built from: a commit of
-	// https://github.com/agent-substrate/substrate/tree/release-0.1.
+	// It is a release commit rather than a commit of main, because that is
+	// what the released images are built from: the commit upstream's v0.1.0
+	// tag names, ReleaseVersion being the GKE build of that release.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
