@@ -165,10 +165,7 @@ value lets the preflight doctor pass and the install then fail mid-bootstrap.
 `ReleaseRepo` and `ReleaseVersion` next to it are the registry and tag the images step
 offers by default; bump `ReleaseVersion` and `Commit` together when a newer release is
 published, since `Commit` is the manifest revision offered behind those images and has
-to be what they were built from. That makes `Commit` the commit upstream's release tag
-names — `v0.1.0` for the `v0.1.0-gke.1` images — rather than a commit of `main`. Record
-the SHA the tag resolves to, not the tag itself: `Commit` is fetched by SHA and names the
-cache directory, and a tag can be moved.
+to be what they were built from.
 
 All three are defaults, not limits. The wizard accepts any registry, tag, and revision,
 and the build-from-source track never uses `Commit` at all — it offers the repository's
