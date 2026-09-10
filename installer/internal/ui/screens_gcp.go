@@ -77,7 +77,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 	fields := []field{
 		newField("GCP project ID", st.ProjectID, "my-project", func(s *state.Setup, v string) { s.ProjectID = v }),
 		newField("Cluster location (zone)", st.Zone, "us-west1-c", func(s *state.Setup, v string) { s.Zone = v }),
-		newField("Snapshot bucket (leave empty for default)", st.BucketName, "ate-snapshots-<project>-<zone>", func(s *state.Setup, v string) { s.BucketName = v }),
+		newField("Snapshot bucket (leave empty for default)", st.BucketName, "ate-snapshots-<project>-<cluster>-<zone>", func(s *state.Setup, v string) { s.BucketName = v }),
 	}
 	if st.Track == state.TrackAdvanced {
 		fields = append(fields,

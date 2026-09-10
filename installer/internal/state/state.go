@@ -18,6 +18,8 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -264,29 +266,31 @@ func (s *Setup) Region() string {
 	return s.Zone
 }
 
-// defaultBucketName derives the snapshot bucket name for a project and location:
-// ate-snapshots-<project_id>-<zone>.
+// defaultBucketName derives the snapshot bucket name for a project, cluster,
+// and location: ate-snapshots-<project_id>-<cluster>-<zone>. The cluster name
+// is part of the derivation so two clusters in one project and zone never
+// share a bucket: snapshot object keys carry no cluster identifier, and
+// teardown deletes the whole bucket, so a shared bucket mixes clusters'
+// snapshots and loses every sibling's history when one cluster is deleted.
 // GCS bucket names must be 3-63 characters, start and end with an alphanumeric
 // character, and contain only lowercase letters, numbers, and dashes/underscores.
-func defaultBucketName(projectID, zone string) (string, error) {
-	projectID = strings.ToLower(projectID)
-	zone = strings.ToLower(zone)
-	name := fmt.Sprintf("ate-snapshots-%s-%s", projectID, zone)
+// A derivation past 63 characters is truncated and suffixed with a short hash
+// of the full name, keeping it deterministic and distinct per cluster.
+func defaultBucketName(projectID, clusterName, zone string) string {
+	name := strings.ToLower(fmt.Sprintf("ate-snapshots-%s-%s-%s", projectID, clusterName, zone))
 	if len(name) > 63 {
-		return "", fmt.Errorf("bucket name %q exceeds 63 characters", name)
+		sum := sha256.Sum256([]byte(name))
+		name = strings.TrimRight(name[:63-9], "-_") + "-" + hex.EncodeToString(sum[:])[:8]
 	}
-	return name, nil
+	return name
 }
 
-// ApplyProjectDefaults fills the values derived from the project ID and cluster
-// location unless the user already overrode them.
+// ApplyProjectDefaults fills the values derived from the project ID, cluster
+// name, and cluster location unless the user already overrode them. It runs
+// once the cluster is chosen, so the cluster name is always set by then.
 func (s *Setup) ApplyProjectDefaults() error {
 	if s.BucketName == "" {
-		b, err := defaultBucketName(s.ProjectID, s.Zone)
-		if err != nil {
-			return err
-		}
-		s.BucketName = b
+		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName, s.Zone)
 	}
 	if s.KoDockerRepo == "" && !s.Prebuilt() {
 		s.KoDockerRepo = s.DefaultKoDockerRepo()

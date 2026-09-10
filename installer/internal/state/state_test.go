@@ -14,7 +14,10 @@
 
 package state
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMachineWalksTheWholeFlow(t *testing.T) {
 	m := NewMachine()
@@ -90,11 +93,7 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	if err := s.ApplyProjectDefaults(); err != nil {
 		t.Fatalf("ApplyProjectDefaults failed: %v", err)
 	}
-	want, err := defaultBucketName("acme", s.Zone)
-	if err != nil {
-		t.Fatalf("defaultBucketName failed: %v", err)
-	}
-	if s.BucketName != want {
+	if want := defaultBucketName("acme", s.ClusterName, s.Zone); s.BucketName != want {
 		t.Errorf("BucketName = %q, want %q", s.BucketName, want)
 	}
 	if s.KoDockerRepo != "gcr.io/acme/ate-images" {
@@ -115,26 +114,40 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 
 func TestDefaultBucketName(t *testing.T) {
 	for _, tc := range []struct {
-		project, zone, want string
-		wantErr             bool
+		project, cluster, zone, want string
 	}{
-		{"acme", "us-west1-c", "ate-snapshots-acme-us-west1-c", false},
-		{"My-Project", "US-CENTRAL1-A", "ate-snapshots-my-project-us-central1-a", false},
-		{
-			"a-very-long-gcp-project-name-1234567890",
-			"us-central1-a",
-			"",
-			true,
-		},
+		{"acme", "substrate-test", "us-west1-c", "ate-snapshots-acme-substrate-test-us-west1-c"},
+		{"My-Project", "Legacy-Prod", "US-CENTRAL1-A", "ate-snapshots-my-project-legacy-prod-us-central1-a"},
 	} {
-		got, err := defaultBucketName(tc.project, tc.zone)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("defaultBucketName(%q, %q) err = %v, wantErr %v", tc.project, tc.zone, err, tc.wantErr)
-			continue
+		if got := defaultBucketName(tc.project, tc.cluster, tc.zone); got != tc.want {
+			t.Errorf("defaultBucketName(%q, %q, %q) = %q, want %q", tc.project, tc.cluster, tc.zone, got, tc.want)
 		}
-		if got != tc.want {
-			t.Errorf("defaultBucketName(%q, %q) = %q, want %q", tc.project, tc.zone, got, tc.want)
+	}
+}
+
+// Two clusters in one project and zone must never derive the same bucket:
+// snapshot keys carry no cluster identifier and teardown deletes the whole
+// bucket, so a shared bucket loses every sibling cluster's snapshots. That
+// has to survive truncation — GCS caps bucket names at 63 characters, and
+// project+cluster+zone routinely exceeds it.
+func TestDefaultBucketNameIsPerClusterEvenWhenTruncated(t *testing.T) {
+	const project, zone = "a-very-long-gcp-project-name-1234567890", "us-central1-a"
+	a := defaultBucketName(project, "staging-cluster-with-a-long-name", zone)
+	b := defaultBucketName(project, "staging-cluster-with-a-long-nap", zone)
+
+	for _, name := range []string{a, b} {
+		if len(name) > 63 {
+			t.Errorf("bucket name %q exceeds 63 characters", name)
 		}
+		if name != strings.ToLower(name) || strings.HasSuffix(name, "-") {
+			t.Errorf("bucket name %q is not a valid GCS name", name)
+		}
+	}
+	if a == b {
+		t.Errorf("two clusters derived the same bucket %q", a)
+	}
+	if again := defaultBucketName(project, "staging-cluster-with-a-long-name", zone); again != a {
+		t.Errorf("derivation is not deterministic: %q then %q", a, again)
 	}
 }
 
