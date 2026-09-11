@@ -340,7 +340,7 @@ func (s *clusterScreen) Init() tea.Cmd {
 }
 
 func (s *clusterScreen) CapturesText() bool { return s.mode == "name" }
-func (s *clusterScreen) logComp() *execComp   { return s.comp }
+func (s *clusterScreen) logComp() *execComp { return s.comp }
 
 func (s *clusterScreen) Hints() []Hint {
 	switch s.mode {
@@ -349,8 +349,8 @@ func (s *clusterScreen) Hints() []Hint {
 	case "probing":
 		if s.comp != nil && s.comp.failed != nil {
 			// No explicit "v" hint: bottomView appends it whenever the comp
-		// has output, and a second copy overflows narrow bottom bars.
-		return []Hint{{"r", "retry"}, {"y", "continue without the check"}, {"esc", "back to list"}}
+			// has output, and a second copy overflows narrow bottom bars.
+			return []Hint{{"r", "retry"}, {"y", "continue without the check"}, {"esc", "back to list"}}
 		}
 		return []Hint{{"esc", "cancel"}}
 	case "installed":

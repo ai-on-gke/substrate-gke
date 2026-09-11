@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: run doctor dry-run teardown build test fmt verify
+.PHONY: run doctor dry-run teardown build test fmt verify screenshots
 
 # Launch the interactive installer.
 run:
@@ -42,6 +42,14 @@ fmt:
 
 verify:
 	cd installer && test -z "$$(gofmt -l .)" && go vet ./...
+
+# Regenerate the README screenshots from the dry-run wizard. Needs freeze:
+# go install github.com/charmbracelet/freeze@latest
+screenshots:
+	cd installer && go run ./cmd/uishots ../docs/screenshots
+	for f in docs/screenshots/*.ans; do \
+		freeze --execute "cat $$f" --window -o "$${f%.ans}.svg" && rm "$$f"; \
+	done
 
 PIN_FILE := installer/internal/snapshot/snapshot.go
 # `\t` is a BSD grep extension that GNU grep does not honour, so match on

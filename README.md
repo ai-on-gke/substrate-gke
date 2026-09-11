@@ -4,13 +4,14 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 interactive installer that provisions the required GCP resources and installs the
 Substrate control plane onto a GKE cluster.
 
+![The installer's welcome screen](docs/screenshots/welcome.svg)
+
 ## Quickstart
 
 Prerequisites: `gcloud` (authenticated, with application-default credentials), a Go
 toolchain, `git`, and `kubectl`.
 
 ```bash
-
 # One-line install and launch:
 curl -sSL https://raw.githubusercontent.com/ai-on-gke/substrate-gke/main/install.sh | bash
 ```
@@ -33,189 +34,108 @@ make dry-run      # walk the full wizard without touching GCP
 
 ## What the installer does
 
-A terminal wizard (ported from upstream PR #1171's onboarding UX) walks multiple steps,
-each running the real command it shows and streaming its output:
+A terminal wizard walks nine steps, each running the real command it shows and
+streaming its output:
 
-1. **Check your setup** — probes for gcloud, application-default credentials, Go,
-   kubectl, network reachability, and git, with copy-paste fixes. It runs first
-   because the next step is the first to reach the network.
-2. **Choose your images** — install pre-built images, or build them yourself from a
-   commit of the Substrate repository — see
-   [Where the images come from](#where-the-images-come-from). It comes before the
-   project step because the answer decides what that step needs: a pre-built
-   install pushes nothing, so it is never asked for a registry.
+1. **Check your setup** — probes for gcloud, credentials, Go, kubectl, network,
+   and git, with copy-paste fixes.
+2. **Choose your images** — pre-built release images (the default), or a build
+   from source. See [Choosing images](#choosing-images).
 3. **Choose your GCP project** — validated with `gcloud projects describe`.
-4. **Connect your cluster** — lists your GKE clusters and whether each can run
-   Substrate, or lets you create a new one. Connecting an existing cluster probes it
-   to ensure it is not already running Substrate, guarding against mixed-version installs.
-   Substrate needs the PodCertificate Kubernetes beta APIs, which GKE only enables
-   **at cluster creation** — clusters created without them cannot be fixed afterward,
-   which is why creating a fresh cluster is the recommended path.
-5. **Provision GCP resources** — `setup-gcp bootstrap`: APIs, the cluster (if new),
-   the snapshot bucket, IAM grants, and monitoring dashboards. Idempotent.
-6. **Turn on Substrate** — `ate-setup deploy ate-system`: installs CRDs, the API
-   server, controller, atenet, and atelet, from the images chosen in step 2.
-7. **Install Filestore CSI driver** (optional) — deploys the GCP Filestore CSI Driver
-   configured for substrate. Note that after the driver is installed, additional
-   steps are needed to configure a Filestore VolumePool.
-8. **Configure autoscaling** (optional) — node-pool autoscaling via gcloud.
-9. **Deploy a demo workload** (optional) — the upstream counter demo, then a live
-   verification and next steps.
+4. **Connect your cluster** — lists your GKE clusters with their install state,
+   or creates a new one. Substrate needs the PodCertificate Kubernetes beta
+   APIs, which GKE only enables **at cluster creation**, so a fresh cluster is
+   the recommended path. A cluster that already runs Substrate is blocked from
+   reinstall (that would produce a broken, mixed-version cluster); the wizard
+   offers an in-place teardown or points at the upgrade track instead.
+5. **Provision GCP resources** — APIs, the cluster (if new), the snapshot
+   bucket, IAM grants, and monitoring dashboards. Idempotent.
+6. **Turn on Substrate** — installs CRDs, the API server, controller, atenet,
+   and atelet.
+7. **Install Filestore CSI driver** (optional).
+8. **Configure autoscaling** (optional).
+9. **Deploy a demo workload** (optional) — the upstream counter demo, with a
+   live verification and next steps.
 
-Exiting and re-running is safe at the same pinned commit; every step is
-idempotent. Re-running at a newer pinned commit does not upgrade a cluster that is
-already installed; see [Upgrading an installed cluster](#upgrading-an-installed-cluster).
+Exiting and re-running is safe; every step is idempotent.
 
-## Repository layout
+| Connect your cluster | Blocked: already installed |
+| --- | --- |
+| ![Cluster list with install-state badges](docs/screenshots/clusters.svg) | ![The reinstall guard](docs/screenshots/guard.svg) |
 
-```
-installer/   The wizard (Go, bubbletea). `go run .` from this directory works too.
-```
+| Provisioning | Complete |
+| --- | --- |
+| ![Provisioning GCP resources](docs/screenshots/provision.svg) | ![The completion screen](docs/screenshots/complete.svg) |
 
-## Where the images come from
+## Choosing images
 
-The images step chooses between two ways of getting the Substrate control-plane
-images. Both end up naming a commit of one repository,
-`https://github.com/agent-substrate/substrate`, because `ate-setup` reads the deployment
-manifests from a source tree either way. The repository is fixed; the commit is yours
-to choose.
+Both options name a commit of `agent-substrate/substrate`, because the deploy
+reads its manifests from a source tree either way:
 
-**Pre-built images** — the default, and three fields: the image registry, the image
-tag, and the commit the images were built from. All three are offered pre-filled and
-all three can be overridden. The defaults are the published `v0.1.0-gke.1` release at
-`us-docker.pkg.dev/gke-substrate-release/substrate`, which is where we host the release
-images, and the commit pinned below, which is what they were built from — the commit
-upstream's [`v0.1.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.1.0)
-tag names, `v0.1.0-gke.1` being the GKE build of that release. `ate-setup` pins every
-image to the digest its tag resolves to. Nothing is built and nothing is pushed, so your
-project needs no image registry of its own; the release registry in particular is
-pull-only.
+- **Pre-built images** (default): the published release at
+  `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to digests.
+  Nothing is built or pushed, so your project needs no registry. Any registry
+  and tag work — but move the commit with them: images from elsewhere need the
+  commit they were built from, or they run behind mismatched manifests.
+- **Build from source**: give a branch, tag, or commit; the images are built
+  with [ko](https://ko.build) and pushed to your project's registry.
 
-Any registry and tag work, so a team that publishes its own builds — a staging
-registry, or a private rebuild of a release — installs them by typing them here rather
-than by building from source. **Move the commit with them.** Only the release registry
-is published alongside a commit known to match its tags; images from anywhere else
-need the commit they were built from, or they run behind manifests from a different
-Substrate. The wizard warns about this as soon as the registry or tag is changed.
+Either way the revision is resolved to an exact commit and verified against the
+remote before the install starts.
 
-The tag doubles as the Substrate version — it names the atelet DaemonSet and sets the
-`ate.dev/substrate-version` node label — so it has to be a valid Kubernetes label
-value, and the wizard says so at the prompt rather than letting the install discover it.
-A tag that carries its digest (`v0.1.0-gke.1@sha256:…`) is fine; the version is the tag
-alone.
+## The Substrate checkout
 
-**A build from source** — for a branch or a commit that has no published images. You
-give a revision: a branch, a tag, or a full commit SHA. The box is pre-filled with the
-repository's current HEAD, resolved with `git ls-remote` and shown as a commit id, so
-accepting it builds exactly what is on the default branch right now. The images are
-built with [ko](https://ko.build) and pushed to your project's registry. A checkout of
-your own, a fork included, is installed with `--substrate-root` instead; see below.
-
-Either way, what you name is resolved to an exact commit before the install starts, and
-that commit is checked against the remote with a filtered shallow fetch — naming a commit and
-being served it are different things, and the difference is better found at the prompt
-than ten minutes into an install.
-
-## How Substrate itself is obtained
-
-`ate-setup` reads the deployment manifests from a Substrate source tree, so one has to
-be on disk at install time whichever images you chose — a pre-built install skips the
-build, not the checkout. That is why both paths of the images step ask for a revision.
-
-Rather than vendoring it, the installer fetches it with a shallow `git` fetch pinned to
-an exact commit: whatever you named there, resolved to a full SHA before the install
-starts. The first install step that needs the tree downloads it (a few seconds) into
-
-```
-<user cache dir>/substrate-gke/substrate-<short commit>
-```
-
-and later steps reuse it — one directory per commit, so two revisions never collide.
-Nothing is written into this repo, and `agent-substrate/substrate` is public, so the
-fetch of the default pin needs no credentials.
-
-That tree is scratch space for one install, not somewhere to work: **it is deleted once
-the install succeeds**, and re-running the installer fetches it again. If you want to
-develop against Substrate, use your own clone (see `--substrate-root` below) — a copy
-here would be removed out from under you.
-
-Nothing is deleted while an install could still be retried, so a failed run leaves the
-tree in place and retrying it costs no download. The tree is staged under a temporary
-name and moved into place only once complete, so interrupting a fetch costs you the
-download and nothing else.
-
-To point at your own checkout instead — handy when testing an unmerged change:
+The installer shallow-fetches the pinned Substrate tree into
+`<user cache dir>/substrate-gke/substrate-<short commit>` on demand and deletes
+it once the install succeeds. It is scratch space — to develop against
+Substrate, point the installer at your own clone instead:
 
 ```bash
 cd installer && go run . --substrate-root=/path/to/substrate
 ```
 
-A checkout you supply this way is used as-is and never modified or deleted.
+A checkout you supply is used as-is and never modified or deleted.
 
-### Bumping the pinned commit
+## Logs
 
-This changes what fresh installs get. It does not upgrade clusters that are already
-installed; those follow [Upgrading an installed cluster](#upgrading-an-installed-cluster).
-
-Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion`
-next to it to match the `go` directive in that revision's `go.mod`. `make substrate-pin`
-prints the current values, and `make substrate-pin-check` verifies `MinGoVersion`
-against upstream's `go.mod` at that commit — run it after every bump, since a stale
-value lets the preflight doctor pass and the install then fail mid-bootstrap.
-
-`ReleaseRepo` and `ReleaseVersion` next to it are the registry and tag the images step
-offers by default; bump `ReleaseVersion` and `Commit` together when a newer release is
-published, since `Commit` is the manifest revision offered behind those images and has
-to be what they were built from.
-
-All three are defaults, not limits. The wizard accepts any registry, tag, and revision,
-and the build-from-source track never uses `Commit` at all — it offers the repository's
-live HEAD — so none of them has to change for someone installing their own build.
+Every command's full output is written to a timestamped log under
+`<user cache dir>/substrate-gke/logs/`. Press `v` in the wizard for a
+scrollable log viewer; failures show the extracted cause and the log path.
 
 ## Upgrading an installed cluster
 
-Coming in a later release. Upgrades will be guaranteed only within a release branch.
-Until then, reinstall.
-
-Upgrades follow upstream's rolling upgrade runbook,
-[`docs/upgrade.md`](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md)
-in the Substrate tree. Do not re-run the install track against a cluster that already
-runs Substrate; run the installer and choose **Upgrade an installed cluster** instead. It
-names the cluster and reads what it runs off the cluster, takes the new version from the
-same images step an install uses, fetches the installed and the new source trees into
-`~/.cache/substrate-gke/upgrades/`, and prints the hand-over in the order the runbook reads:
-the runbook, the variables its commands use, the tree to check out and the environment for
-its `ate-setup` commands, and what a rollback changes in them. Nothing on the cluster
-changes until you follow the runbook.
-
-The installed tree is fetched at the commit the running API server reports it was built
-from; Go stamps every binary with the commit of the tree it was built in, and `ateapi
---version` prints it. When the cluster cannot be read, or the binary carries no commit,
-the commit and version are typed in, along with the registry of the installed images when
-they were pre-built.
+Do not re-run the install track against a cluster that already runs Substrate
+(the wizard blocks it). Run the installer and choose **Upgrade an installed
+cluster**: it reads what the cluster runs, fetches the installed and new source
+trees, and prints the hand-over for upstream's rolling upgrade runbook,
+[`docs/upgrade.md`](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md).
+Nothing on the cluster changes until you follow the runbook.
 
 ## Tearing down
 
-An install creates billable resources: the GKE cluster, the snapshot bucket, IAM
-bindings, and monitoring dashboards. Delete all of them with the values you gave the
-wizard (the exit summary prints this exact invocation for your install):
+An install creates billable resources. Delete all of them — cluster, snapshot
+bucket, IAM bindings, dashboards — with the values you gave the wizard (the
+exit summary prints this exact invocation):
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
-# or: make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone> BUCKET_NAME=<bucket>
+# or: make teardown PROJECT_ID=... CLUSTER_NAME=... CLUSTER_LOCATION=... BUCKET_NAME=...
 ```
 
-The script asks for confirmation, then delegates the deletions to upstream's
-`hack/teardown.sh` fetched at the same pinned commit the installer built from — the
-teardown that matches what that bootstrap created — so it needs `gcloud` and `git`. It
-is safe to re-run after a partial failure. To remove only the Substrate control plane
-while keeping the cluster, use the `ate-setup delete ate-system` command the exit
-summary prints instead. APIs enabled by the install are left enabled; they cost
-nothing while unused.
+It asks for confirmation and is safe to re-run after a partial failure. To
+remove only the Substrate control plane while keeping the cluster, use the
+`ate-setup delete ate-system` command the exit summary prints.
 
 ## Development
 
 ```bash
-make test      # unit tests, including a scripted dry-run walk of the whole wizard
-make verify    # gofmt + go vet
+make test         # unit tests, including a scripted dry-run walk of the wizard
+make verify       # gofmt + go vet
+make screenshots  # regenerate the README screenshots from the dry-run wizard
 ```
+
+**Bumping the pinned Substrate commit** (changes what fresh installs get): edit
+`Commit` in `installer/internal/snapshot/snapshot.go` and update `MinGoVersion`
+to match upstream's `go.mod` at that commit — `make substrate-pin-check`
+verifies it. When a new release is published, bump `ReleaseVersion` and
+`Commit` together: the commit must be what the release images were built from.
