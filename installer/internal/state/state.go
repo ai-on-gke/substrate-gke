@@ -176,6 +176,20 @@ const (
 	TrackAdvanced   = "advanced"
 )
 
+// DefaultClusterVersion is the release a new cluster is created at.
+//
+// It is the newest release GKE's Regular channel carries, which is where
+// upstream's bootstrap lands a cluster — it sets no release channel, so GKE
+// applies its default. Regular's own default version is below
+// gcp.MinSupportedVersion, so leaving this empty would have the installer
+// create clusters it then refuses to install onto.
+//
+// That it currently equals the floor is a coincidence of GKE's rollout, not a
+// rule. 1.37 would be the better choice — pod certificate projection is GA
+// there — but it is Rapid-only, and upstream cannot yet be told which channel
+// to use.
+const DefaultClusterVersion = "1.36"
+
 // Setup accumulates everything the user chose plus values resolved from GCP.
 type Setup struct {
 	Track string
@@ -215,6 +229,12 @@ type Setup struct {
 	ClusterName  string
 	ClusterIsNew bool
 
+	// ClusterVersion shapes a cluster the install creates and is ignored for
+	// one it connects to: upstream's bootstrap reads it only on the creation
+	// path. A bare minor is fine — GKE resolves it to the newest patch it
+	// serves, so there is no patch number here to go stale.
+	ClusterVersion string
+
 	BucketName   string
 	KoDockerRepo string
 
@@ -232,15 +252,16 @@ type Setup struct {
 // NewSetup returns a Setup with the same defaults the upstream docs use.
 func NewSetup() *Setup {
 	return &Setup{
-		Track:        TrackQuickstart,
-		Zone:         "us-west1-c",
-		Network:      "default",
-		Subnetwork:   "default",
-		MachineType:  "c3-standard-4",
-		ClusterName:  "substrate-test",
-		NodePool:     "substrate-node-pool",
-		AutoscaleMin: 1,
-		AutoscaleMax: 5,
+		Track:          TrackQuickstart,
+		Zone:           "us-west1-c",
+		Network:        "default",
+		Subnetwork:     "default",
+		MachineType:    "c3-standard-4",
+		ClusterName:    "substrate-test",
+		ClusterVersion: DefaultClusterVersion,
+		NodePool:       "substrate-node-pool",
+		AutoscaleMin:   1,
+		AutoscaleMax:   5,
 	}
 }
 

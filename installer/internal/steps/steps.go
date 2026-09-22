@@ -51,7 +51,7 @@ func Bootstrap() []ChecklistItem {
 	return []ChecklistItem{
 		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Step 1/7")},
-		{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Step 2/7")},
+		{"Create the GKE cluster (with the beta PodCertificate APIs)", contains("Step 2/7")},
 		{"Create the GCS snapshot bucket", contains("Step 3/7")},
 		{"Grant GKE node permissions", contains("Step 4/7")},
 		{"Grant atelet Workload Identity permissions", contains("Step 5/7")},

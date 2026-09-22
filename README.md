@@ -63,7 +63,7 @@ A terminal wizard walks the nine steps below, running the real command it shows 
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, network reachability, and `git` — with copy-paste fixes for anything missing |
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe` |
-| 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
+| 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.36 by default, overridable in advanced setup). Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, and monitoring dashboards. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
@@ -86,7 +86,15 @@ A terminal wizard walks the nine steps below, running the real command it shows 
 
 - **Setup check runs first** because the next step (images) is the first one to reach the network.
 - **Images comes before the project step** because the answer decides what that step needs — a pre-built install pushes nothing, so it's never asked for a registry.
-- **Connecting an existing cluster** probes it to confirm Substrate isn't already running there, guarding against mixed-version installs. Substrate needs the `PodCertificate` Kubernetes beta APIs, which GKE only enables **at cluster creation** — clusters created without them can't be fixed afterward. That's why creating a fresh cluster is the recommended path.
+- **Connecting an existing cluster** probes it to confirm Substrate isn't already running there, guarding against mixed-version installs. It also badges whether the cluster meets Substrate's [cluster requirements](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate#cluster-requirements): GKE 1.36 or newer, serving the beta `PodCertificate` APIs Substrate's controllers speak — which GKE serves only for clusters that opted in. What it takes to fix one that doesn't depends on its release:
+
+  | Release | Remedy |
+  |---|---|
+  | **1.37+** | Provision enables them in place (~10 min control-plane update). Nothing else. |
+  | **1.36** | Same enablement, but the kubelet serves pod certificate projection only on nodes created *after* it — so every existing node has to be recycled too. |
+  | **below 1.36** | Not fixable in place: [1.36 is the oldest release Substrate is supported on](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate#cluster-requirements), and below 1.35 GKE rejects the enablement outright because `PodCertificateRequest` didn't reach `v1beta1` until then. The control plane has to be upgraded first. |
+
+  New clusters are created at 1.37, the top row.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
 
 </details>
@@ -209,5 +217,5 @@ Bump `ReleaseVersion` and `Commit` together when a newer release is published �
 |---|---|
 | `ate-setup` | CLI that installs/upgrades/deletes the Substrate control plane on a cluster |
 | `atenet`, `atelet` | Substrate control-plane components installed alongside the API server and controller |
-| `PodCertificate` beta APIs | Kubernetes beta APIs Substrate requires; GKE only enables them at cluster creation time |
+| `PodCertificate` APIs | `certificates.k8s.io/v1beta1` APIs Substrate's controllers require: `clustertrustbundles` and `podcertificaterequests`. GKE serves them only for clusters that enabled them — at creation, or later with `gcloud container clusters update --enable-kubernetes-unstable-apis`. Required on every release, including 1.37+ where the same APIs are also GA, because the controllers are built against the `v1beta1` types |
 | Pinned commit | The exact commit of `agent-substrate/substrate` this installer's manifests and default images are built from |

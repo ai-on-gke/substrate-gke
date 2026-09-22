@@ -17,7 +17,23 @@ package state
 import (
 	"strings"
 	"testing"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 )
+
+// The two constants live in different packages and nothing makes them move
+// together, so this is the only thing stopping the installer from creating a
+// cluster the very next screen refuses to install onto. GKE's Regular channel —
+// where upstream's bootstrap lands, since it sets no channel — still defaults
+// below the floor, so an empty or stale default is not a hypothetical.
+func TestTheDefaultClusterVersionClearsTheSupportedFloor(t *testing.T) {
+	for _, version := range []string{DefaultClusterVersion, NewSetup().ClusterVersion} {
+		if !(gcp.Cluster{MasterVersion: version}).SupportedRelease() {
+			t.Errorf("new clusters would be created at %q, below the supported floor %s",
+				version, gcp.MinSupportedVersion)
+		}
+	}
+}
 
 func TestMachineWalksTheWholeFlow(t *testing.T) {
 	m := NewMachine()
