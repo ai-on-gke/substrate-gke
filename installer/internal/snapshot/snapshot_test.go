@@ -229,6 +229,8 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 	spec := NewBuilder("/tmp/substrate-pin", true).DeleteAteSystem("acme", "prod cluster", "us-west1-c")
 	script := spec.Argv[len(spec.Argv)-1]
+	waitCmd := "kubectl wait --for=delete namespace/ate-system --timeout=180s"
+	deleteBundlesCmd := "kubectl delete --ignore-not-found clustertrustbundle -l podcert.ate.dev/canarying=live"
 	for _, want := range []string{
 		"PROJECT_ID=" + ShellQuote("acme"),
 		"CLUSTER_NAME=" + ShellQuote("prod cluster"),
@@ -237,12 +239,19 @@ func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 		// ate-setup returns while the namespace is still deleting; the
 		// teardown must outlast it, or the immediate re-probe reads (and
 		// caches) the half-deleted install as still installed.
-		"kubectl wait --for=delete namespace/ate-system",
+		waitCmd,
+		// Stale ClusterTrustBundles must be cleared after the namespace is
+		// gone so podcertificate-controller cannot republish them while
+		// terminating, and the next install waits for newly rotated CA roots.
+		deleteBundlesCmd,
 		`KUBECONFIG=$(mktemp)`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("delete script missing %q:\n%s", want, script)
 		}
+	}
+	if strings.Index(script, waitCmd) >= strings.Index(script, deleteBundlesCmd) {
+		t.Errorf("ClusterTrustBundle deletion must run after namespace/ate-system finishes terminating:\n%s", script)
 	}
 	if err := exec.Command("bash", "-n", "-c", script).Run(); err != nil {
 		t.Errorf("delete script is not valid shell: %v\n%s", err, script)

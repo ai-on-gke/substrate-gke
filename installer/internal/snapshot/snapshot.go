@@ -330,10 +330,19 @@ func (b *Builder) DeleteAteSystem(projectID, cluster, location string) execx.Spe
 		ShellQuote(projectID), ShellQuote(cluster), ShellQuote(location))
 	lines := []string{env + " go run ./cmd/ate-setup delete ate-system"}
 	lines = append(lines, credentialLines(projectID, cluster, location)...)
-	lines = append(lines, "kubectl wait --for=delete namespace/ate-system --timeout=180s")
+	// ClusterTrustBundles are published dynamically by podcertificate-controller
+	// rather than by the static manifests delete ate-system removes. Deleting
+	// them after the namespace is gone — so the controller publishing them is
+	// gone too, and cannot republish — ensures the next install's
+	// wait_for_clustertrustbundles waits for the newly rotated CA roots instead
+	// of returning immediately on the previous install's bundles.
+	lines = append(lines,
+		"kubectl wait --for=delete namespace/ate-system --timeout=180s",
+		"kubectl delete --ignore-not-found clustertrustbundle -l podcert.ate.dev/canarying=live",
+	)
 	return execx.Spec{
 		Label:   "ate-setup delete ate-system",
-		Display: "go run ./cmd/ate-setup delete ate-system && kubectl wait --for=delete namespace/ate-system",
+		Display: "go run ./cmd/ate-setup delete ate-system && kubectl wait --for=delete namespace/ate-system && kubectl delete clustertrustbundle -l podcert.ate.dev/canarying=live",
 		Argv:    b.inTree(strings.Join(lines, "\n")),
 		SimLines: append(b.fetchSimLines(),
 			"[step]: delete_ate_system",
