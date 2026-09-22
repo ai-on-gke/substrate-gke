@@ -77,7 +77,7 @@ func main() {
 	press(app, "enter", "enter", "enter")          // project fields
 	shot(out, "clusters", app)                     // list with install-state badges
 
-	press(app, "3", "enter") // the installed fixture → blocked panel
+	press(app, "5", "enter") // the installed fixture → blocked panel
 	shot(out, "guard", app)
 
 	press(app, "esc")        // back to the list
