@@ -197,7 +197,7 @@ func TestCreateNewClusterPath(t *testing.T) {
 	press("enter")                            // doctor
 	press("enter", "enter", "enter", "enter") // images: pre-built (the default), then its three fields
 	press("enter", "enter", "enter")          // project fields (pid, zone, bucket)
-	press("5", "enter")                       // "create a new cluster" row (4 clusters + create)
+	press("7", "enter")                       // "create a new cluster" row (6 clusters + create)
 	pump(t, app, key("enter"))                // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
@@ -351,12 +351,13 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("2", "enter")
 	press("enter")
 	// Project screen in Advanced track:
-	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo
+	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
+	// 5:Subnetwork, 6:ClusterVersion, 7:Repo
 	press("enter", "enter")
 	for _, r := range "my-custom-bucket" {
 		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	press("enter", "enter", "enter", "enter", "enter") // submit from field 6
+	press("enter", "enter", "enter", "enter", "enter", "enter") // submit from field 7
 
 	// Cluster screen: pick row 2 (legacy-prod)
 	press("2", "enter")
@@ -1046,7 +1047,7 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 			t.Errorf("dry-run list missing %q badge:\n%s", want, view)
 		}
 	}
-	press("3", "enter") // substrate-installed
+	press("5", "enter") // substrate-installed
 	scr := app.cur.(*clusterScreen)
 	if scr.mode != "installed" {
 		t.Fatalf("mode = %q, want installed", scr.mode)
@@ -1055,6 +1056,108 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterName != "substrate-installed" {
 		t.Errorf("after dry-run teardown: step=%v cluster=%q, want Provision/substrate-installed",
 			app.mach.Current(), app.deps.Setup.ClusterName)
+	}
+}
+
+// A cluster missing the beta APIs is stopped at the confirmation whatever its
+// release: upstream's controllers are built against the beta types, so serving
+// the same APIs as GA exempts nobody. What the release changes is the remedy,
+// and all three are materially different — below 1.36 nothing that can be
+// enabled makes the cluster supported, at 1.36 the repair works but costs a
+// recycle of every node, from 1.37 it costs nothing. Offering the wrong one
+// sends someone to rebuild a cluster that needed ten minutes, or leaves them
+// watching pods that will never mount.
+func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+
+	press("4", "enter") // substrate-ga: 1.37, no beta APIs enabled
+	scr := app.cur.(*clusterScreen)
+	if app.mach.Current() != state.Cluster || scr.mode != "confirm" {
+		t.Fatalf("1.37 cluster with no beta APIs: step=%v mode=%q, want the confirmation",
+			app.mach.Current(), scr.mode)
+	}
+	if view := app.View(); !strings.Contains(view, "keep working as they are") || strings.Contains(view, "recycled") {
+		t.Errorf("a 1.37 confirmation should promise no node recycling:\n%s", view)
+	}
+
+	press("n")          // back to the list
+	press("3", "enter") // ml-staging: 1.36, no beta APIs enabled
+	if scr.mode != "confirm" {
+		t.Fatalf("1.36 cluster: mode=%q, want the confirmation", scr.mode)
+	}
+	if view := app.View(); !strings.Contains(view, "recycled") || !strings.Contains(view, "clusters upgrade 'ml-staging'") {
+		t.Errorf("a 1.36 confirmation should spell out the node recycle:\n%s", view)
+	}
+
+	press("n")          // back to the list
+	press("2", "enter") // legacy-prod: 1.33, below the supported floor
+	if scr.mode != "confirm" {
+		t.Fatalf("1.33 cluster: mode=%q, want the confirmation", scr.mode)
+	}
+	view := app.View()
+	if !strings.Contains(view, "Upgrade this cluster's control plane to "+gcp.MinSupportedVersion) {
+		t.Errorf("a pre-%s confirmation should ask for a control-plane upgrade:\n%s", gcp.MinSupportedVersion, view)
+	}
+	// Enabling the beta APIs is not the fix below the floor: on 1.33 GKE
+	// rejects the request outright, and even where it would be accepted the
+	// release is not one Substrate runs on. 'y' still works, but must not be
+	// sold as the way through.
+	if strings.Contains(view, "the provision step turns them on") {
+		t.Errorf("a pre-%s confirmation must not offer enablement as the fix:\n%s", gcp.MinSupportedVersion, view)
+	}
+	if !strings.Contains(view, "unsupported") {
+		t.Errorf("a pre-%s confirmation should mark 'y' as unsupported:\n%s", gcp.MinSupportedVersion, view)
+	}
+}
+
+// The cluster version and release channel only matter when the run creates a
+// cluster, so they are advanced-track fields — but they have to actually be
+// reachable there, and to reach upstream with whatever the user typed.
+func TestAdvancedTrackOffersTheClusterVersion(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	for _, m := range runCmd(app.Init()) {
+		pump(t, app, m)
+	}
+
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	typed := func(s string) {
+		for _, r := range s {
+			pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+
+	press("2", "enter") // welcome: advanced track
+	press("enter")      // doctor
+	press("1", "enter") // images: pre-built, so the registry field is left out
+	press("enter", "enter", "enter")
+
+	view := app.View()
+	if !strings.Contains(view, "Cluster version") {
+		t.Fatalf("advanced project screen missing the cluster version field:\n%s", view)
+	}
+	st := app.deps.Setup
+	if st.ClusterVersion != state.DefaultClusterVersion {
+		t.Fatalf("default version=%q, want %q", st.ClusterVersion, state.DefaultClusterVersion)
+	}
+
+	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
+	// 5:Subnetwork, 6:ClusterVersion
+	press("enter", "enter", "enter", "enter", "enter", "enter")
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("1.38")
+	press("enter") // submit from the last field
+
+	if app.mach.Current() != state.Cluster {
+		t.Fatalf("after project: %v", app.mach.Current())
+	}
+	if st.ClusterVersion != "1.38" {
+		t.Errorf("edited: version=%q, want 1.38", st.ClusterVersion)
 	}
 }
 

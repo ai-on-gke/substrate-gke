@@ -577,6 +577,20 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	}
 }
 
+// Bootstrap reads the target release only from the environment, and GKE's own
+// default for the channel it lands in is below the floor the installer
+// enforces — so dropping this variable means silently creating a cluster the
+// installer will then refuse to install onto.
+func TestBuilderEnvCarriesTheClusterVersion(t *testing.T) {
+	st := testSetup(t)
+	spec := NewBuilder("/tmp/substrate-pin", true).Bootstrap(st)
+
+	want := "CLUSTER_VERSION=" + st.ClusterVersion
+	if !slices.Contains(spec.Env, want) {
+		t.Errorf("Bootstrap env missing %q: %v", want, spec.Env)
+	}
+}
+
 func TestDeploySpecs(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
 	st := testSetup(t)
