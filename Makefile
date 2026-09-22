@@ -47,8 +47,14 @@ verify:
 # go install github.com/charmbracelet/freeze@latest
 screenshots:
 	cd installer && go run ./cmd/uishots ../docs/screenshots
+	@# Feed the capture on stdin rather than via `--execute "cat $$f"`. The
+	@# --execute form runs the command under a pty and races its reader against
+	@# it: it fails intermittently with "XML syntax error: invalid UTF-8" on a
+	@# multi-byte glyph split across reads, sometimes hangs outright, and has
+	@# been seen to report WROTE after emitting a vertically truncated frame.
+	@# Redirecting the file is deterministic and produces byte-identical SVGs.
 	for f in docs/screenshots/*.ans; do \
-		freeze --execute "cat $$f" --window -o "$${f%.ans}.svg" && rm "$$f"; \
+		freeze --window -o "$${f%.ans}.svg" < "$$f" && rm "$$f"; \
 	done
 
 PIN_FILE := installer/internal/snapshot/snapshot.go
