@@ -379,6 +379,7 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.ClusterName = c.Name
 	st.Zone = c.Location
 	st.ClusterIsNew = false
+	st.ClusterKVMReady = c.KVMReady
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -512,6 +513,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st := s.deps.Setup
 				st.ClusterName = name
 				st.ClusterIsNew = true
+				st.ClusterKVMReady = false
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil

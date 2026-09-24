@@ -233,6 +233,7 @@ func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 		"PROJECT_ID=" + ShellQuote("acme"),
 		"CLUSTER_NAME=" + ShellQuote("prod cluster"),
 		"CLUSTER_LOCATION=" + ShellQuote("us-west1-c"),
+		"hack/install-microvm-deps.sh --delete",
 		"NO_DEV_ENV=1 go run ./cmd/ate-setup delete ate-system",
 		// ate-setup returns while the namespace is still deleting; the
 		// teardown must outlast it, or the immediate re-probe reads (and
@@ -336,6 +337,82 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 		}
 		if string(out) != answer {
 			t.Errorf("shell resolved %q to %q, want it verbatim", answer, out)
+		}
+	}
+}
+
+// The micro-VM script uploads assets and applies a cluster-scoped resource, so
+// pointing it at the wrong cluster is not a no-op. It must target the cluster
+// the wizard chose, never whatever context happens to be ambient.
+func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
+	st := testSetup(t)
+	st.ClusterName = "clu'ster $HOME"
+	st.Zone = "us-central1-a; id -u"
+
+	script := NewBuilder(fakeCheckout(t), false).InstallMicroVMDeps(st).Argv[2]
+	for _, want := range []string{
+		"gcloud container clusters get-credentials " + ShellQuote(st.ClusterName),
+		"--location " + ShellQuote(st.Zone),
+		"--project " + ShellQuote(st.ProjectID),
+		"hack/install-microvm-deps.sh --install",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+// The assets are executed by the cluster's nodes, not by the workstation
+// running the wizard, and they land in the project's GCS bucket, not in a
+// kind-local one. Both are the script's inputs rather than its defaults, so
+// an inherited ARCH or ATE_INSTALL_KIND from the operator's shell would
+// silently produce a broken install.
+func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
+	st := testSetup(t)
+	b := NewBuilder(fakeCheckout(t), false)
+
+	spec := b.InstallMicroVMDeps(st)
+	for _, want := range []string{"ARCH=amd64", "ATE_INSTALL_KIND=false"} {
+		if !slices.Contains(spec.Env, want) {
+			t.Errorf("%s: env missing %q:\n%v", spec.Label, want, spec.Env)
+		}
+	}
+}
+
+func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
+	st := testSetup(t)
+	st.SandboxClass = state.SandboxMicroVM
+	b := NewBuilder(fakeCheckout(t), false)
+
+	// When MicroVM was chosen but assets were NOT staged, DeployDemo and
+	// NextSteps must fall back to the gVisor counter demo.
+	unstagedSpec := b.DeployDemo(st, "counter")
+	if !strings.Contains(unstagedSpec.Argv[2], "go run ./cmd/ate-setup deploy demo "+ShellQuote("counter")) {
+		t.Errorf("unstaged micro-VM should fall back to gVisor counter demo, got:\n%s", unstagedSpec.Argv[2])
+	}
+	_, unstagedSteps := b.NextSteps(st)
+	if !strings.Contains(strings.Join(unstagedSteps, "\n"), "-a ate-demo-counter --template-ref counter") {
+		t.Errorf("unstaged micro-VM NextSteps should target ate-demo-counter, got:\n%v", unstagedSteps)
+	}
+
+	// Once staged, DeployDemo runs --deploy-demo-counter-microvm with
+	// SUBSTRATE_VERSION, and NextSteps targets ate-demo-counter-microvm.
+	st.MicroVMDeployed = true
+	stagedSpec := b.DeployDemo(st, "counter")
+	if !strings.Contains(stagedSpec.Argv[2], "./hack/install-ate.sh --deploy-demo-counter-microvm") {
+		t.Errorf("staged micro-VM DeployDemo missing --deploy-demo-counter-microvm:\n%s", stagedSpec.Argv[2])
+	}
+	if !slices.Contains(stagedSpec.Env, "SUBSTRATE_VERSION="+b.SubstrateVersion(st)) {
+		t.Errorf("staged micro-VM DeployDemo env missing SUBSTRATE_VERSION:\n%v", stagedSpec.Env)
+	}
+	_, stagedSteps := b.NextSteps(st)
+	joined := strings.Join(stagedSteps, "\n")
+	for _, want := range []string{
+		"kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template-ref counter-microvm",
+		"Host: my-counter-1.ate-demo-counter-microvm.actors.resources.substrate.ate.dev",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)
 		}
 	}
 }

@@ -87,7 +87,8 @@ func main() {
 	press(app, "enter")      // provision → control plane
 	press(app, "enter")      // control plane → filestore CSI
 	press(app, "s")          // skip filestore
-	press(app, "s")          // skip autoscaling
+	press(app, "s")          // skip autoscaling → sandbox runtime
+	press(app, "enter")      // gVisor is the default choice → demo
 	press(app, "1", "enter") // deploy the counter demo
 	press(app, "enter")      // → complete
 	// The completion screen is the tallest — summary, verify hint, and the

@@ -143,6 +143,8 @@ func (a *App) screenFor(s state.Step) Screen {
 		return newProvisionScreen(a.deps)
 	case state.ControlPlane:
 		return newControlPlaneScreen(a.deps)
+	case state.Sandbox:
+		return newSandboxScreen(a.deps)
 	case state.FilestoreCSI:
 		return newFilestoreScreen(a.deps)
 	case state.Autoscaling:
@@ -326,8 +328,18 @@ func (a *App) runSlash(name string) tea.Cmd {
 	case "back", "b":
 		return goBack
 	case "skip", "s":
-		// Only the optional steps may be skipped.
-		if s := a.mach.Current(); s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {
+		// Only the optional steps may be skipped. Sandbox is one of them:
+		// skipping it before micro-VM staging succeeds falls back to the
+		// gVisor class the control-plane step installed anyway, rather than
+		// leaving a micro-VM choice behind that nothing staged for.
+		s := a.mach.Current()
+		if s == state.Sandbox {
+			if !a.deps.Setup.MicroVMDeployed {
+				a.deps.Setup.SandboxClass = state.SandboxGVisor
+			}
+			return goNext
+		}
+		if s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {
 			return goNext
 		}
 	case "log", "l", "view":

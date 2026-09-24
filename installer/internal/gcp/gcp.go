@@ -44,6 +44,9 @@ type Cluster struct {
 	MasterVersion string
 	NodeCount     int
 	BetaAPIs      []string
+	// KVMReady reports whether any node pool in the cluster has /dev/kvm
+	// available (nested virtualization enabled or a bare-metal machine type).
+	KVMReady bool
 }
 
 // SubstrateReady reports whether the cluster serves the beta APIs Substrate
@@ -135,11 +138,11 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 		// clean, blocked-installed, and partial.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
-				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs},
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
 			{Name: "legacy-prod", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.33.2-gke.100", NodeCount: 12},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",
-				MasterVersion: "1.35.5-gke.1163012", NodeCount: 3, BetaAPIs: RequiredBetaAPIs},
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
 			{Name: "substrate-partial", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.35.5-gke.1163012", NodeCount: 1, BetaAPIs: RequiredBetaAPIs},
 		}, nil
@@ -149,6 +152,43 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 		return nil, err
 	}
 	return ParseClusters(out)
+}
+
+type rawNodePool struct {
+	Config struct {
+		MachineType             string `json:"machineType"`
+		AdvancedMachineFeatures struct {
+			EnableNestedVirtualization bool `json:"enableNestedVirtualization"`
+		} `json:"advancedMachineFeatures"`
+	} `json:"config"`
+}
+
+// kvmReady reports whether at least one node pool exposes /dev/kvm to workloads,
+// either via GCE nested virtualization or via a bare-metal machine shape (whose
+// GCE names end in "-metal", e.g. "c3-standard-192-metal", "c3d-standard-360-metal").
+func kvmReady(pools []rawNodePool) bool {
+	for _, np := range pools {
+		if np.Config.AdvancedMachineFeatures.EnableNestedVirtualization ||
+			strings.HasSuffix(np.Config.MachineType, "-metal") {
+			return true
+		}
+	}
+	return false
+}
+
+// ClusterKVMReady re-queries gcloud to check whether the named cluster currently
+// has a KVM-capable node pool.
+func (c *Client) ClusterKVMReady(ctx context.Context, projectID, cluster, location string) (bool, error) {
+	clusters, err := c.ListClusters(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	for _, cl := range clusters {
+		if cl.Name == cluster && (location == "" || cl.Location == location) {
+			return cl.KVMReady, nil
+		}
+	}
+	return false, nil
 }
 
 // ParseClusters decodes `gcloud container clusters list --format=json`.
@@ -162,6 +202,7 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 		EnableK8sBetaApis    struct {
 			EnabledApis []string `json:"enabledApis"`
 		} `json:"enableK8sBetaApis"`
+		NodePools []rawNodePool `json:"nodePools"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing cluster list: %w", err)
@@ -175,6 +216,7 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			MasterVersion: r.CurrentMasterVersion,
 			NodeCount:     r.CurrentNodeCount,
 			BetaAPIs:      r.EnableK8sBetaApis.EnabledApis,
+			KVMReady:      kvmReady(r.NodePools),
 		})
 	}
 	return clusters, nil

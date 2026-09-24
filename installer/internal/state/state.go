@@ -35,6 +35,7 @@ const (
 	Cluster
 	Provision
 	ControlPlane
+	Sandbox
 	FilestoreCSI
 	Autoscaling
 	Demo
@@ -54,9 +55,15 @@ const (
 // registry. It comes after CheckSetup because it is the first step to reach
 // the network — it resolves a revision against a git remote — and the doctor
 // is what reports a missing git or an unreachable network with a fix to paste.
+//
+// Sandbox comes after Autoscaling and right before Demo: steps 1–8 complete
+// the cluster, control-plane, storage, and node-pool setup first, then step 9
+// chooses the actor sandbox runtime (staging the micro-VM assets and applying
+// the microvm SandboxConfig when Micro-VM is chosen) right before step 10
+// deploys the matching demo workload.
 var Order = []Step{
 	Welcome, CheckSetup, Images, Project, Cluster, Provision,
-	ControlPlane, FilestoreCSI, Autoscaling, Demo, Complete,
+	ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
 }
 
 // UpgradeOrder is the flow for upgrading a cluster this installer set up. It
@@ -85,6 +92,8 @@ func (s Step) Title() string {
 		return "Provision GCP resources"
 	case ControlPlane:
 		return "Turn on Substrate"
+	case Sandbox:
+		return "Choose your sandbox runtime"
 	case FilestoreCSI:
 		return "Install Filestore CSI driver"
 	case Autoscaling:
@@ -176,6 +185,21 @@ const (
 	TrackAdvanced   = "advanced"
 )
 
+// Sandbox classes an install can set up. These are the installer's own names
+// for the choice; upstream spells them SANDBOX_CLASS_GVISOR and
+// SANDBOX_CLASS_MICROVM inside the resources it applies.
+//
+// gVisor needs nothing from the wizard: ate-setup applies the cluster-wide
+// gvisor-default SandboxConfig unconditionally as part of the control-plane
+// step. Micro-VM is opt-in upstream and stays opt-in here — its sandbox
+// binaries are fetched at runtime from the snapshot bucket, so they have to be
+// built and staged there, and a SandboxConfig naming them applied, before any
+// micro-VM actor can boot.
+const (
+	SandboxGVisor  = "gvisor"
+	SandboxMicroVM = "microvm"
+)
+
 // Setup accumulates everything the user chose plus values resolved from GCP.
 type Setup struct {
 	Track string
@@ -212,13 +236,21 @@ type Setup struct {
 	Subnetwork  string
 	MachineType string
 
-	ClusterName  string
-	ClusterIsNew bool
+	ClusterName     string
+	ClusterIsNew    bool
+	ClusterKVMReady bool
 
 	BucketName   string
 	KoDockerRepo string
 
 	FilestoreCSIDeployed bool
+
+	// SandboxClass is the runtime this install sets up: SandboxGVisor or
+	// SandboxMicroVM. MicroVMDeployed records that the micro-VM assets were
+	// staged and the SandboxConfig applied, which the completion screen uses
+	// to print the right next steps.
+	SandboxClass    string
+	MicroVMDeployed bool
 
 	NodePool         string
 	AutoscaleEnabled bool
@@ -239,10 +271,17 @@ func NewSetup() *Setup {
 		MachineType:  "c3-standard-4",
 		ClusterName:  "substrate-test",
 		NodePool:     "substrate-node-pool",
+		SandboxClass: SandboxGVisor,
 		AutoscaleMin: 1,
 		AutoscaleMax: 5,
 	}
 }
+
+// MicroVM reports whether this install sets up the micro-VM sandbox class.
+// An empty SandboxClass reads as gVisor, so a Setup built without NewSetup —
+// as the tests and the upgrade track do — keeps the behaviour it had before
+// the choice existed.
+func (s *Setup) MicroVM() bool { return s.SandboxClass == SandboxMicroVM }
 
 // Prebuilt reports whether the install pulls published images rather than
 // building them.
