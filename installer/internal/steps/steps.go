@@ -89,6 +89,22 @@ func FilestoreCSI() []ChecklistItem {
 	}
 }
 
+// MicroVMDeps tracks the three phases of `install-microvm-deps.sh --install`,
+// preceded by the same pinned fetch the other in-tree steps pay for.
+//
+// The assemble row matches either outcome: a first run builds the asset set,
+// and a later one finds it already in bin/microvm-assets and skips. Both mean
+// the phase is done, and leaving the row unlit on the fast path would read as
+// a stall on the step's slowest phase.
+func MicroVMDeps() []ChecklistItem {
+	return []ChecklistItem{
+		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
+		{"Assemble the micro-VM asset set", containsAny("Assembling micro-VM assets", "Assets already present", "re-assembling")},
+		{"Upload assets to the snapshot bucket (kata-assets/)", contains("Uploading assets to gs://")},
+		{"Apply the cluster-wide microvm SandboxConfig", contains("Applying microvm SandboxConfig")},
+	}
+}
+
 // Progress applies one output line to a checklist, returning the updated
 // index of the active item (-1 when nothing has matched yet). Matches only
 // ever move the cursor forward.

@@ -182,6 +182,20 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 		{
+			Key: "microvm-tools", Name: "Micro-VM asset tools", Fatal: false,
+			Run: func(ctx context.Context) Result {
+				if missing := MissingMicroVMTools(); len(missing) > 0 {
+					return Result{Warn,
+						fmt.Sprintf("missing %s; needed only if you select the Micro-VM sandbox", strings.Join(missing, ", ")),
+						// Homebrew installs coreutils g-prefixed (gsha256sum);
+						// upstream's scripts call sha256sum by name, so the
+						// gnubin directory has to be on PATH for them too.
+						`brew install coreutils zstd jq && export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"   # or apt-get install coreutils zstd unzip jq make`}
+				}
+				return Result{Pass, strings.Join(MicroVMTools, ", ") + " on PATH", ""}
+			},
+		},
+		{
 			Key: "snapshot", Name: "Substrate checkout", Fatal: false,
 			Run: func(ctx context.Context) Result {
 				if !snapshot.Fetched(snapshotRoot, managed) {
@@ -196,6 +210,22 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 	}
+}
+
+// MicroVMTools are the host utilities the micro-VM path needs beyond the
+// always-checked ones: sha256sum, zstd and unzip for upstream's asset
+// scripts, and make and jq for the demo on older trees such as v0.1.0.
+var MicroVMTools = []string{"sha256sum", "zstd", "unzip", "jq", "make"}
+
+// MissingMicroVMTools returns whichever of MicroVMTools are not on PATH.
+func MissingMicroVMTools() []string {
+	var missing []string
+	for _, tool := range MicroVMTools {
+		if _, err := exec.LookPath(tool); err != nil {
+			missing = append(missing, tool)
+		}
+	}
+	return missing
 }
 
 var goVersionRe = regexp.MustCompile(`go(\d+\.\d+(?:\.\d+)?)`)

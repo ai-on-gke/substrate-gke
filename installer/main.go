@@ -172,8 +172,8 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	fmt.Println(theme.Good.Render(theme.GlyphDone + " Substrate installed"))
 
 	section("Resources")
-	fmt.Printf("  project    %s\n  cluster    %s (%s)\n  bucket     gs://%s\n  images     %s\n",
-		st.ProjectID, st.ClusterName, st.Zone, st.BucketName, st.ImageSummary())
+	fmt.Printf("  project    %s\n  cluster    %s (%s)\n  sandbox    %s\n  bucket     gs://%s\n  images     %s\n",
+		st.ProjectID, st.ClusterName, st.Zone, ui.SandboxSummary(st), st.BucketName, st.ImageSummary())
 	if deps.LogPath != "" {
 		fmt.Printf("  log        %s\n", deps.LogPath)
 	}
@@ -184,7 +184,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		fmt.Printf("  autoscale  %s, %d–%d nodes\n", st.NodePool, st.AutoscaleMin, st.AutoscaleMax)
 	}
 	if st.DemoDeployed {
-		fmt.Println("  demo       counter deployed — next steps recapped below")
+		fmt.Printf("  demo       %s — next steps recapped below\n", ui.DemoSummary(st))
 	}
 
 	// The managed checkout is scratch space, so point teardown at a command
@@ -220,8 +220,8 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
 	// install leaves a written copy behind.
 	if st.DemoDeployed {
-		section("Next steps — try the counter demo")
-		portForward, demo := b.NextSteps()
+		section("Next steps — try the " + ui.DemoName(st) + " demo")
+		portForward, demo := b.NextSteps(st)
 		command(portForward)
 		for _, cmd := range demo {
 			command(cmd)

@@ -35,6 +35,10 @@ type Spec struct {
 	Label string
 	// Display is the human-readable command line shown to the user.
 	Display string
+	// DisplayIsSummary marks a Display that names the step rather than a
+	// command the user could paste — the script picks its command at run
+	// time — so it is shown without a shell prompt.
+	DisplayIsSummary bool
 	// Dir is the working directory.
 	Dir string
 	// Argv is the command and its arguments.

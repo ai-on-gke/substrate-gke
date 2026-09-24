@@ -28,14 +28,55 @@ const clusterListJSON = `[
         "certificates.k8s.io/v1beta1/podcertificaterequests",
         "certificates.k8s.io/v1beta1/clustertrustbundles"
       ]
-    }
+    },
+    "nodePools": [
+      {
+        "name": "kvm-pool",
+        "config": {
+          "machineType": "n2-standard-8",
+          "advancedMachineFeatures": {
+            "enableNestedVirtualization": true
+          }
+        }
+      }
+    ]
   },
   {
     "name": "legacy",
     "location": "us-central1",
     "status": "RUNNING",
     "currentMasterVersion": "1.33.2-gke.100",
-    "currentNodeCount": 12
+    "currentNodeCount": 12,
+    "nodePools": [
+      {
+        "name": "default-pool",
+        "config": {
+          "machineType": "e2-standard-4"
+        }
+      }
+    ]
+  },
+  {
+    "name": "metal",
+    "location": "us-central1-a",
+    "status": "RUNNING",
+    "currentMasterVersion": "1.35.5-gke.1163012",
+    "currentNodeCount": 3,
+    "nodePools": [
+      {
+        "name": "bare-metal-pool",
+        "config": {
+          "machineType": "c3-standard-192-metal"
+        }
+      }
+    ]
+  },
+  {
+    "name": "autopilot",
+    "location": "us-central1",
+    "status": "RUNNING",
+    "currentMasterVersion": "1.35.5-gke.1163012",
+    "currentNodeCount": 1
   }
 ]`
 
@@ -44,7 +85,7 @@ func TestParseClusters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(clusters) != 2 {
+	if len(clusters) != 4 {
 		t.Fatalf("got %d clusters", len(clusters))
 	}
 	ready := clusters[0]
@@ -54,8 +95,20 @@ func TestParseClusters(t *testing.T) {
 	if !ready.SubstrateReady() {
 		t.Error("substrate-poc should be substrate-ready")
 	}
+	if !ready.KVMReady {
+		t.Error("substrate-poc should be KVMReady")
+	}
 	if clusters[1].SubstrateReady() {
 		t.Error("legacy (no beta APIs) must not be substrate-ready")
+	}
+	if clusters[1].KVMReady {
+		t.Error("legacy (e2 without nested virt) must not be KVMReady")
+	}
+	if !clusters[2].KVMReady {
+		t.Error("metal (c3-standard-192-metal) should be KVMReady")
+	}
+	if clusters[3].KVMReady {
+		t.Error("autopilot (no nodePools key) must not be KVMReady")
 	}
 }
 
@@ -84,5 +137,16 @@ func TestParseNodePools(t *testing.T) {
 	}
 	if pools[1].Autoscaled {
 		t.Error("default-pool should not report autoscaling")
+	}
+}
+
+func TestParseClusterKVMReady(t *testing.T) {
+	ready, err := ParseClusterKVMReady([]byte(`{"nodePools":[{"config":{"machineType":"n2-standard-8","advancedMachineFeatures":{"enableNestedVirtualization":true}}}]}`))
+	if err != nil || !ready {
+		t.Fatalf("expected KVMReady=true, got ready=%v err=%v", ready, err)
+	}
+	notReady, err := ParseClusterKVMReady([]byte(`{"nodePools":[{"config":{"machineType":"c3-standard-4"}}]}`))
+	if err != nil || notReady {
+		t.Fatalf("expected KVMReady=false, got ready=%v err=%v", notReady, err)
 	}
 }

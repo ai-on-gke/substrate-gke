@@ -340,6 +340,388 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 	}
 }
 
+// The micro-VM script uploads assets and applies a cluster-scoped resource, so
+// pointing it at the wrong cluster is not a no-op. It must target the cluster
+// the wizard chose, never whatever context happens to be ambient.
+func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
+	st := testSetup(t)
+	st.ClusterName = "clu'ster $HOME"
+	st.Zone = "us-central1-a; id -u"
+
+	script := NewBuilder(fakeCheckout(t), false).InstallMicroVMDeps(st).Argv[2]
+	for _, want := range []string{
+		"gcloud container clusters get-credentials " + ShellQuote(st.ClusterName),
+		"--location " + ShellQuote(st.Zone),
+		"--project " + ShellQuote(st.ProjectID),
+		"hack/install-microvm-deps.sh --install",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+// The assets are executed by the cluster's nodes, not by the workstation
+// running the wizard, and they land in the project's GCS bucket, not in a
+// kind-local one. Both are the script's inputs rather than its defaults, so
+// an inherited ARCH or ATE_INSTALL_KIND from the operator's shell would
+// silently produce a broken install.
+func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
+	st := testSetup(t)
+	st.SandboxClass = state.SandboxMicroVM
+	st.MicroVMDeployed = true
+	b := NewBuilder(fakeCheckout(t), false)
+
+	for _, spec := range []execx.Spec{b.InstallMicroVMDeps(st), b.DeployDemo(st, "counter")} {
+		for _, want := range []string{"ARCH=amd64", "ATE_INSTALL_KIND=false"} {
+			if !slices.Contains(spec.Env, want) {
+				t.Errorf("%s: env missing %q:\n%v", spec.Label, want, spec.Env)
+			}
+		}
+	}
+}
+
+// A developer who sourced .ate-dev-env.sh has KUBECTL_CONTEXT exported, and
+// every spec inherits it. ate-setup would take it over CLUSTER_NAME — skip
+// get-credentials and install into, or delete from, whatever cluster it
+// names — and the scripts would pass it as --context into a throwaway
+// KUBECONFIG that does not have it. Every spec and pasted command that
+// reaches either must blank it, and the blank must win at exec time.
+func TestSpecsBlankAnInheritedKubectlContext(t *testing.T) {
+	t.Setenv("KUBECTL_CONTEXT", "gke_dev_some-other-cluster")
+	st := testSetup(t)
+	micro := testSetup(t)
+	micro.SandboxClass = state.SandboxMicroVM
+	micro.MicroVMDeployed = true
+	b := NewBuilder(fakeCheckout(t), false)
+
+	for _, spec := range []execx.Spec{
+		b.Bootstrap(st),
+		b.DeployAteSystem(st),
+		b.DeployDemo(st, "counter"),
+		b.DeployFilestoreCSI(st),
+		b.InstallMicroVMDeps(micro),
+		b.DeployDemo(micro, "counter"),
+	} {
+		if !slices.Contains(spec.Env, "KUBECTL_CONTEXT=") {
+			t.Errorf("%s: env does not blank KUBECTL_CONTEXT:\n%v", spec.Label, spec.Env)
+		}
+	}
+
+	// Env is layered over os.Environ(), so the blank has to be the value the
+	// child actually sees, not just an entry in the slice.
+	probe := execx.Spec{
+		Argv: []string{"bash", "-c", `printf '[%s]' "${KUBECTL_CONTEXT-unset}"`},
+		Env:  b.DeployAteSystem(st).Env,
+	}
+	var out strings.Builder
+	for ev := range (&execx.Real{}).Start(context.Background(), probe) {
+		if ev.Done && ev.Err != nil {
+			t.Fatalf("probe failed: %v", ev.Err)
+		}
+		out.WriteString(ev.Line)
+	}
+	if got := out.String(); got != "[]" {
+		t.Errorf("child saw KUBECTL_CONTEXT=%s, want it blank", got)
+	}
+
+	del := b.DeleteAteSystem("acme", "substrate-test", "us-west1-c")
+	for name, cmd := range map[string]string{
+		"teardown":          b.TeardownCommand(st, ""),
+		"explicit teardown": b.TeardownCommand(st, "/tmp/substrate"),
+		"delete":            del.Argv[len(del.Argv)-1],
+	} {
+		if !strings.Contains(cmd, "KUBECTL_CONTEXT= NO_DEV_ENV=1 go run ./cmd/ate-setup delete ate-system") {
+			t.Errorf("%s command does not blank KUBECTL_CONTEXT for ate-setup:\n%s", name, cmd)
+		}
+	}
+}
+
+func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
+	st := testSetup(t)
+	st.SandboxClass = state.SandboxMicroVM
+	b := NewBuilder(fakeCheckout(t), false)
+
+	// When MicroVM was chosen but assets were NOT staged, DeployDemo and
+	// NextSteps must fall back to the gVisor counter demo.
+	unstagedSpec := b.DeployDemo(st, "counter")
+	if !strings.Contains(unstagedSpec.Argv[2], "go run ./cmd/ate-setup deploy demo "+ShellQuote("counter")) {
+		t.Errorf("unstaged micro-VM should fall back to gVisor counter demo, got:\n%s", unstagedSpec.Argv[2])
+	}
+	_, unstagedSteps := b.NextSteps(st)
+	if !strings.Contains(strings.Join(unstagedSteps, "\n"), "-a ate-demo-counter --template-ref counter") {
+		t.Errorf("unstaged micro-VM NextSteps should target ate-demo-counter, got:\n%v", unstagedSteps)
+	}
+
+	// Once staged, DeployDemo runs the counter-microvm demo (through
+	// ate-setup where the tree has it, install-ate.sh otherwise), and
+	// NextSteps targets ate-demo-counter-microvm.
+	st.MicroVMDeployed = true
+	stagedSpec := b.DeployDemo(st, "counter")
+	for _, want := range []string{
+		"go run ./cmd/ate-setup deploy demo counter-microvm",
+		"./hack/install-ate.sh --deploy-demo-counter-microvm",
+	} {
+		if !strings.Contains(stagedSpec.Argv[2], want) {
+			t.Errorf("staged micro-VM DeployDemo missing %q:\n%s", want, stagedSpec.Argv[2])
+		}
+	}
+	_, stagedSteps := b.NextSteps(st)
+	joined := strings.Join(stagedSteps, "\n")
+	for _, want := range []string{
+		"kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template-ref counter-microvm",
+		"Host: my-counter-1.ate-demo-counter-microvm.actors.resources.substrate.ate.dev",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)
+		}
+	}
+
+	// On a pre-built install (even if ImageTag carries a digest), DeployDemo
+	// resolves a per-image digest and edits templates portably with sed -i.bak.
+	prebuilt := prebuiltSetup(t)
+	prebuilt.SandboxClass = state.SandboxMicroVM
+	prebuilt.MicroVMDeployed = true
+	prebuilt.ImageTag = "v0.1.0-gke.1@sha256:" + strings.Repeat("ab", 32)
+	prebuiltScript := b.DeployDemo(prebuilt, "counter").Argv[2]
+	for _, want := range []string{
+		"ATEOM_REF=" + ShellQuote(ReleaseRepo+"/ateom-microvm:v0.1.0-gke.1"),
+		"COUNTER_REF=" + ShellQuote(ReleaseRepo+"/counter:v0.1.0-gke.1"),
+		`ATEOM_DIGEST=$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest "${ATEOM_REF}")`,
+		`COUNTER_DIGEST=$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest "${COUNTER_REF}")`,
+		`sed -i.bak "s|ko://github.com/agent-substrate/substrate/cmd/ateom-microvm|${ATEOM_REF}@${ATEOM_DIGEST}|g"`,
+		`sed -i.bak "s|ko://github.com/agent-substrate/substrate/demos/counter|${COUNTER_REF}@${COUNTER_DIGEST}|g"`,
+		"trap 'exit 130' INT TERM",
+	} {
+		if !strings.Contains(prebuiltScript, want) {
+			t.Errorf("pre-built micro-VM DeployDemo script missing %q:\n%s", want, prebuiltScript)
+		}
+	}
+	// ImageRepo is free text; a GCR/Artifact Registry-only lookup would
+	// fail the demo for any other registry.
+	if strings.Contains(prebuiltScript, "gcloud container images describe") {
+		t.Errorf("pre-built micro-VM DeployDemo must resolve digests registry-neutrally, got:\n%s", prebuiltScript)
+	}
+	if err := exec.Command("bash", "-n", "-c", prebuiltScript).Run(); err != nil {
+		t.Errorf("pre-built micro-VM DeployDemo script is not valid shell: %v\n%s", err, prebuiltScript)
+	}
+}
+
+// The pre-built micro-VM demo rewrites two tracked templates in place. They
+// must come back from the .bak copies sed made — never `git checkout`, which
+// would discard a --substrate-root user's uncommitted edits — and a killed
+// run's leftovers must be restored before the next run edits anything, on
+// the source path too.
+func TestMicroVMDemoRestoresTemplatesFromBackups(t *testing.T) {
+	b := NewBuilder(fakeCheckout(t), false)
+	source := testSetup(t)
+	source.SandboxClass = state.SandboxMicroVM
+	source.MicroVMDeployed = true
+	prebuilt := prebuiltSetup(t)
+	prebuilt.SandboxClass = state.SandboxMicroVM
+	prebuilt.MicroVMDeployed = true
+
+	for name, st := range map[string]*state.Setup{"source": source, "pre-built": prebuilt} {
+		script := b.DeployDemo(st, "counter").Argv[2]
+		if strings.Contains(script, "git checkout") {
+			t.Errorf("%s: templates must not be restored from git:\n%s", name, script)
+		}
+		restore := strings.Index(script, "\nrestore_demo_templates\n")
+		demo := strings.Index(script, "./hack/install-ate.sh --deploy-demo-counter-microvm")
+		if restore < 0 || demo < 0 || restore > demo {
+			t.Errorf("%s: leftover templates are not restored before the demo runs:\n%s", name, script)
+		}
+		if sed := strings.Index(script, "sed -i.bak"); sed >= 0 && sed < restore {
+			t.Errorf("%s: templates are edited before leftovers are restored:\n%s", name, script)
+		}
+	}
+	prebuiltScript := b.DeployDemo(prebuilt, "counter").Argv[2]
+	if !strings.Contains(prebuiltScript, "trap restore_demo_templates EXIT") {
+		t.Errorf("pre-built: the EXIT trap does not restore from the backups:\n%s", prebuiltScript)
+	}
+	if strings.Contains(prebuiltScript, "rm -f "+demoPoolTemplate+".bak") {
+		t.Errorf("pre-built: the backups are deleted before the trap can restore from them:\n%s", prebuiltScript)
+	}
+}
+
+// Runs the restore helper and the rewrite the demo uses under real bash and
+// sed: a killed run's leftover is undone first, and a user's uncommitted edit
+// survives the rewrite-and-restore round trip.
+func TestRestoreDemoTemplatesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "demos", "counter"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pool := filepath.Join(dir, demoPoolTemplate)
+	const original = "image: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm # user edit\n"
+	// A previous run was SIGKILLed after its sed: the template carries the
+	// old digest and the .bak holds the user's file.
+	if err := os.WriteFile(pool, []byte("image: repo/ateom-microvm:old@sha256:old # user edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pool+".bak", []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := strings.Join(append(append([]string{"set -euo pipefail"}, restoreDemoTemplates...),
+		"(",
+		"  trap restore_demo_templates EXIT",
+		`  sed -i.bak "s|ko://github.com/agent-substrate/substrate/cmd/ateom-microvm|repo/ateom-microvm:new@sha256:new|g" `+demoPoolTemplate,
+		"  cp "+demoPoolTemplate+" seen",
+		")",
+	), "\n")
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+
+	if seen, _ := os.ReadFile(filepath.Join(dir, "seen")); !strings.Contains(string(seen), "sha256:new") {
+		t.Errorf("the demo saw %q, want the new digest (the leftover was not restored first)", seen)
+	}
+	if got, _ := os.ReadFile(pool); string(got) != original {
+		t.Errorf("template after the run = %q, want the user's file %q", got, original)
+	}
+	if _, err := os.Stat(pool + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("backup left behind after the run (err=%v)", err)
+	}
+}
+
+// A tree whose ate-setup has counter-microvm (upstream v0.2.0 and main)
+// deploys the micro-VM demo through it, as the gVisor demo does, so it
+// survives install-ate.sh's removal upstream; only older trees, the pinned
+// Commit among them, fall back to install-ate.sh. On a pre-built install
+// ate-setup gets the image flags and resolves digests itself, and nothing of
+// the fallback's crane/sed/ko.local rewrite reaches it.
+func TestMicroVMDemoPrefersAteSetup(t *testing.T) {
+	b := NewBuilder(fakeCheckout(t), false)
+	source := testSetup(t)
+	source.SandboxClass = state.SandboxMicroVM
+	source.MicroVMDeployed = true
+	prebuilt := prebuiltSetup(t)
+	prebuilt.SandboxClass = state.SandboxMicroVM
+	prebuilt.MicroVMDeployed = true
+	imageFlags := " --image-repo " + ShellQuote(ReleaseRepo) + " --image-tag " + ShellQuote(ReleaseVersion)
+
+	for name, tc := range map[string]struct {
+		st           *state.Setup
+		ateSetup     string
+		fallbackOnly []string
+	}{
+		"source":    {source, "go run ./cmd/ate-setup deploy demo counter-microvm\n", nil},
+		"pre-built": {prebuilt, "go run ./cmd/ate-setup deploy demo counter-microvm" + imageFlags + "\n", []string{craneDigest, "sed -i.bak", "export KO_DOCKER_REPO=ko.local"}},
+	} {
+		spec := b.DeployDemo(tc.st, "counter")
+		script := spec.Argv[2]
+		check := strings.Index(script, "if [ -d "+counterMicroVMDemoDir+" ]; then\n")
+		ateSetup := strings.Index(script, tc.ateSetup)
+		elseAt := strings.Index(script, "\nelse\n")
+		fallback := strings.Index(script, "./hack/install-ate.sh --deploy-demo-counter-microvm")
+		restore := strings.Index(script, "\nrestore_demo_templates\n")
+		if check < 0 || ateSetup < check || elseAt < ateSetup || fallback < elseAt {
+			t.Errorf("%s: want `if [ -d %s ]` → %q → else → install-ate.sh:\n%s", name, counterMicroVMDemoDir, tc.ateSetup, script)
+		}
+		if restore < 0 || restore > check {
+			t.Errorf("%s: leftover templates are not restored before either branch reads them:\n%s", name, script)
+		}
+		for _, want := range tc.fallbackOnly {
+			if at := strings.Index(script, want); at < elseAt {
+				t.Errorf("%s: %q must only run in the install-ate.sh fallback:\n%s", name, want, script)
+			}
+		}
+		if slices.Contains(spec.Env, "KO_DOCKER_REPO=ko.local") {
+			t.Errorf("%s: KO_DOCKER_REPO=ko.local is in the step env, where ate-setup sees it:\n%v", name, spec.Env)
+		}
+		// Display is fixed before the tree is inspected, so it must not
+		// name one branch as the command that runs; each branch announces
+		// itself instead.
+		if strings.HasPrefix(spec.Display, "go run") || strings.HasPrefix(spec.Display, "./hack") {
+			t.Errorf("%s: display names one branch as the command: %q", name, spec.Display)
+		}
+		if !spec.DisplayIsSummary {
+			t.Errorf("%s: the step title is not marked as a summary, so it is shown as a command", name)
+		}
+		for _, want := range []string{
+			"then\n  echo 'Deploying with: go run ./cmd/ate-setup deploy demo counter-microvm'\n",
+			"else\n  echo 'Deploying with: hack/install-ate.sh --deploy-demo-counter-microvm'\n",
+		} {
+			if !strings.Contains(script, want) {
+				t.Errorf("%s: script does not announce its branch with %q:\n%s", name, want, script)
+			}
+		}
+		if err := exec.Command("bash", "-n", "-c", script).Run(); err != nil {
+			t.Errorf("%s: script is not valid shell: %v\n%s", name, err, script)
+		}
+	}
+}
+
+// Runs the branch the micro-VM demo takes under real bash, with go and
+// install-ate.sh stubbed, in a tree with and without ate-setup's
+// counter-microvm demo.
+func TestMicroVMDemoBranchesOnTheTree(t *testing.T) {
+	b := NewBuilder(fakeCheckout(t), false)
+	source := testSetup(t)
+	source.SandboxClass = state.SandboxMicroVM
+	source.MicroVMDeployed = true
+	prebuilt := prebuiltSetup(t)
+	prebuilt.SandboxClass = state.SandboxMicroVM
+	prebuilt.MicroVMDeployed = true
+
+	const viaAteSetup = "Deploying with: go run ./cmd/ate-setup deploy demo counter-microvm"
+	const viaInstallAte = "Deploying with: hack/install-ate.sh --deploy-demo-counter-microvm"
+	for _, tc := range []struct {
+		name     string
+		st       *state.Setup
+		hasDemo  bool
+		want     string
+		announce string
+	}{
+		{"source, new tree", source, true, "go run ./cmd/ate-setup deploy demo counter-microvm KO=unset", viaAteSetup},
+		{"source, old tree", source, false, "install-ate.sh --deploy-demo-counter-microvm", viaInstallAte},
+		{"pre-built, new tree", prebuilt, true, "go run ./cmd/ate-setup deploy demo counter-microvm --image-repo " + ReleaseRepo + " --image-tag " + ReleaseVersion + " KO=unset", viaAteSetup},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			for path, body := range map[string]string{
+				filepath.Join(bin, "go"):                     `echo "go $* KO=${KO_DOCKER_REPO-unset}" >> calls`,
+				filepath.Join(dir, "hack", "install-ate.sh"): `echo "install-ate.sh $*" >> calls`,
+			} {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.hasDemo {
+				if err := os.MkdirAll(filepath.Join(dir, counterMicroVMDemoDir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Everything from the restore helper on: the fetch and the
+			// get-credentials before it need a network.
+			script := b.DeployDemo(tc.st, "counter").Argv[2]
+			script = "set -euo pipefail\n" + script[strings.Index(script, "restore_demo_templates() {"):]
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + dir}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("script failed: %v\n%s", err, out)
+			}
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			if got := strings.TrimSpace(string(calls)); got != tc.want {
+				t.Errorf("ran %q, want %q", got, tc.want)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.announce {
+				t.Errorf("printed %q, want %q", got, tc.announce)
+			}
+		})
+	}
+}
+
 // inTree splices its argument into a bash script, so every value a caller
 // puts in that argument has to be quoted. Today's only demo name is a
 // literal; this keeps the seam closed if one ever comes from the user.
@@ -596,8 +978,8 @@ func TestDeploySpecs(t *testing.T) {
 		t.Errorf("demo argv = %v", demo.Argv)
 	}
 	// Display is for the user to read, not for a shell to run.
-	if demo.Display != "go run ./cmd/ate-setup deploy demo counter" {
-		t.Errorf("demo display = %q", demo.Display)
+	if demo.Display != "go run ./cmd/ate-setup deploy demo counter" || demo.DisplayIsSummary {
+		t.Errorf("demo display = %q (summary %v), want the command itself", demo.Display, demo.DisplayIsSummary)
 	}
 
 	st.AutoscaleMin, st.AutoscaleMax = 2, 9
