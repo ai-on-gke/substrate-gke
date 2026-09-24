@@ -147,7 +147,7 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 // does not exist.
 func TestSummaryRecapsTheDemoNextSteps(t *testing.T) {
 	builder := snapshot.NewBuilder(t.TempDir(), true)
-	portForward, demo := builder.NextSteps()
+	portForward, demo := builder.NextSteps(nil)
 
 	st := state.NewSetup()
 	st.DemoDeployed = true

@@ -308,6 +308,9 @@ func (b *Builder) TeardownCommand(st *state.Setup, root string) string {
 	env := fmt.Sprintf("PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s NO_DEV_ENV=1",
 		ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone))
 	del := env + " go run ./cmd/ate-setup delete ate-system"
+	if st != nil && st.MicroVM() && st.MicroVMDeployed {
+		del = "hack/install-microvm-deps.sh --delete && " + del
+	}
 	if root != "" {
 		return fmt.Sprintf("(cd %s && %s)", ShellQuote(root), del)
 	}
@@ -328,9 +331,12 @@ func (b *Builder) TeardownCommand(st *state.Setup, root string) string {
 func (b *Builder) DeleteAteSystem(projectID, cluster, location string) execx.Spec {
 	env := fmt.Sprintf("PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s NO_DEV_ENV=1",
 		ShellQuote(projectID), ShellQuote(cluster), ShellQuote(location))
-	lines := []string{env + " go run ./cmd/ate-setup delete ate-system"}
-	lines = append(lines, credentialLines(projectID, cluster, location)...)
-	lines = append(lines, "kubectl wait --for=delete namespace/ate-system --timeout=180s")
+	lines := credentialLines(projectID, cluster, location)
+	lines = append(lines,
+		"hack/install-microvm-deps.sh --delete",
+		env+" go run ./cmd/ate-setup delete ate-system",
+		"kubectl wait --for=delete namespace/ate-system --timeout=180s",
+	)
 	return execx.Spec{
 		Label:   "ate-setup delete ate-system",
 		Display: "go run ./cmd/ate-setup delete ate-system && kubectl wait --for=delete namespace/ate-system",
@@ -359,16 +365,33 @@ func (b *Builder) KubectlAteInstall() string {
 // A managed checkout is removed once the install succeeds, so its steps
 // cannot ask the user to run anything inside it — they get the
 // self-contained kubectl-ate install instead.
-func (b *Builder) NextSteps() (portForward string, demo []string) {
+//
+// These strings are coupled to Commit: the demo names come from the counter
+// demo's registration, and the flag spelling from kubectl-ate, both at that
+// revision. Upstream has since renamed --template-ref to --template and
+// taught it to parse "<atespace>/<name>", so bumping Commit past that change
+// must update this function too. Nothing here is executed by the wizard, so
+// no test will catch the drift — the user is the one who runs it.
+func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string) {
+	// The atespace and ActorTemplate the counter demo creates. Both `ate-setup
+	// deploy demo counter` and `hack/install-ate.sh --deploy-demo-counter-microvm`
+	// already create the atespace, so the tour does not need a `kubectl ate
+	// create atespace` step.
+	demoAtespace := "ate-demo-counter"
+	demoTemplate := "counter"
+	if st != nil && st.MicroVM() && st.MicroVMDeployed {
+		demoAtespace = "ate-demo-counter-microvm"
+		demoTemplate = "counter-microvm"
+	}
+
 	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
 	if b.Managed {
 		installAte = b.KubectlAteInstall()
 	}
 	return "kubectl port-forward -n ate-system svc/atenet-router 8000:80", []string{
 		installAte,
-		"kubectl ate create atespace demo",
-		"kubectl ate create actor my-counter-1 -a demo --template=ate-demo-counter/counter",
-		`curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" http://localhost:8000/`,
+		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template-ref " + demoTemplate,
+		`curl -X POST -H "Host: my-counter-1.` + demoAtespace + `.actors.resources.substrate.ate.dev" http://localhost:8000/`,
 	}
 }
 
@@ -464,10 +487,15 @@ func (b *Builder) env(st *state.Setup) []string {
 	}
 	return append(env,
 		"KO_DOCKER_REPO="+st.KoDockerRepo,
-		"KO_DEFAULTPLATFORMS=linux/amd64",
+		"KO_DEFAULTPLATFORMS="+targetPlatform,
 		"VERSION="+b.Version,
 	)
 }
+
+const (
+	targetArch     = "amd64"
+	targetPlatform = "linux/" + targetArch
+)
 
 // imageVersion is the Substrate version a pre-built image tag names. A tag may
 // carry the digest it resolved to (v0.1.0@sha256:...); the version is the tag
@@ -667,10 +695,45 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 }
 
 // DeployDemo deploys one of the upstream demo applications (for the wizard,
-// the counter demo). name is quoted like every other value inTree splices
-// into a script: the only caller passes a literal today, but a demo name
-// picked from a list or typed in would otherwise reach bash as source.
+// the counter demo). When the Micro-VM sandbox runtime is selected and staged,
+// it uses hack/install-ate.sh --deploy-demo-counter-microvm (the demo step
+// from hack/run-microvm-demo.sh) until cmd/ate-setup ports counter-microvm.
 func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
+	if st != nil && st.MicroVM() && st.MicroVMDeployed {
+		lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
+		env := b.microVMEnv(st)
+		if st.Prebuilt() {
+			// On a pre-built install, substitute the already-published
+			// ateom-microvm and counter images into the demo templates inside a
+			// subshell so ko resolve/apply passes them through without building
+			// or pushing anything.
+			ateomImg := ShellQuote(st.ImageRepo + "/ateom-microvm:" + st.ImageTag)
+			counterImg := ShellQuote(st.ImageRepo + "/counter:" + st.ImageTag)
+			lines = append(lines,
+				"(",
+				"  trap 'git checkout -- demos/counter/counter-microvm.yaml.tmpl demos/counter/counter-microvm-template.yaml.tmpl' EXIT",
+				`  sed -i "s|ko://github.com/agent-substrate/substrate/cmd/ateom-microvm|"`+ateomImg+`"|g" demos/counter/counter-microvm.yaml.tmpl`,
+				`  sed -i "s|ko://github.com/agent-substrate/substrate/demos/counter|"`+counterImg+`"|g" demos/counter/counter-microvm-template.yaml.tmpl`,
+				"  ./hack/install-ate.sh --deploy-demo-counter-microvm",
+				")",
+			)
+			env = append(env, "KO_DOCKER_REPO=ko.local")
+		} else {
+			lines = append(lines, "./hack/install-ate.sh --deploy-demo-counter-microvm")
+		}
+		env = append(env, "SUBSTRATE_VERSION="+b.SubstrateVersion(st))
+		return execx.Spec{
+			Label:   "install-ate.sh --deploy-demo-counter-microvm",
+			Display: "./hack/install-ate.sh --deploy-demo-counter-microvm",
+			Argv:    b.inTree(strings.Join(lines, "\n")),
+			Env:     env,
+			SimLines: append(b.fetchSimLines(),
+				"[step]: deploy_demo_counter_microvm",
+				"workerpool.ate.dev/counter-microvm created",
+				"actortemplate.ate.dev/counter-microvm created",
+			),
+		}
+	}
 	display, argv := imageArgs(st)
 	return execx.Spec{
 		Label:   "ate-setup deploy demo " + name,
@@ -681,6 +744,64 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 			"[step]: deploy_demo_"+name,
 			"workerpool.ate.dev/ate-demo-"+name+" created",
 			"actortemplate.ate.dev/"+name+" created",
+		),
+	}
+}
+
+// microVMEnv is env plus the two settings upstream's micro-VM script reads
+// that no other step needs.
+//
+// ARCH is pinned rather than left to the script's own resolution, which reads
+// KO_DEFAULTPLATFORMS and falls back to the workstation's `go env GOARCH`.
+// env only sets KO_DEFAULTPLATFORMS when the install builds from source, so a
+// pre-built install leaves the script on that fallback — and the assets are
+// executed by the cluster's nodes, not by the workstation. From an arm64
+// laptop that stages arm64 binaries into the bucket, and the failure surfaces
+// much later, as a cold boot that cannot exec them.
+//
+// ATE_INSTALL_KIND=false selects the GCS staging path over the in-cluster
+// rustfs one. It is already the script's default; naming it here keeps a
+// developer's exported value from redirecting a GKE install's assets into a
+// kind bucket that does not exist.
+func (b *Builder) microVMEnv(st *state.Setup) []string {
+	return append(b.env(st), "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
+}
+
+// InstallMicroVMDeps stages the micro-VM sandbox assets and applies the
+// cluster-wide `microvm` SandboxConfig, using upstream's
+// hack/install-microvm-deps.sh from the pinned checkout.
+//
+// This is a separate step because upstream makes it one: ate-setup applies the
+// gVisor SandboxConfig unconditionally, but the micro-VM one is opt-in and
+// needs its five sandbox binaries — cloud-hypervisor, virtiofsd, the guest
+// kernel, the guest rootfs and the base kata config — assembled and uploaded
+// under kata-assets/ first, because the runtime fetches them from the bucket
+// at boot rather than carrying them in the worker image.
+//
+// The script is driven rather than reimplemented in Go: it computes the staged
+// virtiofsd's sha256 and injects it into the manifest at apply time, which
+// cannot be pinned ahead of time because the arm64 binary is built from source
+// and its bytes vary by toolchain.
+//
+// Credentials are fetched into a throwaway KUBECONFIG the same way the probes
+// do. The script refuses to run without a resolvable context — deliberately,
+// since it would otherwise discover the problem only after assembling and
+// uploading everything — and an install must target the cluster the wizard
+// chose, never whatever context happens to be ambient.
+func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
+	lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
+	lines = append(lines, "hack/install-microvm-deps.sh --install")
+	return execx.Spec{
+		Label:   "install-microvm-deps --install",
+		Display: "./hack/install-microvm-deps.sh --install",
+		Argv:    b.inTree(strings.Join(lines, "\n")),
+		Env:     b.microVMEnv(st),
+		SimLines: append(b.fetchSimLines(),
+			"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
+			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"/kata-assets/ ...",
+			"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
+			"sandboxconfig.ate.dev/microvm created",
+			"[install-microvm-deps]: Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm).",
 		),
 	}
 }

@@ -107,6 +107,35 @@ func TestFilestoreCSIChecklistTracksDeployOutput(t *testing.T) {
 	}
 }
 
+func TestMicroVMDepsChecklistTracksInstallOutput(t *testing.T) {
+	items := MicroVMDeps()
+	lines := []string{
+		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
+		"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
+		"[install-microvm-deps]: Uploading assets to gs://ate-snapshots-p-c-z/kata-assets/ ...",
+		"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
+	}
+	for i := range lines {
+		if got := feed(items, lines[:i+1]); got != i {
+			t.Fatalf("after %d lines active = %d, want %d", i+1, got, i)
+		}
+	}
+}
+
+// A second install finds the asset set already built and says so instead of
+// assembling. The row has to light either way: it is the step's slowest phase,
+// and an unlit row on the fast path reads as a stall.
+func TestMicroVMDepsChecklistTracksCachedAssets(t *testing.T) {
+	items := MicroVMDeps()
+	lines := []string{
+		snapshot.CachedLine + snapshot.ShortCommit(),
+		"[install-microvm-deps]: Assets already present in bin/microvm-assets/amd64; skipping assemble.",
+	}
+	if got := feed(items, lines); got != 1 {
+		t.Fatalf("active = %d, want 1 (assemble phase satisfied by the skip)", got)
+	}
+}
+
 func TestFilestoreCSIChecklistTracksDeployOutputWithoutAddonDisable(t *testing.T) {
 	items := FilestoreCSI()
 	lines := []string{

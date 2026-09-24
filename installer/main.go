@@ -221,7 +221,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// install leaves a written copy behind.
 	if st.DemoDeployed {
 		section("Next steps — try the counter demo")
-		portForward, demo := b.NextSteps()
+		portForward, demo := b.NextSteps(st)
 		command(portForward)
 		for _, cmd := range demo {
 			command(cmd)
