@@ -77,3 +77,19 @@ substrate-pin-check:
 		echo "substrate-pin-check: MinGoVersion is $$pinned but substrate@$$commit needs go $$upstream" >&2; exit 1; \
 	fi; \
 	echo "substrate-pin-check: MinGoVersion $$pinned matches substrate@$$commit"
+
+KATA_VER ?= $(shell tr -d '[:space:]' < tools/microvm-assets/KATA_VERSION)
+ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+GCS_BUCKET ?=
+
+# Build and shrink Kata microVM assets (kata-agent.slim + rootfs.img) locally.
+.PHONY: microvm-assets-build
+microvm-assets-build:
+	KATA_VER="$(KATA_VER)" ARCH="$(ARCH)" PUSH=false ./tools/microvm-assets/build-and-push.sh
+
+# Build, shrink, and upload Kata microVM assets to a private GCS bucket (requires GCS_BUCKET=gs://...).
+.PHONY: microvm-assets-push
+microvm-assets-push:
+	KATA_VER="$(KATA_VER)" ARCH="$(ARCH)" GCS_BUCKET="$(GCS_BUCKET)" PUSH=true ./tools/microvm-assets/build-and-push.sh
+
+
