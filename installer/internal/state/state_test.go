@@ -56,7 +56,7 @@ func TestStepNumbering(t *testing.T) {
 			t.Errorf("%v should not be numbered", s)
 		}
 	}
-	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, FilestoreCSI: 7} {
+	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, FilestoreCSI: 7, Autoscaling: 8, Sandbox: 9} {
 		if n, ok := m.Position(step); !ok || n != want {
 			t.Errorf("Position(%v) = %d/%v, want %d/true", step, n, ok, want)
 		}
@@ -84,6 +84,32 @@ func TestNewSetupDefaults(t *testing.T) {
 	s := NewSetup()
 	if s.ClusterName != "substrate-test" {
 		t.Errorf("ClusterName = %q, want substrate-test", s.ClusterName)
+	}
+}
+
+// MicroVMActive is the outcome, not the choice: micro-VM chosen but not
+// staged (skipped or failed) and staged-then-switched-back both read false.
+func TestMicroVMActive(t *testing.T) {
+	var nilSetup *Setup
+	if nilSetup.MicroVMActive() {
+		t.Error("nil Setup: MicroVMActive = true, want false")
+	}
+	for _, tc := range []struct {
+		class  string
+		staged bool
+		want   bool
+	}{
+		{"", false, false},
+		{"", true, false},
+		{SandboxGVisor, false, false},
+		{SandboxGVisor, true, false},
+		{SandboxMicroVM, false, false},
+		{SandboxMicroVM, true, true},
+	} {
+		s := &Setup{SandboxClass: tc.class, MicroVMDeployed: tc.staged}
+		if got := s.MicroVMActive(); got != tc.want {
+			t.Errorf("class=%q staged=%v: MicroVMActive = %v, want %v", tc.class, tc.staged, got, tc.want)
+		}
 	}
 }
 

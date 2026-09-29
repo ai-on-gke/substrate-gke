@@ -97,6 +97,35 @@ func TestChecksIncludeTheFatalSet(t *testing.T) {
 	if fatal["snapshot"] {
 		t.Error(`check "snapshot" must not be fatal; it self-heals by fetching`)
 	}
+	// Micro-VM is opt-in, so missing host tools for it must warn rather than block.
+	if fatal["microvm-tools"] {
+		t.Error(`check "microvm-tools" must not be fatal; gVisor installs do not use them`)
+	}
+}
+
+func TestMicroVMToolsCheckWarnsWhenMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	for _, c := range Checks(t.TempDir(), true) {
+		if c.Key != "microvm-tools" {
+			continue
+		}
+		got := c.Run(context.Background())
+		if got.Status != Warn {
+			t.Fatalf("expected Warn on empty PATH, got %+v", got)
+		}
+		for _, tool := range []string{"sha256sum", "zstd", "unzip", "jq", "make"} {
+			if !strings.Contains(got.Detail, tool) {
+				t.Errorf("expected %q in the missing list, got %q", tool, got.Detail)
+			}
+		}
+		// Homebrew's coreutils is g-prefixed; without gnubin on PATH the
+		// remedy would leave sha256sum missing on macOS.
+		if !strings.Contains(got.Fix, "libexec/gnubin") {
+			t.Errorf("macOS remedy does not put coreutils' gnubin on PATH: %q", got.Fix)
+		}
+		return
+	}
+	t.Fatal(`no "microvm-tools" check found`)
 }
 
 // With --substrate-root the fetch preamble is a bare `cd`, so a git-less host

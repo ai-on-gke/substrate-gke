@@ -147,7 +147,7 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 // does not exist.
 func TestSummaryRecapsTheDemoNextSteps(t *testing.T) {
 	builder := snapshot.NewBuilder(t.TempDir(), true)
-	portForward, demo := builder.NextSteps()
+	portForward, demo := builder.NextSteps(nil)
 
 	st := state.NewSetup()
 	st.DemoDeployed = true
@@ -165,6 +165,24 @@ func TestSummaryRecapsTheDemoNextSteps(t *testing.T) {
 	})
 	if strings.Contains(out, "Next steps") {
 		t.Errorf("summary recaps demo steps for an install that skipped the demo:\n%s", out)
+	}
+
+	microvm := state.NewSetup()
+	microvm.SandboxClass = state.SandboxMicroVM
+	microvm.MicroVMDeployed = true
+	microvm.DemoDeployed = true
+	out = captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: microvm, Builder: builder}, true)
+	})
+	for _, want := range []string{
+		"sandbox    micro-VM  · assets staged, SandboxConfig applied",
+		"demo       counter-microvm demo deployed — next steps recapped below",
+		"Next steps — try the counter-microvm demo",
+		"--template-ref counter-microvm",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("micro-VM summary missing %q:\n%s", want, out)
+		}
 	}
 }
 

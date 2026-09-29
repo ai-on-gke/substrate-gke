@@ -162,9 +162,16 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.Autoscaling {
 		t.Fatalf("after filestore: %v", app.mach.Current())
 	}
-	press("s") // skip autoscaling → demo
-	if app.mach.Current() != state.Demo {
+	press("s") // skip autoscaling → sandbox runtime
+	if app.mach.Current() != state.Sandbox {
 		t.Fatalf("after autoscaling: %v", app.mach.Current())
+	}
+	press("enter") // gVisor is the default choice → demo
+	if app.mach.Current() != state.Demo {
+		t.Fatalf("after sandbox: %v", app.mach.Current())
+	}
+	if app.deps.Setup.SandboxClass != state.SandboxGVisor {
+		t.Fatalf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxGVisor)
 	}
 	press("2", "enter") // skip the demo
 	if app.mach.Current() != state.Complete {
@@ -214,7 +221,14 @@ func TestCreateNewClusterPath(t *testing.T) {
 	if !app.deps.Setup.FilestoreCSIDeployed {
 		t.Fatal("FilestoreCSIDeployed not set")
 	}
-	press("s")          // skip autoscaling
+	press("s") // skip autoscaling → sandbox runtime
+	if app.mach.Current() != state.Sandbox {
+		t.Fatalf("after autoscaling: %v", app.mach.Current())
+	}
+	press("enter") // gVisor is the default choice → demo
+	if app.mach.Current() != state.Demo {
+		t.Fatalf("after sandbox: %v", app.mach.Current())
+	}
 	press("1", "enter") // deploy the counter demo (dry-run)
 	press("enter")      // demo finished → complete
 	if app.mach.Current() != state.Complete {
@@ -1470,5 +1484,407 @@ func TestClampHeightPreservesFailure(t *testing.T) {
 	// The plain clamp keeps the top and never re-anchors on output content.
 	if plain := clampHeight(content, 3); !strings.HasPrefix(plain, "Header") {
 		t.Errorf("clampHeight no longer keeps the top:\n%s", plain)
+	}
+}
+
+// TestSandboxSummary pins the three states the completion screen can report.
+// The third exists because choosing micro-VM and staging its assets are
+// separate steps: an install can name the runtime without having set it up.
+func TestSandboxSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		class string
+		done  bool
+		want  string
+	}{
+		{"default is gvisor", "", false, "gVisor"},
+		{"explicit gvisor", state.SandboxGVisor, false, "gVisor"},
+		{"microvm staged", state.SandboxMicroVM, true, "assets staged"},
+		{"microvm not staged", state.SandboxMicroVM, false, "were not staged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &state.Setup{SandboxClass: tc.class, MicroVMDeployed: tc.done}
+			if got := SandboxSummary(st); !strings.Contains(got, tc.want) {
+				t.Errorf("SandboxSummary() = %q, want it to mention %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDemoSummary checks the summary text for gVisor and micro-VM demo deploys.
+func TestDemoSummary(t *testing.T) {
+	if got := DemoSummary(&state.Setup{}); got != "skipped" {
+		t.Errorf("no demo: got %q, want %q", got, "skipped")
+	}
+	if got := DemoSummary(&state.Setup{DemoDeployed: true}); got != "counter demo deployed" {
+		t.Errorf("gvisor demo: got %q", got)
+	}
+	if got := DemoSummary(&state.Setup{DemoDeployed: true, SandboxClass: state.SandboxMicroVM, MicroVMDeployed: false}); got != "counter demo deployed" {
+		t.Errorf("unstaged microvm demo should report counter demo deployed, got %q", got)
+	}
+	got := DemoSummary(&state.Setup{DemoDeployed: true, SandboxClass: state.SandboxMicroVM, MicroVMDeployed: true})
+	if got != "counter-microvm demo deployed" {
+		t.Errorf("microvm install: got %q, want %q", got, "counter-microvm demo deployed")
+	}
+}
+
+// TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo verifies that the
+// sandbox step (Choose your sandbox runtime) reflects the selected cluster's
+// KVM status, stages the micro-VM assets when option 2 is picked, and that
+// the demo step after it deploys the counter-microvm demo.
+func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+
+	// Pick row 1 (substrate-poc, which is KVMReady).
+	press("1", "enter")
+	if !app.deps.Setup.ClusterKVMReady {
+		t.Fatal("ClusterKVMReady must be true for substrate-poc")
+	}
+	press("enter", "enter") // provision -> control plane -> filestore CSI
+	press("s", "s")         // skip filestore CSI and autoscaling -> sandbox
+	if app.mach.Current() != state.Sandbox {
+		t.Fatalf("expected Sandbox step right after Autoscaling, got %v", app.mach.Current())
+	}
+	if view := app.View(); !strings.Contains(view, "has a KVM-capable node pool") {
+		t.Errorf("sandbox view should confirm substrate-poc has KVM:\n%s", view)
+	}
+	press("2", "enter") // choose Micro-VM and stage assets
+	press("enter")      // continue from Sandbox -> Demo
+	if app.mach.Current() != state.Demo {
+		t.Fatalf("expected Demo step after Sandbox, got %v", app.mach.Current())
+	}
+	if !app.deps.Setup.MicroVM() || !app.deps.Setup.MicroVMDeployed {
+		t.Fatalf("expected MicroVM and MicroVMDeployed to be set: %+v", app.deps.Setup)
+	}
+	press("1", "enter", "enter") // deploy counter-microvm demo -> Complete
+	if app.mach.Current() != state.Complete {
+		t.Fatalf("expected Complete step, got %v", app.mach.Current())
+	}
+	if view := app.View(); !strings.Contains(view, "counter-microvm") {
+		t.Errorf("Complete view should mention counter-microvm:\n%s", view)
+	}
+}
+
+func TestSandboxStepSkipFailureAndNoKVMConfirmation(t *testing.T) {
+	jumpToSandbox := func(app *App) {
+		pump(t, app, tea.WindowSizeMsg{Width: 100, Height: 35})
+		for app.mach.Current() != state.Sandbox {
+			app.mach.Next()
+		}
+		app.cur = app.screenFor(state.Sandbox)
+	}
+
+	t.Run("non-KVM cluster requires y confirmation or n cancels", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterName = "no-kvm-cluster"
+		app.deps.Setup.ClusterKVMReady = false
+		jumpToSandbox(app)
+
+		// Pressing 2 then enter should NOT start staging yet; it asks for [y]/[n].
+		pump(t, app, key("2"))
+		pump(t, app, key("enter"))
+		if view := app.View(); !strings.Contains(view, "Press [y] to stage anyway") {
+			t.Fatalf("expected confirmation prompt on non-KVM cluster, got:\n%s", view)
+		}
+		if app.deps.Setup.MicroVMDeployed {
+			t.Fatal("staging should not have started before pressing y")
+		}
+
+		// Pressing n cancels and resets cursor to gVisor.
+		pump(t, app, key("n"))
+		if strings.Contains(app.View(), "Press [y] to stage anyway") {
+			t.Fatal("confirmation prompt should be dismissed after pressing n")
+		}
+
+		// Pressing 2 -> enter -> y stages the assets and sets MicroVMDeployed immediately.
+		pump(t, app, key("2"))
+		pump(t, app, key("enter"))
+		pump(t, app, key("y"))
+		if !app.deps.Setup.MicroVM() || !app.deps.Setup.MicroVMDeployed {
+			t.Fatalf("expected MicroVMDeployed=true as soon as staging finishes, got %+v", app.deps.Setup)
+		}
+	})
+
+	t.Run("/skip before staging resets SandboxClass to gVisor", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.SandboxClass = state.SandboxMicroVM
+		app.deps.Setup.MicroVMDeployed = false
+		jumpToSandbox(app)
+
+		for _, ch := range "/skip" {
+			pump(t, app, key(string(ch)))
+		}
+		pump(t, app, key("enter"))
+		if app.mach.Current() != state.Demo {
+			t.Fatalf("expected Demo step after /skip, got %v", app.mach.Current())
+		}
+		if app.deps.Setup.SandboxClass != state.SandboxGVisor {
+			t.Errorf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxGVisor)
+		}
+	})
+
+	t.Run("failed stage then s resets SandboxClass to gVisor", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = true
+		jumpToSandbox(app)
+
+		scr := app.cur.(*sandboxScreen)
+		app.deps.Setup.SandboxClass = state.SandboxMicroVM
+		scr.comp = &execComp{failed: fmt.Errorf("staging failed")}
+
+		pump(t, app, key("s"))
+		if app.mach.Current() != state.Demo {
+			t.Fatalf("expected Demo step after pressing s on failed stage, got %v", app.mach.Current())
+		}
+		if app.deps.Setup.SandboxClass != state.SandboxGVisor {
+			t.Errorf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxGVisor)
+		}
+	})
+
+	t.Run("/skip while staging is running is refused", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = true
+		jumpToSandbox(app)
+
+		scr := app.cur.(*sandboxScreen)
+		app.deps.Setup.SandboxClass = state.SandboxMicroVM
+		scr.comp = &execComp{started: true, finished: false}
+
+		for _, ch := range "/skip" {
+			pump(t, app, key(string(ch)))
+		}
+		pump(t, app, key("enter"))
+		if app.mach.Current() != state.Sandbox {
+			t.Fatalf("expected /skip to be refused while staging is running, got step %v", app.mach.Current())
+		}
+		if app.deps.Setup.SandboxClass != state.SandboxMicroVM {
+			t.Errorf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxMicroVM)
+		}
+	})
+
+	t.Run("choosing gVisor after staging preserves MicroVMDeployed", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = true
+		app.deps.Setup.SandboxClass = state.SandboxMicroVM
+		app.deps.Setup.MicroVMDeployed = true
+		jumpToSandbox(app)
+
+		pump(t, app, key("1"))
+		pump(t, app, key("enter"))
+		if app.mach.Current() != state.Demo {
+			t.Fatalf("expected Demo step after choosing gVisor, got %v", app.mach.Current())
+		}
+		if app.deps.Setup.SandboxClass != state.SandboxGVisor {
+			t.Errorf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxGVisor)
+		}
+		if !app.deps.Setup.MicroVMDeployed {
+			t.Error("MicroVMDeployed should stay true when switching back to gVisor after staging")
+		}
+	})
+
+	t.Run("KVM probe error surfaces in view", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = false
+		jumpToSandbox(app)
+
+		pump(t, app, clusterKVMMsg{cluster: app.deps.Setup.ClusterName, err: fmt.Errorf("context deadline exceeded")})
+		view := app.View()
+		if !strings.Contains(view, "could not check whether cluster") || !strings.Contains(view, "context deadline exceeded") {
+			t.Errorf("expected KVM probe error in view, got:\n%s", view)
+		}
+	})
+
+	// pendingSandbox puts the app on a Sandbox screen whose Init started a
+	// real probe. The probe command itself is never run, so its answer is
+	// whatever the test pumps.
+	pendingSandbox := func(t *testing.T, app *App) *sandboxScreen {
+		t.Helper()
+		app.deps.GCP = &gcp.Client{}
+		jumpToSandbox(app)
+		scr := app.cur.(*sandboxScreen)
+		if scr.Init() == nil {
+			t.Fatal("a live GCP client should start the KVM probe")
+		}
+		if !scr.kvmPending {
+			t.Fatal("Init started the probe but did not mark it pending")
+		}
+		return scr
+	}
+	answer := func(app *App, ready bool, err error) tea.Msg {
+		return clusterKVMMsg{cluster: app.deps.Setup.ClusterName, ready: ready, err: err}
+	}
+	hasHint := func(scr *sandboxScreen, k string) bool {
+		for _, h := range scr.Hints() {
+			if h.Key == k {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("dry run starts no probe and is not pending", func(t *testing.T) {
+		app := testApp(t)
+		scr := newSandboxScreen(app.deps)
+		if scr.Init() != nil || scr.kvmPending {
+			t.Fatalf("dry-run GCP client should not probe: pending=%v", scr.kvmPending)
+		}
+	})
+
+	t.Run("pending probe shows checking and holds Micro-VM until it answers", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = false
+		scr := pendingSandbox(t, app)
+
+		view := app.View()
+		if !strings.Contains(view, "Checking whether cluster") || strings.Contains(view, "no KVM-capable node pool yet") {
+			t.Errorf("expected checking note while the probe is pending, got:\n%s", view)
+		}
+
+		// enter on Micro-VM neither stages nor claims the cluster has no KVM.
+		pump(t, app, key("2"))
+		pump(t, app, key("enter"))
+		if scr.confirmingNoKVM || scr.comp != nil || app.mach.Current() != state.Sandbox {
+			t.Fatalf("enter while checking should wait: confirming=%v staging=%v step=%v",
+				scr.confirmingNoKVM, scr.comp != nil, app.mach.Current())
+		}
+		if hasHint(scr, "enter") {
+			t.Errorf("hints offer enter while Micro-VM cannot be confirmed: %v", scr.Hints())
+		}
+		if view := app.View(); !strings.Contains(view, "Wait for the check to finish before selecting Micro-VM") {
+			t.Errorf("expected the view to say why enter waits, got:\n%s", view)
+		}
+
+		pump(t, app, answer(app, false, nil))
+		if view := app.View(); !strings.Contains(view, "no KVM-capable node pool yet") {
+			t.Errorf("expected no-KVM warning once the probe answers, got:\n%s", view)
+		}
+		pump(t, app, key("enter"))
+		if !scr.confirmingNoKVM {
+			t.Fatal("expected the no-KVM confirmation once the probe says not ready")
+		}
+	})
+
+	t.Run("probe answering ready lets enter stage", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = false
+		pendingSandbox(t, app)
+
+		pump(t, app, key("2"))
+		pump(t, app, key("enter")) // waits
+		pump(t, app, answer(app, true, nil))
+		pump(t, app, key("enter"))
+		if !app.deps.Setup.MicroVMActive() {
+			t.Fatalf("expected enter to stage Micro-VM on a KVM-ready cluster, got %+v", app.deps.Setup)
+		}
+	})
+
+	t.Run("probe error falls back to the confirmation", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = false
+		scr := pendingSandbox(t, app)
+
+		pump(t, app, key("2"))
+		pump(t, app, answer(app, false, fmt.Errorf("context deadline exceeded")))
+		pump(t, app, key("enter"))
+		if !scr.confirmingNoKVM {
+			t.Fatal("an unanswerable probe should still ask before staging")
+		}
+		// Nothing was verified, so the prompt must not claim workers will
+		// stay Pending.
+		view := app.View()
+		if !strings.Contains(view, "Could not verify a KVM-capable node pool") || !strings.Contains(view, "Press [y] to stage anyway") {
+			t.Errorf("expected a conditional stage-anyway prompt after a failed probe, got:\n%s", view)
+		}
+		if strings.Contains(view, "workers will stay Pending on this cluster") {
+			t.Errorf("prompt asserts an outcome the failed probe could not check:\n%s", view)
+		}
+	})
+
+	t.Run("cluster already known KVM-ready does not wait for the probe", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = true
+		pendingSandbox(t, app)
+
+		pump(t, app, key("2"))
+		pump(t, app, key("enter"))
+		if !app.deps.Setup.MicroVMActive() {
+			t.Fatalf("expected staging without waiting on a known KVM-ready cluster, got %+v", app.deps.Setup)
+		}
+	})
+
+	t.Run("probe answer for another cluster is ignored", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = false
+		scr := pendingSandbox(t, app)
+
+		pump(t, app, clusterKVMMsg{cluster: "some-other-cluster", ready: true})
+		if !scr.kvmPending || app.deps.Setup.ClusterKVMReady {
+			t.Fatalf("stale answer applied: pending=%v ready=%v", scr.kvmPending, app.deps.Setup.ClusterKVMReady)
+		}
+	})
+
+	t.Run("KVM-ready answer clears an outstanding confirmation", func(t *testing.T) {
+		// A revisit can leave a second probe in flight after the first
+		// answered not-ready and the user was asked to confirm.
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = false
+		jumpToSandbox(app)
+		scr := app.cur.(*sandboxScreen)
+
+		pump(t, app, key("2"))
+		pump(t, app, key("enter"))
+		if !scr.confirmingNoKVM {
+			t.Fatal("expected the no-KVM confirmation")
+		}
+		pump(t, app, answer(app, true, nil))
+		if scr.confirmingNoKVM || hasHint(scr, "y") {
+			t.Fatalf("prompt not cleared after KVM-ready answer: confirming=%v hints=%v", scr.confirmingNoKVM, scr.Hints())
+		}
+		pump(t, app, key("enter"))
+		if !app.deps.Setup.MicroVMActive() {
+			t.Fatalf("expected enter to stage Micro-VM on a KVM-ready cluster, got %+v", app.deps.Setup)
+		}
+	})
+
+	t.Run("missing host tools disables option 2 with reason", func(t *testing.T) {
+		app := testApp(t)
+		app.deps.Setup.ClusterKVMReady = true
+		jumpToSandbox(app)
+
+		scr := app.cur.(*sandboxScreen)
+		scr.missingTools = []string{"sha256sum", "zstd"}
+
+		view := app.View()
+		if !strings.Contains(view, "unavailable on this host") || !strings.Contains(view, "missing sha256sum, zstd on PATH") {
+			t.Errorf("expected missing tools note in view, got:\n%s", view)
+		}
+
+		// Pressing 2 then enter cannot select Micro-VM; it keeps gVisor and moves to Demo.
+		pump(t, app, key("2"))
+		pump(t, app, key("enter"))
+		if app.mach.Current() != state.Demo {
+			t.Fatalf("expected Demo step, got %v", app.mach.Current())
+		}
+		if app.deps.Setup.SandboxClass != state.SandboxGVisor {
+			t.Errorf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxGVisor)
+		}
+	})
+}
+
+// A step whose Display is a summary rather than a pasteable command must not
+// wear a shell prompt; every other step keeps it.
+func TestExecCompPromptOnlyForCommands(t *testing.T) {
+	cmd := newExecComp(nil, execx.Spec{Display: "go run ./cmd/ate-setup deploy demo counter"}, nil, "")
+	if got := cmd.view(80); !strings.Contains(got, "$ go run ./cmd/ate-setup deploy demo counter") {
+		t.Errorf("a command step lost its prompt:\n%s", got)
+	}
+	summary := newExecComp(nil, execx.Spec{Display: "deploy demo counter-microvm", DisplayIsSummary: true}, nil, "")
+	got := summary.view(80)
+	if strings.Contains(got, "$ ") {
+		t.Errorf("a summary step is shown as a command:\n%s", got)
+	}
+	if !strings.Contains(got, "deploy demo counter-microvm") {
+		t.Errorf("a summary step lost its title:\n%s", got)
 	}
 }
