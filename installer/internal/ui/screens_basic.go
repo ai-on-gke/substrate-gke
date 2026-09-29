@@ -142,10 +142,20 @@ type doctorScreen struct {
 }
 
 func newDoctorScreen(deps *Deps) *doctorScreen {
+	checks := deps.Checks
+	if deps.Setup.Upgrade {
+		// The upgrade track builds nothing itself; upstream's runbook does.
+		checks = nil
+		for _, c := range deps.Checks {
+			if !c.SourceOnly {
+				checks = append(checks, c)
+			}
+		}
+	}
 	return &doctorScreen{
 		deps:    deps,
-		checks:  deps.Checks,
-		results: make([]*doctor.Result, len(deps.Checks)),
+		checks:  checks,
+		results: make([]*doctor.Result, len(checks)),
 	}
 }
 
@@ -174,20 +184,32 @@ func (s *doctorScreen) runCheck(i int) tea.Cmd {
 
 func (s *doctorScreen) done() bool { return s.next >= len(s.checks) }
 
-func (s *doctorScreen) blocked() bool {
+// failing reports whether a fatal check failed, among the source-only checks
+// or the rest.
+func (s *doctorScreen) failing(sourceOnly bool) bool {
 	for i, r := range s.results {
-		if r != nil && r.Status == doctor.Fail && s.checks[i].Fatal {
+		if r != nil && r.Status == doctor.Fail && s.checks[i].Fatal && s.checks[i].SourceOnly == sourceOnly {
 			return true
 		}
 	}
 	return false
 }
 
+// blocked means a check failed that every install needs.
+func (s *doctorScreen) blocked() bool { return s.failing(false) }
+
+// skippable means only checks a build from source needs failed, which a
+// pre-built install may go past.
+func (s *doctorScreen) skippable() bool { return !s.blocked() && s.failing(true) }
+
 func (s *doctorScreen) CapturesText() bool { return false }
 
 func (s *doctorScreen) Hints() []Hint {
 	hints := []Hint{{"r", "re-run checks"}, {"b", "back"}}
-	if s.done() && !s.blocked() {
+	switch {
+	case s.done() && s.skippable():
+		hints = append([]Hint{{"s", "skip: I'll install pre-built images"}}, hints...)
+	case s.done() && !s.blocked():
 		hints = append([]Hint{{"enter", "continue"}}, hints...)
 	}
 	return hints
@@ -217,7 +239,13 @@ func (s *doctorScreen) Update(msg tea.Msg) tea.Cmd {
 	case tea.KeyMsg:
 		switch m.String() {
 		case "enter":
-			if s.done() && !s.blocked() {
+			if s.done() && !s.blocked() && !s.skippable() {
+				s.deps.DockerSkipped = false
+				return goNext
+			}
+		case "s":
+			if s.done() && s.skippable() {
+				s.deps.DockerSkipped = true
 				return goNext
 			}
 		case "r":
@@ -267,6 +295,10 @@ func (s *doctorScreen) View(w int) string {
 		b.WriteString(theme.Subtle.Render("Running preflight checks…"))
 	case s.blocked():
 		b.WriteString(theme.Bad.Render("Fix the failed checks above, then press [r] to re-run."))
+	case s.skippable():
+		b.WriteString(theme.Warning.Render(
+			"Docker is only needed to build Substrate 0.2 or later from source.\n" +
+				"Fix the checks above and press [r], or press [s] to skip them and install pre-built images."))
 	default:
 		b.WriteString(theme.Good.Render("All checks passed. Press [enter] to continue."))
 	}

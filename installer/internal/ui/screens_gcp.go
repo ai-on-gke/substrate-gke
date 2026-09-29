@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
@@ -50,6 +51,15 @@ type projValidMsg struct {
 	// permErr means the permission probe itself could not run.
 	missing []gcp.RequiredPermission
 	permErr error
+	// docker are the docker checks that failed, when the install builds an
+	// image with docker; see dockerProblem.
+	docker []failedCheck
+}
+
+// failedCheck is a doctor check that did not pass, with what it found.
+type failedCheck struct {
+	name string
+	res  doctor.Result
 }
 
 type projectScreen struct {
@@ -130,6 +140,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	s.errText = ""
 	s.validating = true
 	acked := s.permAcked
+	registry := s.dockerRegistry(pid)
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
@@ -138,8 +149,59 @@ func (s *projectScreen) submit() tea.Cmd {
 		if msg.err == nil && !acked {
 			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
 		}
+		if msg.err == nil && registry != "" {
+			for _, c := range doctor.DockerChecks(registry) {
+				if res := c.Run(context.Background()); res.Status == doctor.Fail {
+					msg.docker = append(msg.docker, failedCheck{c.Name, res})
+				}
+			}
+		}
 		return msg
 	}
+}
+
+// dockerRegistry is the registry the install will push to with docker, or ""
+// when it builds nothing with docker. The doctor already ran the docker
+// checks, but against the default registry and before the images step, where
+// a user who meant to install pre-built images may have skipped them. Now
+// that both the track and the registry are known, they run for real.
+//
+// A dry run skips them, as it skips the doctor's own probes.
+func (s *projectScreen) dockerRegistry(pid string) string {
+	if s.deps.DryRun || s.deps.Builder == nil {
+		return ""
+	}
+	// What the fields would make of the setup, without committing them
+	// before the project has validated.
+	st := *s.deps.Setup
+	for _, f := range s.fields {
+		f.set(&st, strings.TrimSpace(f.input.Value()))
+	}
+	st.ProjectID = pid
+	if !s.deps.Builder.BuildsWithDocker(&st) {
+		return ""
+	}
+	if st.KoDockerRepo == "" {
+		return st.DefaultKoDockerRepo()
+	}
+	return st.KoDockerRepo
+}
+
+// dockerProblem renders the docker checks that failed. Unlike a permission
+// problem it cannot be waved through: nothing outside this machine is going
+// to fix it, and the build it blocks runs only after the control plane is
+// applied.
+func dockerProblem(failed []failedCheck) string {
+	var b strings.Builder
+	b.WriteString("This substrate builds its envoy-dataplane image with docker buildx, and docker is not ready:\n")
+	for _, f := range failed {
+		fmt.Fprintf(&b, "  %s: %s\n", f.name, f.res.Detail)
+		if f.res.Fix != "" {
+			fmt.Fprintf(&b, "    fix: %s\n", f.res.Fix)
+		}
+	}
+	b.WriteString("Fix them, then press [enter] to check again. Or set ATE_ATENET_DATAPLANE=agentgateway before starting the installer, which builds nothing with docker.")
+	return b.String()
 }
 
 // permProblem renders a missing-permission report (or a probe failure) with
@@ -175,6 +237,10 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		s.validating = false
 		if m.err != nil {
 			s.errText = m.err.Error()
+			return nil
+		}
+		if len(m.docker) > 0 {
+			s.errText = dockerProblem(m.docker)
 			return nil
 		}
 		if len(m.missing) > 0 || m.permErr != nil {

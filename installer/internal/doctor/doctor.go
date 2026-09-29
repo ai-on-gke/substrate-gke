@@ -56,7 +56,12 @@ type Check struct {
 	Key   string
 	Name  string
 	Fatal bool
-	Run   func(ctx context.Context) Result
+	// SourceOnly marks a check only a build from source needs. It still
+	// blocks, but the wizard lets a user who will install pre-built images
+	// skip past it: the doctor runs before the images step, so it cannot
+	// know which track the user will take.
+	SourceOnly bool
+	Run        func(ctx context.Context) Result
 }
 
 const probeTimeout = 30 * time.Second
@@ -78,7 +83,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 	// cached branch — neither runs a single git command.
 	needsGit := managed && !snapshot.Fetched(snapshotRoot, managed)
 
-	return []Check{
+	checks := []Check{
 		{
 			Key: "gcloud", Name: "Google Cloud SDK", Fatal: true,
 			Run: func(ctx context.Context) Result {
@@ -196,6 +201,9 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 	}
+	// Against the host of the registry a build from source defaults to. The
+	// project step checks again once it knows the real one.
+	return append(checks, DockerChecks(DefaultRegistryHost)...)
 }
 
 var goVersionRe = regexp.MustCompile(`go(\d+\.\d+(?:\.\d+)?)`)
@@ -309,16 +317,22 @@ func RunCLI(ctx context.Context, checks []Check) int {
 	for _, c := range checks {
 		res := c.Run(ctx)
 		glyph := "✓"
-		switch res.Status {
-		case Warn:
+		detail := res.Detail
+		switch {
+		case res.Status == Warn:
 			glyph = "!"
-		case Fail:
+		case res.Status == Fail && c.SourceOnly:
+			// There is no images step here to say which track this is, so
+			// a pre-built install must not be told it cannot proceed.
+			glyph = "!"
+			detail += " (only needed to build Substrate from source)"
+		case res.Status == Fail:
 			glyph = "✗"
 			if c.Fatal {
 				fatal++
 			}
 		}
-		fmt.Printf("%s %-32s %s\n", glyph, c.Name, res.Detail)
+		fmt.Printf("%s %-32s %s\n", glyph, c.Name, detail)
 		if res.Fix != "" && res.Status != Pass {
 			fmt.Printf("    fix: %s\n", res.Fix)
 		}

@@ -391,6 +391,113 @@ func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 	}
 }
 
+// A failed docker check blocks the doctor like any other, except that a user
+// installing pre-built images, which never run docker, may skip it.
+func TestDoctorLetsPrebuiltSkipDockerOnly(t *testing.T) {
+	pass := func(context.Context) doctor.Result { return doctor.Result{Status: doctor.Pass} }
+	fail := func(context.Context) doctor.Result {
+		return doctor.Result{Status: doctor.Fail, Detail: "no", Fix: "fix"}
+	}
+	run := func(checks []doctor.Check, keys ...string) (*App, *doctorScreen, tea.Cmd) {
+		app := testApp(t)
+		app.deps.Checks = checks
+		scr := newDoctorScreen(app.deps)
+		for i, c := range scr.checks {
+			scr.Update(doctorResMsg{scr, i, c.Run(context.Background())})
+		}
+		var cmd tea.Cmd
+		for _, k := range keys {
+			cmd = scr.Update(key(k))
+		}
+		return app, scr, cmd
+	}
+	dockerFails := []doctor.Check{
+		{Key: "gcloud", Fatal: true, Run: pass},
+		{Key: "docker", Fatal: true, SourceOnly: true, Run: fail},
+	}
+
+	if _, _, cmd := run(dockerFails, "enter"); cmd != nil {
+		t.Error("enter must not go past a failed docker check")
+	}
+	app, scr, cmd := run(dockerFails, "s")
+	if cmd == nil || !app.deps.DockerSkipped {
+		t.Error("s should skip the docker checks and record that it did")
+	}
+	if !strings.Contains(scr.View(100), "[s]") {
+		t.Error("the doctor should say how to skip")
+	}
+	gcloudFails := []doctor.Check{
+		{Key: "gcloud", Fatal: true, Run: fail},
+		{Key: "docker", Fatal: true, SourceOnly: true, Run: fail},
+	}
+	if app, _, cmd := run(gcloudFails, "s"); cmd != nil || app.deps.DockerSkipped {
+		t.Error("s must not go past a check every install needs")
+	}
+
+	// The upgrade track builds nothing, so it is not asked about docker.
+	app = testApp(t)
+	app.deps.Setup.Upgrade = true
+	app.deps.Checks = dockerFails
+	for _, c := range newDoctorScreen(app.deps).checks {
+		if c.SourceOnly {
+			t.Errorf("the upgrade doctor should not run %q", c.Key)
+		}
+	}
+}
+
+// The docker checks run against the registry the install will push to, and
+// only when it builds envoy-dataplane with docker at all.
+func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	app := testApp(t)
+	app.deps.DryRun = false
+	app.deps.Builder = snapshot.NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	app.deps.Setup.Track = state.TrackAdvanced
+
+	if got := newProjectScreen(app.deps).dockerRegistry("acme"); got != "" {
+		t.Errorf("the pin builds nothing with docker, got registry %q", got)
+	}
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
+	scr := newProjectScreen(app.deps)
+	if got := scr.dockerRegistry("acme"); got != "gcr.io/acme/ate-images" {
+		t.Errorf("dockerRegistry = %q, want the default registry", got)
+	}
+	scr.fields[len(scr.fields)-1].input.SetValue("us-docker.pkg.dev/acme/ate")
+	if got := scr.dockerRegistry("acme"); got != "us-docker.pkg.dev/acme/ate" {
+		t.Errorf("dockerRegistry = %q, want the typed registry", got)
+	}
+	if app.deps.Setup.KoDockerRepo != "" {
+		t.Error("probing the registry must not commit it before the project validates")
+	}
+	app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	if got := newProjectScreen(app.deps).dockerRegistry("acme"); got != "" {
+		t.Errorf("a pre-built install builds nothing with docker, got registry %q", got)
+	}
+}
+
+// A docker problem blocks the step outright, with the fix on screen: unlike a
+// missing IAM role there is no one else about to fix it.
+func TestProjectScreenBlocksOnDocker(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	failed := projValidMsg{owner: scr, number: "42", docker: []failedCheck{{
+		"Docker credentials for gcr.io",
+		doctor.Result{Status: doctor.Fail, Detail: "no credentials", Fix: "gcloud auth configure-docker gcr.io"},
+	}}}
+	if cmd := scr.Update(failed); cmd != nil {
+		t.Fatal("a docker failure must not advance the wizard")
+	}
+	if !strings.Contains(scr.errText, "gcloud auth configure-docker gcr.io") {
+		t.Errorf("error should carry the fix, got %q", scr.errText)
+	}
+	if scr.permAcked {
+		t.Error("a docker failure must not count as acknowledging a permission problem")
+	}
+	if cmd := scr.Update(projValidMsg{owner: scr, number: "42"}); cmd == nil {
+		t.Error("once docker passes, the step should advance")
+	}
+}
+
 // Building from source points the whole run at the commit the user chose: the
 // checkout the steps fetch, and the doctor that reports on it.
 func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {

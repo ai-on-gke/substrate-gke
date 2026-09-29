@@ -48,6 +48,10 @@ type Deps struct {
 
 	// UpgradeDir is where the upgrade track keeps the two source trees.
 	UpgradeDir string
+
+	// DockerSkipped is set when the user went past failing docker checks in
+	// the doctor to install pre-built images.
+	DockerSkipped bool
 }
 
 // execCompProvider is implemented by screens that host an execComp.
