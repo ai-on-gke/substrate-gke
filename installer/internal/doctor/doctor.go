@@ -56,7 +56,11 @@ type Check struct {
 	Key   string
 	Name  string
 	Fatal bool
-	Run   func(ctx context.Context) Result
+	// SourceOnly marks a check only a build from source needs. The doctor
+	// runs before the images step decides the track, so such a check only
+	// warns there; the project step enforces it.
+	SourceOnly bool
+	Run        func(ctx context.Context) Result
 }
 
 const probeTimeout = 30 * time.Second
@@ -78,7 +82,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 	// cached branch — neither runs a single git command.
 	needsGit := managed && !snapshot.Fetched(snapshotRoot, managed)
 
-	return []Check{
+	checks := []Check{
 		{
 			Key: "gcloud", Name: "Google Cloud SDK", Fatal: true,
 			Run: func(ctx context.Context) Result {
@@ -196,6 +200,16 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 	}
+	// Against the host of the registry a build from source defaults to. The
+	// project step checks again once it knows the real one. Only the envoy
+	// router is built with docker, and a tree the user supplied says for
+	// itself whether it has one.
+	if snapshot.EnvoyRouter() && (managed || snapshot.HasEnvoyDockerfile(snapshotRoot)) {
+		for _, c := range DockerChecks(DefaultRegistryHost) {
+			checks = append(checks, warnOnly(c))
+		}
+	}
+	return checks
 }
 
 var goVersionRe = regexp.MustCompile(`go(\d+\.\d+(?:\.\d+)?)`)
@@ -303,25 +317,29 @@ func goVersionAtLeast(have, want string) bool {
 }
 
 // RunCLI executes all checks sequentially, printing plain-text results for
-// the --doctor mode. It returns the number of fatal failures.
-func RunCLI(ctx context.Context, checks []Check) int {
-	fatal := 0
+// the --doctor mode. It returns the number of fatal failures, and apart from
+// them the number of failures only a build from source is stopped by.
+func RunCLI(ctx context.Context, checks []Check) (fatal, sourceOnly int) {
 	for _, c := range checks {
 		res := c.Run(ctx)
 		glyph := "✓"
-		switch res.Status {
-		case Warn:
+		detail := res.Detail
+		switch {
+		case res.Status == Warn:
 			glyph = "!"
-		case Fail:
+			if c.SourceOnly {
+				sourceOnly++
+			}
+		case res.Status == Fail:
 			glyph = "✗"
 			if c.Fatal {
 				fatal++
 			}
 		}
-		fmt.Printf("%s %-32s %s\n", glyph, c.Name, res.Detail)
+		fmt.Printf("%s %-32s %s\n", glyph, c.Name, detail)
 		if res.Fix != "" && res.Status != Pass {
 			fmt.Printf("    fix: %s\n", res.Fix)
 		}
 	}
-	return fatal
+	return fatal, sourceOnly
 }

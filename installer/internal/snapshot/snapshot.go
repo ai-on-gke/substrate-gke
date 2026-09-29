@@ -391,6 +391,10 @@ type Builder struct {
 	// repo and commit are the tree to fetch. They start at the pin and move
 	// only when the wizard's images step picks something else.
 	repo, commit string
+	// envoy is the chosen revision's EnvoyDataplane. The pin it starts from
+	// predates the image; the source track always resolves a revision, which
+	// sets it.
+	envoy bool
 	// lock, while open, is the shared flock marking Root as in use by this
 	// process. Taken by Lock, released by Cleanup (or process exit).
 	lock *os.File
@@ -414,7 +418,7 @@ func NewBuilder(root string, managed bool) *Builder {
 // build produces are never mistaken for another's. A tree the user supplied
 // with --substrate-root is theirs, and is left exactly where it is.
 func (b *Builder) UseSource(rev Revision) {
-	b.repo, b.commit = rev.Repo, rev.Commit
+	b.repo, b.commit, b.envoy = rev.Repo, rev.Commit, rev.EnvoyDataplane
 	if !b.Managed {
 		return
 	}
@@ -431,6 +435,48 @@ func (b *Builder) UseSource(rev Revision) {
 	if relock {
 		b.Lock()
 	}
+}
+
+// BuildsWithDocker reports whether deploying the control plane runs `docker
+// buildx build --push` against st.KoDockerRepo, which ate-setup does for the
+// envoy-dataplane image. That takes the envoy router, ate-setup's default
+// unless ATE_ATENET_DATAPLANE names another, and a tree that has the image.
+//
+// ko reads gcloud's credentials by itself; docker reads only its own config.
+// So a host where every ko image pushes can still fail here, after the
+// control-plane bundle is applied, leaving a half-installed cluster.
+//
+// A pre-built install builds nothing. ate-setup still builds envoy-dataplane
+// there until agent-substrate/substrate#1964, but without a registry to push
+// to it cannot succeed with or without docker, so docker is not asked for.
+func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
+	if st.Prebuilt() {
+		return false
+	}
+	if !EnvoyRouter() {
+		return false
+	}
+	if !b.Managed {
+		// A tree the user supplied is built as it stands, whatever revision
+		// the images step recorded.
+		return HasEnvoyDockerfile(b.Root)
+	}
+	return b.envoy
+}
+
+// EnvoyRouter reports whether ate-setup deploys the envoy router, its default
+// unless ATE_ATENET_DATAPLANE names another. Only the envoy router is built
+// with docker.
+func EnvoyRouter() bool {
+	router := os.Getenv("ATE_ATENET_DATAPLANE")
+	return router == "" || router == "envoy"
+}
+
+// HasEnvoyDockerfile reports whether the Substrate tree at root builds the
+// envoy-dataplane image, which 0.2 and later do.
+func HasEnvoyDockerfile(root string) bool {
+	_, err := os.Stat(filepath.Join(root, EnvoyDockerfile))
+	return err == nil
 }
 
 // env builds the environment both upstream tools read, mirroring

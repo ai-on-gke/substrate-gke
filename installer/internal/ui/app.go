@@ -48,6 +48,10 @@ type Deps struct {
 
 	// UpgradeDir is where the upgrade track keeps the two source trees.
 	UpgradeDir string
+
+	// DockerWarned is set when the user went past the doctor with a docker
+	// check that did not pass.
+	DockerWarned bool
 }
 
 // execCompProvider is implemented by screens that host an execComp.

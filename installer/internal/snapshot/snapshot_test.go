@@ -922,3 +922,55 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 		t.Errorf("new exports:\n%s", next)
 	}
 }
+
+// Only a build from source of a tree with the envoy-dataplane image, under the
+// envoy router, runs docker. Asking anyone else for docker would block
+// installs that never touch it.
+func TestBuildsWithDockerOnlyForAnEnvoyBuildFromSource(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	st := testSetup(t)
+	if b.BuildsWithDocker(st) {
+		t.Error("the pin predates envoy-dataplane, so it must not need docker")
+	}
+	b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
+	if !b.BuildsWithDocker(st) {
+		t.Error("a source build of a tree with envoy-dataplane must need docker")
+	}
+	t.Setenv("ATE_ATENET_DATAPLANE", "envoy")
+	if !b.BuildsWithDocker(st) {
+		t.Error("ATE_ATENET_DATAPLANE=envoy is the default, so it must still need docker")
+	}
+	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
+	if b.BuildsWithDocker(st) {
+		t.Error("the agentgateway router builds nothing with docker")
+	}
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.2.0"
+	if b.BuildsWithDocker(st) {
+		t.Error("a pre-built install must not need docker")
+	}
+}
+
+// --substrate-root is built as it stands, so the tree on disk decides, not the
+// revision the images step recorded.
+func TestBuildsWithDockerReadsAUserSuppliedTree(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	root := fakeCheckout(t)
+	b := NewBuilder(root, false)
+	b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
+	st := testSetup(t)
+	if b.BuildsWithDocker(st) {
+		t.Error("a tree without the Dockerfile must not need docker")
+	}
+	path := filepath.Join(root, EnvoyDockerfile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !b.BuildsWithDocker(st) {
+		t.Error("a tree with the Dockerfile must need docker")
+	}
+}

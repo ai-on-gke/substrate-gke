@@ -183,6 +183,17 @@ func (s *doctorScreen) blocked() bool {
 	return false
 }
 
+// dockerWarned reports whether a check only a build from source needs did
+// not pass, which the images step repeats next to "Build from source".
+func (s *doctorScreen) dockerWarned() bool {
+	for i, r := range s.results {
+		if r != nil && r.Status != doctor.Pass && s.checks[i].SourceOnly {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *doctorScreen) CapturesText() bool { return false }
 
 func (s *doctorScreen) Hints() []Hint {
@@ -218,6 +229,7 @@ func (s *doctorScreen) Update(msg tea.Msg) tea.Cmd {
 		switch m.String() {
 		case "enter":
 			if s.done() && !s.blocked() {
+				s.deps.DockerWarned = s.dockerWarned()
 				return goNext
 			}
 		case "r":
@@ -267,6 +279,11 @@ func (s *doctorScreen) View(w int) string {
 		b.WriteString(theme.Subtle.Render("Running preflight checks…"))
 	case s.blocked():
 		b.WriteString(theme.Bad.Render("Fix the failed checks above, then press [r] to re-run."))
+	case s.dockerWarned():
+		b.WriteString(theme.Warning.Render(
+			"Docker is only needed to build Substrate 0.2 or later from source, and step 3\n" +
+				"checks it again against the registry you push to. Press [enter] to continue,\n" +
+				"or fix the warnings above and press [r]."))
 	default:
 		b.WriteString(theme.Good.Render("All checks passed. Press [enter] to continue."))
 	}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -167,12 +168,40 @@ func TestVerifyCommitRunsOutsideAGitRepository(t *testing.T) {
 	// Not a repository, and not inside one.
 	t.Chdir(t.TempDir())
 
-	if err := verifyCommit(context.Background(), remote, sha, false); err != nil {
+	if _, err := verifyCommit(context.Background(), remote, sha, false); err != nil {
 		t.Errorf("verifyCommit(%s) = %v", shorten(sha), err)
 	}
 	absent := strings.Repeat("0", 39) + "1"
-	if err := verifyCommit(context.Background(), remote, absent, false); err == nil {
+	if _, err := verifyCommit(context.Background(), remote, absent, false); err == nil {
 		t.Error("verifyCommit accepted a commit the remote does not have")
+	}
+}
+
+// A tree with the envoy-dataplane Dockerfile makes a source install run
+// docker, so the wizard has to know before it provisions anything. Substrate
+// 0.1 has no such file and 0.2 does; nothing else tells the two apart.
+func TestVerifyCommitReportsTheEnvoyDockerfile(t *testing.T) {
+	remote, run := testRemote(t)
+	before := run("rev-parse", "HEAD")
+	path := filepath.Join(remote, EnvoyDockerfile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", EnvoyDockerfile)
+	run("commit", "--quiet", "-m", "envoy")
+	after := run("rev-parse", "HEAD")
+
+	for _, tc := range []struct {
+		sha  string
+		want bool
+	}{{before, false}, {after, true}} {
+		got, err := verifyCommit(context.Background(), remote, tc.sha, false)
+		if err != nil || got != tc.want {
+			t.Errorf("verifyCommit(%s) = %v, %v; want %v", shorten(tc.sha), got, err, tc.want)
+		}
 	}
 }
 

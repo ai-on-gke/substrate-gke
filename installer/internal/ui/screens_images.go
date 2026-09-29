@@ -320,6 +320,10 @@ func (s *imagesScreen) View(w int) string {
 			{"[2] Build from source",
 				"Builds every image with ko from a commit of the Substrate repository\nand pushes them to your own registry. Pick this for a branch or a commit\nthat has no published images."},
 		}
+		if s.deps.DockerWarned {
+			options[1].desc += "\n" + theme.Warning.Render(
+				"The setup check found Docker problems. Building Substrate 0.2 or\nlater from source needs Docker, so step 3 checks it again against\nyour registry and will fail until the Docker check passes.")
+		}
 		for i, o := range options {
 			panel, title := theme.Panel, theme.Subtle
 			if i == s.cursor {

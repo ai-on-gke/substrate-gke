@@ -65,9 +65,14 @@ func main() {
 	if *doctorMode {
 		fmt.Println("substrate-gke preflight doctor")
 		fmt.Println()
-		if fatal := doctor.RunCLI(context.Background(), doctor.Checks(root, managed)); fatal > 0 {
+		fatal, sourceOnly := doctor.RunCLI(context.Background(), doctor.Checks(root, managed))
+		if fatal > 0 {
 			fmt.Printf("\n%d fatal problem(s) found.\n", fatal)
 			os.Exit(1)
+		}
+		if sourceOnly > 0 {
+			fmt.Printf("\nReady to install pre-built images. Fix the %d Docker problem(s) above\nbefore building Substrate 0.2 or later from source.\n", sourceOnly)
+			return
 		}
 		fmt.Println("\nAll good — run the installer.")
 		return
