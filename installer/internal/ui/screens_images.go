@@ -322,7 +322,7 @@ func (s *imagesScreen) View(w int) string {
 		}
 		if s.deps.DockerSkipped {
 			options[1].desc += "\n" + theme.Warning.Render(
-				"You skipped the Docker checks. Building Substrate 0.2 or later from\nsource needs Docker, so step 3 will fail until you fix them.")
+				"You skipped the Docker checks. Building Substrate 0.2 or later from\nsource needs Docker, so step 3 checks it again against your registry\nand will fail until it passes.")
 		}
 		for i, o := range options {
 			panel, title := theme.Panel, theme.Subtle

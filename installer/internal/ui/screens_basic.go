@@ -202,13 +202,24 @@ func (s *doctorScreen) blocked() bool { return s.failing(false) }
 // pre-built install may go past.
 func (s *doctorScreen) skippable() bool { return !s.blocked() && s.failing(true) }
 
+// skip goes past failed source-only checks, which is all it may go past, and
+// records that it did for the images step's warning. It backs both [s] and
+// /skip.
+func (s *doctorScreen) skip() tea.Cmd {
+	if !s.done() || !s.skippable() {
+		return nil
+	}
+	s.deps.DockerSkipped = true
+	return goNext
+}
+
 func (s *doctorScreen) CapturesText() bool { return false }
 
 func (s *doctorScreen) Hints() []Hint {
 	hints := []Hint{{"r", "re-run checks"}, {"b", "back"}}
 	switch {
 	case s.done() && s.skippable():
-		hints = append([]Hint{{"s", "skip: I'll install pre-built images"}}, hints...)
+		hints = append([]Hint{{"s", "skip: pre-built images, or another registry"}}, hints...)
 	case s.done() && !s.blocked():
 		hints = append([]Hint{{"enter", "continue"}}, hints...)
 	}
@@ -244,10 +255,7 @@ func (s *doctorScreen) Update(msg tea.Msg) tea.Cmd {
 				return goNext
 			}
 		case "s":
-			if s.done() && s.skippable() {
-				s.deps.DockerSkipped = true
-				return goNext
-			}
+			return s.skip()
 		case "r":
 			s.results = make([]*doctor.Result, len(s.checks))
 			s.next = 0
@@ -297,8 +305,9 @@ func (s *doctorScreen) View(w int) string {
 		b.WriteString(theme.Bad.Render("Fix the failed checks above, then press [r] to re-run."))
 	case s.skippable():
 		b.WriteString(theme.Warning.Render(
-			"Docker is only needed to build Substrate 0.2 or later from source.\n" +
-				"Fix the checks above and press [r], or press [s] to skip them and install pre-built images."))
+			"Docker is only needed to build Substrate 0.2 or later from source, and step 3\n" +
+				"checks it again against the registry you push to. Fix the checks above and\n" +
+				"press [r], or press [s] to skip them."))
 	default:
 		b.WriteString(theme.Good.Render("All checks passed. Press [enter] to continue."))
 	}

@@ -67,7 +67,10 @@ type projectScreen struct {
 	fields     []field
 	focus      int
 	validating bool
-	errText    string
+	// checkingDocker is set while validation also runs the docker checks,
+	// so a slow docker is not taken for a slow gcloud.
+	checkingDocker bool
+	errText        string
 	// permAcked is set once a permission problem has been shown, so the next
 	// enter proceeds anyway: the probe is advisory (a role might be granted
 	// minutes from now), but failing here beats failing mid-bootstrap.
@@ -141,6 +144,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	s.validating = true
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
+	s.checkingDocker = registry != ""
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
@@ -301,6 +305,8 @@ func (s *projectScreen) View(w int) string {
 
 	b.WriteString("\n")
 	switch {
+	case s.validating && s.checkingDocker:
+		b.WriteString(theme.Accent.Render("Validating project with gcloud and checking Docker…"))
 	case s.validating:
 		b.WriteString(theme.Accent.Render("Validating project with gcloud…"))
 	case s.errText != "":

@@ -202,8 +202,13 @@ func Checks(snapshotRoot string, managed bool) []Check {
 		},
 	}
 	// Against the host of the registry a build from source defaults to. The
-	// project step checks again once it knows the real one.
-	return append(checks, DockerChecks(DefaultRegistryHost)...)
+	// project step checks again once it knows the real one. Only the envoy
+	// router is built with docker, and a tree the user supplied says for
+	// itself whether it has one.
+	if snapshot.EnvoyRouter() && (managed || snapshot.HasEnvoyDockerfile(snapshotRoot)) {
+		checks = append(checks, DockerChecks(DefaultRegistryHost)...)
+	}
+	return checks
 }
 
 var goVersionRe = regexp.MustCompile(`go(\d+\.\d+(?:\.\d+)?)`)
@@ -311,9 +316,9 @@ func goVersionAtLeast(have, want string) bool {
 }
 
 // RunCLI executes all checks sequentially, printing plain-text results for
-// the --doctor mode. It returns the number of fatal failures.
-func RunCLI(ctx context.Context, checks []Check) int {
-	fatal := 0
+// the --doctor mode. It returns the number of fatal failures, and apart from
+// them the number of failures only a build from source is stopped by.
+func RunCLI(ctx context.Context, checks []Check) (fatal, sourceOnly int) {
 	for _, c := range checks {
 		res := c.Run(ctx)
 		glyph := "✓"
@@ -326,6 +331,7 @@ func RunCLI(ctx context.Context, checks []Check) int {
 			// a pre-built install must not be told it cannot proceed.
 			glyph = "!"
 			detail += " (only needed to build Substrate from source)"
+			sourceOnly++
 		case res.Status == Fail:
 			glyph = "✗"
 			if c.Fatal {
@@ -337,5 +343,5 @@ func RunCLI(ctx context.Context, checks []Check) int {
 			fmt.Printf("    fix: %s\n", res.Fix)
 		}
 	}
-	return fatal
+	return fatal, sourceOnly
 }

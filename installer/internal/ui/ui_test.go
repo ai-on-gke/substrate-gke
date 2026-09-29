@@ -445,6 +445,26 @@ func TestDoctorLetsPrebuiltSkipDockerOnly(t *testing.T) {
 	}
 }
 
+// /skip does on the setup check what [s] does, and no more.
+func TestSlashSkipOnTheDoctor(t *testing.T) {
+	fail := func(context.Context) doctor.Result { return doctor.Result{Status: doctor.Fail, Detail: "no"} }
+	skip := func(sourceOnly bool) (*App, tea.Cmd) {
+		app := testApp(t)
+		app.mach.Next()
+		app.deps.Checks = []doctor.Check{{Key: "docker", Fatal: true, SourceOnly: sourceOnly, Run: fail}}
+		scr := newDoctorScreen(app.deps)
+		scr.Update(doctorResMsg{scr, 0, fail(context.Background())})
+		app.cur = scr
+		return app, app.runSlash("skip")
+	}
+	if app, cmd := skip(true); cmd == nil || !app.deps.DockerSkipped {
+		t.Error("/skip should skip failed docker checks like [s]")
+	}
+	if app, cmd := skip(false); cmd != nil || app.deps.DockerSkipped {
+		t.Error("/skip must not go past a check every install needs")
+	}
+}
+
 // The docker checks run against the registry the install will push to, and
 // only when it builds envoy-dataplane with docker at all.
 func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {

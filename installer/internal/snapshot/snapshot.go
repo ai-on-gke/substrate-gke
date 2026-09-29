@@ -453,16 +453,30 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 	if st.Prebuilt() {
 		return false
 	}
-	if router := os.Getenv("ATE_ATENET_DATAPLANE"); router != "" && router != "envoy" {
+	if !EnvoyRouter() {
 		return false
 	}
 	if !b.Managed {
 		// A tree the user supplied is built as it stands, whatever revision
 		// the images step recorded.
-		_, err := os.Stat(filepath.Join(b.Root, EnvoyDockerfile))
-		return err == nil
+		return HasEnvoyDockerfile(b.Root)
 	}
 	return b.envoy
+}
+
+// EnvoyRouter reports whether ate-setup deploys the envoy router, its default
+// unless ATE_ATENET_DATAPLANE names another. Only the envoy router is built
+// with docker.
+func EnvoyRouter() bool {
+	router := os.Getenv("ATE_ATENET_DATAPLANE")
+	return router == "" || router == "envoy"
+}
+
+// HasEnvoyDockerfile reports whether the Substrate tree at root builds the
+// envoy-dataplane image, which 0.2 and later do.
+func HasEnvoyDockerfile(root string) bool {
+	_, err := os.Stat(filepath.Join(root, EnvoyDockerfile))
+	return err == nil
 }
 
 // env builds the environment both upstream tools read, mirroring

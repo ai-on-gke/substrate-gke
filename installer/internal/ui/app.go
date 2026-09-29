@@ -330,9 +330,13 @@ func (a *App) runSlash(name string) tea.Cmd {
 	case "back", "b":
 		return goBack
 	case "skip", "s":
-		// Only the optional steps may be skipped.
+		// Only the optional steps may be skipped, and the setup check when
+		// only its docker checks failed.
 		if s := a.mach.Current(); s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {
 			return goNext
+		}
+		if d, ok := a.cur.(*doctorScreen); ok {
+			return d.skip()
 		}
 	case "log", "l", "view":
 		a.openLog()
