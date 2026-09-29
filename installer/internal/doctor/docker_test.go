@@ -206,20 +206,28 @@ func TestDockerChecksWithoutDockerFailOnce(t *testing.T) {
 }
 
 // The doctor runs before the images step, so it checks docker for everyone,
-// against the default registry, and marks it as something a pre-built install
-// can skip. Nothing else may be skippable.
-func TestChecksIncludeDockerAsSourceOnly(t *testing.T) {
+// against the default registry, and a failure only warns, saying who it
+// matters to. Nothing else is marked SourceOnly.
+func TestDoctorOnlyWarnsAboutDocker(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	t.Setenv("PATH", t.TempDir()) // no docker
 	sourceOnly := map[string]bool{}
 	for _, c := range Checks(t.TempDir(), true) {
-		if c.SourceOnly {
-			sourceOnly[c.Key] = true
-			if !c.Fatal {
-				t.Errorf("check %q should still be fatal for a build from source", c.Key)
-			}
+		if !c.SourceOnly {
+			continue
+		}
+		sourceOnly[c.Key] = true
+		if c.Fatal {
+			t.Errorf("check %q should not be fatal in the doctor", c.Key)
 		}
 		if c.Key == "docker-auth" && c.Name != "Docker credentials for gcr.io" {
 			t.Errorf("the doctor should check the default registry's host, got %q", c.Name)
+		}
+		if c.Key == "docker" {
+			res := c.Run(context.Background())
+			if res.Status != Warn || !strings.Contains(res.Detail, "only needed to build Substrate 0.2 or later from source") {
+				t.Errorf("a missing docker should warn and say who it matters to, got %+v", res)
+			}
 		}
 	}
 	for _, key := range []string{"docker", "buildx", "docker-auth"} {
@@ -228,7 +236,7 @@ func TestChecksIncludeDockerAsSourceOnly(t *testing.T) {
 		}
 	}
 	if len(sourceOnly) != 3 {
-		t.Errorf("only the docker checks may be skippable, got %v", sourceOnly)
+		t.Errorf("only the docker checks are SourceOnly, got %v", sourceOnly)
 	}
 }
 
@@ -266,13 +274,14 @@ func TestChecksLeaveOutDockerWhenNothingIsBuiltWithIt(t *testing.T) {
 	}
 }
 
-// --doctor has no images step to say which track this is, so a failed docker
-// check must not fail it for someone installing pre-built images, but it is
-// counted so the summary does not call it all good.
-func TestRunCLICountsSourceOnlyFailuresApart(t *testing.T) {
+// A docker warning does not fail --doctor, but it is counted apart from other
+// warnings so the summary does not call it all good.
+func TestRunCLICountsDockerWarningsApart(t *testing.T) {
 	fail := func(context.Context) Result { return Result{Fail, "no docker", "fix it"} }
+	warn := func(context.Context) Result { return Result{Warn, "not fetched yet", ""} }
 	checks := []Check{
-		{Key: "docker", Name: "Docker daemon", Fatal: true, SourceOnly: true, Run: fail},
+		warnOnly(Check{Key: "docker", Name: "Docker daemon", Fatal: true, Run: fail}),
+		{Key: "snapshot", Name: "Substrate snapshot", Run: warn},
 	}
 	if fatal, sourceOnly := RunCLI(context.Background(), checks); fatal != 0 || sourceOnly != 1 {
 		t.Errorf("RunCLI = %d fatal, %d source-only; want 0, 1", fatal, sourceOnly)

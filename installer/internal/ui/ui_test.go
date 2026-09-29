@@ -391,77 +391,48 @@ func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 	}
 }
 
-// A failed docker check blocks the doctor like any other, except that a user
-// installing pre-built images, which never run docker, may skip it.
-func TestDoctorLetsPrebuiltSkipDockerOnly(t *testing.T) {
-	pass := func(context.Context) doctor.Result { return doctor.Result{Status: doctor.Pass} }
-	fail := func(context.Context) doctor.Result {
-		return doctor.Result{Status: doctor.Fail, Detail: "no", Fix: "fix"}
+// The doctor cannot know yet whether this install builds anything with
+// docker, so a docker problem only warns there; the images step repeats it
+// next to "Build from source", and the project step is the one that blocks.
+func TestDoctorOnlyWarnsAboutDocker(t *testing.T) {
+	result := func(status doctor.Status) func(context.Context) doctor.Result {
+		return func(context.Context) doctor.Result { return doctor.Result{Status: status, Detail: "d", Fix: "fix"} }
 	}
-	run := func(checks []doctor.Check, keys ...string) (*App, *doctorScreen, tea.Cmd) {
+	run := func(checks []doctor.Check) (*App, *doctorScreen, tea.Cmd) {
 		app := testApp(t)
 		app.deps.Checks = checks
 		scr := newDoctorScreen(app.deps)
 		for i, c := range scr.checks {
 			scr.Update(doctorResMsg{scr, i, c.Run(context.Background())})
 		}
-		var cmd tea.Cmd
-		for _, k := range keys {
-			cmd = scr.Update(key(k))
-		}
-		return app, scr, cmd
-	}
-	dockerFails := []doctor.Check{
-		{Key: "gcloud", Fatal: true, Run: pass},
-		{Key: "docker", Fatal: true, SourceOnly: true, Run: fail},
+		return app, scr, scr.Update(key("enter"))
 	}
 
-	if _, _, cmd := run(dockerFails, "enter"); cmd != nil {
-		t.Error("enter must not go past a failed docker check")
+	app, scr, cmd := run([]doctor.Check{
+		{Key: "gcloud", Fatal: true, Run: result(doctor.Pass)},
+		{Key: "docker", SourceOnly: true, Run: result(doctor.Warn)},
+	})
+	if cmd == nil || !app.deps.DockerWarned {
+		t.Error("enter should go past a docker warning and record it")
 	}
-	app, scr, cmd := run(dockerFails, "s")
-	if cmd == nil || !app.deps.DockerSkipped {
-		t.Error("s should skip the docker checks and record that it did")
+	if !strings.Contains(scr.View(100), "only needed to build Substrate 0.2 or later from source") {
+		t.Error("the doctor should say who the docker warning matters to")
 	}
-	if !strings.Contains(scr.View(100), "[s]") {
-		t.Error("the doctor should say how to skip")
-	}
-	gcloudFails := []doctor.Check{
-		{Key: "gcloud", Fatal: true, Run: fail},
-		{Key: "docker", Fatal: true, SourceOnly: true, Run: fail},
-	}
-	if app, _, cmd := run(gcloudFails, "s"); cmd != nil || app.deps.DockerSkipped {
-		t.Error("s must not go past a check every install needs")
+	if !strings.Contains(newImagesScreen(app.deps).View(100), "The setup check found Docker problems") {
+		t.Error("the images step should repeat the docker warning next to Build from source")
 	}
 
-	// The upgrade track builds nothing, so it is not asked about docker.
-	app = testApp(t)
-	app.deps.Setup.Upgrade = true
-	app.deps.Checks = dockerFails
-	for _, c := range newDoctorScreen(app.deps).checks {
-		if c.SourceOnly {
-			t.Errorf("the upgrade doctor should not run %q", c.Key)
-		}
+	if app, _, _ := run([]doctor.Check{
+		{Key: "gcloud", Fatal: true, Run: result(doctor.Pass)},
+		{Key: "docker", SourceOnly: true, Run: result(doctor.Pass)},
+	}); app.deps.DockerWarned {
+		t.Error("passing docker checks should leave no warning")
 	}
-}
-
-// /skip does on the setup check what [s] does, and no more.
-func TestSlashSkipOnTheDoctor(t *testing.T) {
-	fail := func(context.Context) doctor.Result { return doctor.Result{Status: doctor.Fail, Detail: "no"} }
-	skip := func(sourceOnly bool) (*App, tea.Cmd) {
-		app := testApp(t)
-		app.mach.Next()
-		app.deps.Checks = []doctor.Check{{Key: "docker", Fatal: true, SourceOnly: sourceOnly, Run: fail}}
-		scr := newDoctorScreen(app.deps)
-		scr.Update(doctorResMsg{scr, 0, fail(context.Background())})
-		app.cur = scr
-		return app, app.runSlash("skip")
-	}
-	if app, cmd := skip(true); cmd == nil || !app.deps.DockerSkipped {
-		t.Error("/skip should skip failed docker checks like [s]")
-	}
-	if app, cmd := skip(false); cmd != nil || app.deps.DockerSkipped {
-		t.Error("/skip must not go past a check every install needs")
+	if _, _, cmd := run([]doctor.Check{
+		{Key: "gcloud", Fatal: true, Run: result(doctor.Fail)},
+		{Key: "docker", SourceOnly: true, Run: result(doctor.Warn)},
+	}); cmd != nil {
+		t.Error("enter must not go past a check every install needs")
 	}
 }
 

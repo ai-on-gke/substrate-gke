@@ -56,10 +56,9 @@ type Check struct {
 	Key   string
 	Name  string
 	Fatal bool
-	// SourceOnly marks a check only a build from source needs. It still
-	// blocks, but the wizard lets a user who will install pre-built images
-	// skip past it: the doctor runs before the images step, so it cannot
-	// know which track the user will take.
+	// SourceOnly marks a check only a build from source needs. The doctor
+	// runs before the images step decides the track, so such a check only
+	// warns there; the project step enforces it.
 	SourceOnly bool
 	Run        func(ctx context.Context) Result
 }
@@ -206,7 +205,9 @@ func Checks(snapshotRoot string, managed bool) []Check {
 	// router is built with docker, and a tree the user supplied says for
 	// itself whether it has one.
 	if snapshot.EnvoyRouter() && (managed || snapshot.HasEnvoyDockerfile(snapshotRoot)) {
-		checks = append(checks, DockerChecks(DefaultRegistryHost)...)
+		for _, c := range DockerChecks(DefaultRegistryHost) {
+			checks = append(checks, warnOnly(c))
+		}
 	}
 	return checks
 }
@@ -326,12 +327,9 @@ func RunCLI(ctx context.Context, checks []Check) (fatal, sourceOnly int) {
 		switch {
 		case res.Status == Warn:
 			glyph = "!"
-		case res.Status == Fail && c.SourceOnly:
-			// There is no images step here to say which track this is, so
-			// a pre-built install must not be told it cannot proceed.
-			glyph = "!"
-			detail += " (only needed to build Substrate from source)"
-			sourceOnly++
+			if c.SourceOnly {
+				sourceOnly++
+			}
 		case res.Status == Fail:
 			glyph = "✗"
 			if c.Fatal {

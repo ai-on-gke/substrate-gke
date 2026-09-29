@@ -49,9 +49,9 @@ type Deps struct {
 	// UpgradeDir is where the upgrade track keeps the two source trees.
 	UpgradeDir string
 
-	// DockerSkipped is set when the user went past failing docker checks in
-	// the doctor to install pre-built images.
-	DockerSkipped bool
+	// DockerWarned is set when the user went past the doctor with a docker
+	// check that did not pass.
+	DockerWarned bool
 }
 
 // execCompProvider is implemented by screens that host an execComp.
@@ -330,13 +330,9 @@ func (a *App) runSlash(name string) tea.Cmd {
 	case "back", "b":
 		return goBack
 	case "skip", "s":
-		// Only the optional steps may be skipped, and the setup check when
-		// only its docker checks failed.
+		// Only the optional steps may be skipped.
 		if s := a.mach.Current(); s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {
 			return goNext
-		}
-		if d, ok := a.cur.(*doctorScreen); ok {
-			return d.skip()
 		}
 	case "log", "l", "view":
 		a.openLog()

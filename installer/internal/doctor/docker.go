@@ -46,13 +46,12 @@ const dockerHub = "docker.io"
 // DockerChecks returns the probes behind ate-setup's `docker buildx build
 // --push` of the envoy-dataplane image to registry, which Substrate 0.2 added.
 //
-// The doctor runs them against DefaultRegistryHost, before the images step,
-// so they are SourceOnly: a user installing pre-built images may skip them.
-// The project step runs them again against the real registry whenever the
-// install will build with docker (snapshot.Builder.BuildsWithDocker), and
-// there they cannot be skipped. The build runs inside the control-plane
-// deploy, after the bundle is applied, so any one of them failing there
-// leaves a half-installed cluster.
+// The doctor runs them against DefaultRegistryHost, before the images step
+// decides the track, so there they only warn (see warnOnly). The project step
+// runs them as they are against the real registry whenever the install will
+// build with docker (snapshot.Builder.BuildsWithDocker), and there they
+// block. The build runs inside the control-plane deploy, after the bundle is
+// applied, so any one of them failing there leaves a half-installed cluster.
 //
 // Without docker the other two are not checked, so a missing docker shows
 // as one failure rather than three.
@@ -60,7 +59,7 @@ func DockerChecks(registry string) []Check {
 	host := registryHost(registry)
 	return []Check{
 		{
-			Key: "docker", Name: "Docker daemon", Fatal: true, SourceOnly: true,
+			Key: "docker", Name: "Docker daemon", Fatal: true,
 			Run: func(ctx context.Context) Result {
 				if _, err := exec.LookPath("docker"); err != nil {
 					return Result{Fail, "docker is not installed; a build of Substrate 0.2+ builds its envoy-dataplane image with docker buildx",
@@ -77,7 +76,7 @@ func DockerChecks(registry string) []Check {
 			},
 		},
 		{
-			Key: "buildx", Name: "Docker buildx", Fatal: true, SourceOnly: true,
+			Key: "buildx", Name: "Docker buildx", Fatal: true,
 			Run: func(ctx context.Context) Result {
 				if res, ok := notChecked(); ok {
 					return res
@@ -93,7 +92,7 @@ func DockerChecks(registry string) []Check {
 			},
 		},
 		{
-			Key: "docker-auth", Name: "Docker credentials for " + host, Fatal: true, SourceOnly: true,
+			Key: "docker-auth", Name: "Docker credentials for " + host, Fatal: true,
 			Run: func(ctx context.Context) Result {
 				if res, ok := notChecked(); ok {
 					return res
@@ -102,6 +101,23 @@ func DockerChecks(registry string) []Check {
 			},
 		},
 	}
+}
+
+// warnOnly is c as the doctor runs it. The doctor comes before the images
+// step, so it cannot know whether this install builds anything with docker:
+// a failure only warns, and says who it matters to.
+func warnOnly(c Check) Check {
+	run := c.Run
+	c.Fatal, c.SourceOnly = false, true
+	c.Run = func(ctx context.Context) Result {
+		res := run(ctx)
+		if res.Status == Fail {
+			res.Status = Warn
+			res.Detail += " (only needed to build Substrate 0.2 or later from source)"
+		}
+		return res
+	}
+	return c
 }
 
 // notChecked stands in for a check that needs docker when there is none; the
