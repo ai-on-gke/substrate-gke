@@ -55,12 +55,14 @@ const (
 	// only falls back here for --dry-run, which resolves nothing.
 	//
 	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the commit upstream's v0.1.0
-	// tag names, ReleaseVersion being the GKE build of that release.
+	// what the released images are built from: the head of upstream's
+	// release-0.2 branch, ReleaseVersion being the GKE build of it. That is
+	// the v0.2.0 tag plus the envoy-dataplane pin pre-built installs need
+	// (agent-substrate/substrate#1990), which is why it is not the tag itself.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "fa6d949685a6318940a9a0195c867c864009b820"
+	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -83,7 +85,7 @@ const (
 	// never has to fall back to building from source. It asks such a team for
 	// a manifest revision as well, since only this registry is published
 	// alongside a tree known to match.
-	ReleaseVersion = "v0.1.0-gke.1"
+	ReleaseVersion = "v0.2.0-gke.0"
 )
 
 // ShortCommit is Commit abbreviated for display.
@@ -365,11 +367,12 @@ func (b *Builder) KubectlAteInstall() string {
 // self-contained kubectl-ate install instead.
 //
 // These strings are coupled to Commit: the demo names come from the counter
-// demo's registration, and the flag spelling from kubectl-ate, both at that
-// revision. Upstream has since renamed --template-ref to --template and
-// taught it to parse "<atespace>/<name>", so bumping Commit past that change
-// must update this function too. Nothing here is executed by the wizard, so
-// no test will catch the drift — the user is the one who runs it.
+// demo's registration, the --template flag from kubectl-ate, and the
+// ate-target-actor header from atenet's router, which picks the actor from
+// that header rather than from the Host. All three have changed upstream
+// before, so bumping Commit means re-checking this function. Nothing here is
+// executed by the wizard, so no test will catch the drift — the user is the
+// one who runs it.
 func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string) {
 	// The atespace and ActorTemplate the counter demo creates. `ate-setup
 	// deploy demo counter`, `ate-setup deploy demo counter-microvm`, and
@@ -388,8 +391,8 @@ func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string)
 	}
 	return "kubectl port-forward -n ate-system svc/atenet-router 8000:80", []string{
 		installAte,
-		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template-ref " + demoTemplate,
-		`curl -X POST -H "Host: my-counter-1.` + demoAtespace + `.actors.resources.substrate.ate.dev" http://localhost:8000/`,
+		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate,
+		`curl -X POST -H "ate-target-actor: ` + demoAtespace + `/my-counter-1" http://localhost:8000/`,
 	}
 }
 
@@ -765,7 +768,7 @@ const craneDigest = "go run github.com/google/go-containerregistry/cmd/crane@v0.
 // counterMicroVMDemoDir is where ate-setup registers its counter-microvm demo.
 // Its presence in the checkout means `ate-setup deploy demo counter-microvm`
 // exists there: upstream added it in v0.2.0 (agent-substrate/substrate#1785),
-// so main and later releases have it and the pinned Commit (v0.1.0) does not.
+// so main and the pinned Commit have it and older trees such as v0.1.0 do not.
 const counterMicroVMDemoDir = "cmd/ate-setup/internal/demos/countermicrovm"
 
 // The counter-microvm templates a pre-built micro-VM demo rewrites in place:

@@ -181,7 +181,7 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** *(default)* | **Build from source** |
 |---|---|---|
 | **You provide** | Registry, tag, and commit — all pre-filled, all overridable | A revision: branch, tag, or full commit SHA |
-| **Default value** | `v0.1.0-gke.1` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to upstream's [`v0.1.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.1.0) | Repo's current HEAD, resolved live via `git ls-remote` |
+| **Default value** | `v0.2.0-gke.0` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to the head of upstream's [`release-0.2`](https://github.com/agent-substrate/substrate/tree/release-0.2) branch | Repo's current HEAD, resolved live via `git ls-remote` |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Just getting Substrate running | A branch or commit with no published images |
 
