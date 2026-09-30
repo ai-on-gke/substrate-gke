@@ -178,7 +178,7 @@ func TestSummaryRecapsTheDemoNextSteps(t *testing.T) {
 		"sandbox    micro-VM  · assets staged, SandboxConfig applied",
 		"demo       counter-microvm demo deployed — next steps recapped below",
 		"Next steps — try the counter-microvm demo",
-		"--template-ref counter-microvm",
+		"--template counter-microvm",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("micro-VM summary missing %q:\n%s", want, out)

@@ -449,7 +449,7 @@ func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
 		t.Errorf("unstaged micro-VM should fall back to gVisor counter demo, got:\n%s", unstagedSpec.Argv[2])
 	}
 	_, unstagedSteps := b.NextSteps(st)
-	if !strings.Contains(strings.Join(unstagedSteps, "\n"), "-a ate-demo-counter --template-ref counter") {
+	if !strings.Contains(strings.Join(unstagedSteps, "\n"), "-a ate-demo-counter --template counter") {
 		t.Errorf("unstaged micro-VM NextSteps should target ate-demo-counter, got:\n%v", unstagedSteps)
 	}
 
@@ -469,8 +469,8 @@ func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
 	_, stagedSteps := b.NextSteps(st)
 	joined := strings.Join(stagedSteps, "\n")
 	for _, want := range []string{
-		"kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template-ref counter-microvm",
-		"Host: my-counter-1.ate-demo-counter-microvm.actors.resources.substrate.ate.dev",
+		"kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template counter-microvm",
+		"ate-target-actor: ate-demo-counter-microvm/my-counter-1",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)

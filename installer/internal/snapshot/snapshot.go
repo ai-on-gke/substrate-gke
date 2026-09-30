@@ -367,11 +367,12 @@ func (b *Builder) KubectlAteInstall() string {
 // self-contained kubectl-ate install instead.
 //
 // These strings are coupled to Commit: the demo names come from the counter
-// demo's registration, and the flag spelling from kubectl-ate, both at that
-// revision. Upstream has since renamed --template-ref to --template and
-// taught it to parse "<atespace>/<name>", so bumping Commit past that change
-// must update this function too. Nothing here is executed by the wizard, so
-// no test will catch the drift — the user is the one who runs it.
+// demo's registration, the --template flag from kubectl-ate, and the
+// ate-target-actor header from atenet's router, which picks the actor from
+// that header rather than from the Host. All three have changed upstream
+// before, so bumping Commit means re-checking this function. Nothing here is
+// executed by the wizard, so no test will catch the drift — the user is the
+// one who runs it.
 func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string) {
 	// The atespace and ActorTemplate the counter demo creates. `ate-setup
 	// deploy demo counter`, `ate-setup deploy demo counter-microvm`, and
@@ -390,8 +391,8 @@ func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string)
 	}
 	return "kubectl port-forward -n ate-system svc/atenet-router 8000:80", []string{
 		installAte,
-		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template-ref " + demoTemplate,
-		`curl -X POST -H "Host: my-counter-1.` + demoAtespace + `.actors.resources.substrate.ate.dev" http://localhost:8000/`,
+		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate,
+		`curl -X POST -H "ate-target-actor: ` + demoAtespace + `/my-counter-1" http://localhost:8000/`,
 	}
 }
 
