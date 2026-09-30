@@ -55,12 +55,14 @@ const (
 	// only falls back here for --dry-run, which resolves nothing.
 	//
 	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the commit upstream's v0.1.0
-	// tag names, ReleaseVersion being the GKE build of that release.
+	// what the released images are built from: the head of upstream's
+	// release-0.2 branch, ReleaseVersion being the GKE build of it. That is
+	// the v0.2.0 tag plus the envoy-dataplane pin pre-built installs need
+	// (agent-substrate/substrate#1990), which is why it is not the tag itself.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "fa6d949685a6318940a9a0195c867c864009b820"
+	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -83,7 +85,7 @@ const (
 	// never has to fall back to building from source. It asks such a team for
 	// a manifest revision as well, since only this registry is published
 	// alongside a tree known to match.
-	ReleaseVersion = "v0.1.0-gke.1"
+	ReleaseVersion = "v0.2.0-gke.0"
 )
 
 // ShortCommit is Commit abbreviated for display.
@@ -765,7 +767,7 @@ const craneDigest = "go run github.com/google/go-containerregistry/cmd/crane@v0.
 // counterMicroVMDemoDir is where ate-setup registers its counter-microvm demo.
 // Its presence in the checkout means `ate-setup deploy demo counter-microvm`
 // exists there: upstream added it in v0.2.0 (agent-substrate/substrate#1785),
-// so main and later releases have it and the pinned Commit (v0.1.0) does not.
+// so main and the pinned Commit have it and older trees such as v0.1.0 do not.
 const counterMicroVMDemoDir = "cmd/ate-setup/internal/demos/countermicrovm"
 
 // The counter-microvm templates a pre-built micro-VM demo rewrites in place:
