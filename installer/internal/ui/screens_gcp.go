@@ -16,6 +16,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,6 +48,12 @@ type projValidMsg struct {
 	owner  *projectScreen
 	number string
 	err    error
+	// billingOff and apiOff are set when the project provably has no
+	// billing account or has GKEService disabled; probeErr means one of
+	// those probes could not run, which proves neither.
+	billingOff bool
+	apiOff     bool
+	probeErr   error
 	// missing are bootstrap permissions the credentials provably lack;
 	// permErr means the permission probe itself could not run.
 	missing []gcp.RequiredPermission
@@ -75,6 +82,16 @@ type projectScreen struct {
 	// enter proceeds anyway: the probe is advisory (a role might be granted
 	// minutes from now), but failing here beats failing mid-bootstrap.
 	permAcked bool
+	// probeAcked does the same for a billing or API probe that could not
+	// run. A project provably without billing or the API is never waved
+	// through: the very next screen would fail on it.
+	probeAcked bool
+	// enableFor is the project [e] would enable GKEService on, set while
+	// that offer is on screen; "" when there is no offer. Any edit to the
+	// fields withdraws it, so e types normally again.
+	enableFor string
+	// enabling is the running `gcloud services enable`, nil otherwise.
+	enabling *execComp
 }
 
 func newField(label, value, placeholder string, set func(*state.Setup, string)) field {
@@ -125,6 +142,12 @@ func (s *projectScreen) Init() tea.Cmd {
 func (s *projectScreen) CapturesText() bool { return true }
 
 func (s *projectScreen) Hints() []Hint {
+	if s.enabling != nil {
+		return []Hint{{"esc", "stop waiting"}}
+	}
+	if s.enableFor != "" {
+		return []Hint{{"e", "enable the GKE API"}, {"enter", "check again"}, {"esc", "back"}}
+	}
 	return []Hint{{"tab/↓", "next field"}, {"enter", "validate & continue"}, {"esc", "back"}}
 }
 
@@ -141,6 +164,7 @@ func (s *projectScreen) submit() tea.Cmd {
 		return s.setFocus(0)
 	}
 	s.errText = ""
+	s.enableFor = ""
 	s.validating = true
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
@@ -148,6 +172,12 @@ func (s *projectScreen) submit() tea.Cmd {
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
+		// The cluster step lists clusters next, and that fails outright on
+		// a project without billing or without the GKE API. Catch both
+		// here, where the fix is still one command away.
+		if msg.err == nil {
+			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(context.Background(), s.deps.GCP, pid)
+		}
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
 		if msg.err == nil && !acked {
@@ -226,7 +256,106 @@ func permProblem(projectID string, missing []gcp.RequiredPermission, permErr err
 	return b.String()
 }
 
+// projectServing asks whether projectID has billing and the GKE API on.
+// Each probe that could not run adds to probeErr instead of claiming either
+// answer.
+func projectServing(ctx context.Context, gc *gcp.Client, projectID string) (billingOff, apiOff bool, probeErr error) {
+	if on, err := gc.BillingEnabled(ctx, projectID); err != nil {
+		probeErr = err
+	} else {
+		billingOff = !on
+	}
+	if on, err := gc.ServiceEnabled(ctx, projectID, gcp.GKEService); err != nil {
+		probeErr = errors.Join(probeErr, err)
+	} else {
+		apiOff = !on
+	}
+	return billingOff, apiOff, probeErr
+}
+
+// billingProblem renders a project without billing. There is no offer to fix
+// it here: linking an account needs the user to pick one, and often a
+// billing admin to allow it.
+func billingProblem(projectID string, apiOff bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Billing is not enabled on %s; GKE refuses every request without it.\n", projectID)
+	fmt.Fprintf(&b, "  fix: gcloud billing projects link %s --billing-account=ACCOUNT_ID\n", projectID)
+	fmt.Fprintf(&b, "   or: https://console.cloud.google.com/billing/linkedaccount?project=%s\n", projectID)
+	if apiOff {
+		fmt.Fprintf(&b, "%s is disabled too; once billing is linked, this screen can enable it for you.\n", gcp.GKEService)
+	}
+	b.WriteString("Link an account, then press [enter] to check again.")
+	return b.String()
+}
+
+// apiProblem renders a project with billing but without the GKE API, and
+// offers to enable it.
+func apiProblem(projectID string) string {
+	return fmt.Sprintf("%s is disabled on %s; the cluster step cannot list or create clusters without it.\n"+
+		"  fix: %s\n"+
+		"Press [e] to enable it now, or [enter] to check again.",
+		gcp.GKEService, projectID, gcp.EnableServiceCommand(projectID, gcp.GKEService))
+}
+
+// probeProblem renders a billing or API probe that could not run. Like a
+// permission probe failure it proves nothing, so a second enter goes on.
+func probeProblem(projectID string, err error) string {
+	return fmt.Sprintf("Could not verify billing and the GKE API on %s:\n%v\n"+
+		"Press [enter] again to continue anyway; the cluster step may fail.", projectID, err)
+}
+
+// enableProblem renders a failed `gcloud services enable`.
+func enableProblem(projectID, cause string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Could not enable %s on %s", gcp.GKEService, projectID)
+	if cause != "" {
+		b.WriteString(":\n" + cause)
+	}
+	fmt.Fprintf(&b, "\nEnabling it needs serviceusage.services.enable (roles/serviceusage.serviceUsageAdmin).\n"+
+		"  fix: %s\n"+
+		"Press [e] to try again, or [enter] to check again.", gcp.EnableServiceCommand(projectID, gcp.GKEService))
+	return b.String()
+}
+
+// enable runs `gcloud services enable` for the offered project.
+func (s *projectScreen) enable() tea.Cmd {
+	s.errText = ""
+	s.enabling = newExecComp(s.deps.Runner, gcp.EnableService(s.enableFor, gcp.GKEService), nil, s.deps.LogPath)
+	return s.enabling.start()
+}
+
+// enableDone routes the finished enable: on success every check runs again,
+// so the screen advances only once the whole project validates.
+func (s *projectScreen) enableDone() tea.Cmd {
+	comp := s.enabling
+	s.enabling = nil
+	if comp.failed != nil {
+		cause := comp.cause
+		if cause == "" {
+			cause = comp.failed.Error()
+		}
+		s.errText = enableProblem(s.enableFor, cause)
+		return nil
+	}
+	return s.submit()
+}
+
+// Stop cancels an enable still running when the wizard leaves the screen.
+func (s *projectScreen) Stop() {
+	if s.enabling != nil {
+		s.enabling.stop()
+	}
+}
+
 func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
+	if s.enabling != nil {
+		if cmd, handled := s.enabling.update(msg); handled {
+			if s.enabling.finished {
+				return s.enableDone()
+			}
+			return cmd
+		}
+	}
 	switch m := msg.(type) {
 	case prefillMsg:
 		if m.owner == s && s.fields[0].input.Value() == "" {
@@ -239,17 +368,34 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		s.validating = false
+		pid := strings.TrimSpace(s.fields[0].input.Value())
 		if m.err != nil {
 			s.errText = m.err.Error()
+			return nil
+		}
+		// Billing and the API first: nothing after them works without
+		// them, and neither can be waved through.
+		if m.billingOff {
+			s.errText = billingProblem(pid, m.apiOff)
+			return nil
+		}
+		if m.apiOff {
+			s.enableFor = pid
+			s.errText = apiProblem(pid)
 			return nil
 		}
 		if len(m.docker) > 0 {
 			s.errText = dockerProblem(m.docker)
 			return nil
 		}
+		if m.probeErr != nil && !s.probeAcked {
+			s.probeAcked = true
+			s.errText = probeProblem(pid, m.probeErr)
+			return nil
+		}
 		if len(m.missing) > 0 || m.permErr != nil {
 			s.permAcked = true
-			s.errText = permProblem(strings.TrimSpace(s.fields[0].input.Value()), m.missing, m.permErr)
+			s.errText = permProblem(pid, m.missing, m.permErr)
 			return nil
 		}
 		st := s.deps.Setup
@@ -266,6 +412,16 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		if s.validating {
 			return nil
 		}
+		if s.enabling != nil {
+			// Only esc gets through: it abandons the wait, not the
+			// operation, which gcloud may already have started server-side.
+			if m.String() == "esc" {
+				s.enabling.stop()
+				s.enabling = nil
+				s.errText = fmt.Sprintf("Stopped waiting for %s to enable. Press [enter] to check again.", gcp.GKEService)
+			}
+			return nil
+		}
 		switch m.String() {
 		case "esc":
 			return goBack
@@ -278,7 +434,14 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 				return s.setFocus(s.focus + 1)
 			}
 			return s.submit()
+		case "e":
+			if s.enableFor != "" {
+				return s.enable()
+			}
 		}
+		// Editing a field withdraws the offer: it was for the project as
+		// validated, and e has to type again.
+		s.enableFor = ""
 		var cmd tea.Cmd
 		s.fields[s.focus].input, cmd = s.fields[s.focus].input.Update(msg)
 		return cmd
@@ -305,14 +468,17 @@ func (s *projectScreen) View(w int) string {
 
 	b.WriteString("\n")
 	switch {
+	case s.enabling != nil:
+		b.WriteString(theme.Accent.Render(fmt.Sprintf("Enabling %s on %s… (this can take a minute or two)", gcp.GKEService, s.enableFor)) + "\n\n")
+		b.WriteString(s.enabling.view(w))
 	case s.validating && s.checkingDocker:
-		b.WriteString(theme.Accent.Render("Validating project with gcloud and checking Docker…"))
+		b.WriteString(theme.Accent.Render("Validating project, billing and APIs with gcloud and checking Docker…"))
 	case s.validating:
-		b.WriteString(theme.Accent.Render("Validating project with gcloud…"))
+		b.WriteString(theme.Accent.Render("Validating project, billing and APIs with gcloud…"))
 	case s.errText != "":
-		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
+		b.WriteString(theme.ErrorPanel.Width(min(w-4, 90)).Render(theme.Bad.Render(s.errText)))
 	default:
-		b.WriteString(theme.Subtle.Render("The project is validated with `gcloud projects describe` on submit."))
+		b.WriteString(theme.Subtle.Render("On submit the project is validated, and billing and the GKE API are checked."))
 	}
 	return b.String()
 }

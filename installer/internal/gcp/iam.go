@@ -57,18 +57,6 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 	if c.DryRun {
 		return nil, nil
 	}
-	fetchToken := c.token
-	if fetchToken == nil {
-		fetchToken = func(ctx context.Context) (string, error) {
-			out, err := c.run(ctx, "auth", "application-default", "print-access-token")
-			return string(out), err
-		}
-	}
-	token, err := fetchToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	perms := make([]string, len(BootstrapPermissions))
 	for i, p := range BootstrapPermissions {
 		perms[i] = p.Permission
@@ -82,28 +70,10 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 	if base == "" {
 		base = "https://cloudresourcemanager.googleapis.com"
 	}
-	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/v1/projects/%s:testIamPermissions", base, projectID), bytes.NewReader(body))
+	respBody, err := c.callAPI(ctx, http.MethodPost,
+		fmt.Sprintf("%s/v1/projects/%s:testIamPermissions", base, projectID), body)
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("testIamPermissions on %s: %s: %s",
-			projectID, resp.Status, strings.TrimSpace(string(respBody)))
+		return nil, fmt.Errorf("testIamPermissions on %s: %w", projectID, err)
 	}
 
 	var held struct {
@@ -114,6 +84,62 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 	}
 	return missingFrom(held.Permissions), nil
 }
+
+// callAPI sends one request to a Google REST API as the application-default
+// credentials identity and returns the response body. A non-200 status is an
+// error carrying the status and the body, which is where Google APIs put the
+// reason ("API has not been used in project…", "permission denied").
+func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) ([]byte, error) {
+	fetchToken := c.token
+	if fetchToken == nil {
+		fetchToken = func(ctx context.Context) (string, error) {
+			out, err := c.run(ctx, "auth", "application-default", "print-access-token")
+			return string(out), err
+		}
+	}
+	token, err := fetchToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
+	defer cancel()
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponse+1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	// A cut-off body would only fail later as unparseable JSON, which
+	// reads like a broken API rather than an oversized answer.
+	if len(respBody) > maxAPIResponse {
+		return nil, fmt.Errorf("response larger than %d bytes", maxAPIResponse)
+	}
+	return respBody, nil
+}
+
+// maxAPIResponse caps what callAPI reads. The probes ask for single fields,
+// so anything near it means a request forgot to.
+const maxAPIResponse = 1 << 20
 
 // missingFrom returns the bootstrap permissions absent from held, in the
 // stable BootstrapPermissions order.
