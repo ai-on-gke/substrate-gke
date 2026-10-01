@@ -62,6 +62,8 @@ const (
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
+	// TODO: When this pin supports Artifact Registry, update the default
+	// features in NewBuilder and submitRelease.
 	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
