@@ -122,8 +122,8 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	if want := defaultBucketName("acme", s.ClusterName, s.Zone); s.BucketName != want {
 		t.Errorf("BucketName = %q, want %q", s.BucketName, want)
 	}
-	if s.KoDockerRepo != "gcr.io/acme/ate-images" {
-		t.Errorf("KoDockerRepo = %q", s.KoDockerRepo)
+	if s.BuildRepository() != "gcr.io/acme/ate-images" {
+		t.Errorf("BuildRepository = %q", s.BuildRepository())
 	}
 
 	custom := NewSetup()
@@ -200,5 +200,32 @@ func TestUpgradeOrderPositions(t *testing.T) {
 		if got := m.Next(); got != UpgradeOrder[i] {
 			t.Fatalf("Next() #%d = %v, want %v", i, got, UpgradeOrder[i])
 		}
+	}
+}
+
+func TestBuildRepositoryFollowsRegionAndRespectsOverrides(t *testing.T) {
+	s := NewSetup()
+	s.ProjectID, s.Zone, s.ArtifactRegistry = "acme", "us-west1-c", true
+	if err := s.ApplyProjectDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ zone, repository, want string }{
+		{"us-west1-c", "", "us-west1-docker.pkg.dev/acme/ate-images"},
+		{"europe-west4-a", "", "europe-west4-docker.pkg.dev/acme/ate-images"},
+		{"us-central1", "custom-images", "us-central1-docker.pkg.dev/acme/custom-images"},
+	} {
+		s.Zone, s.ArtifactRegistryRepository = tc.zone, tc.repository
+		if got := s.BuildRepository(); got != tc.want {
+			t.Errorf("BuildRepository = %q, want %q", got, tc.want)
+		}
+	}
+	s.ProjectID = "other"
+	if got := s.BuildRepository(); got != "us-central1-docker.pkg.dev/other/custom-images" {
+		t.Fatal(got)
+	}
+	s.KoDockerRepo = "registry.example.com/shared/images"
+	s.Zone = "europe-west1-b"
+	if got := s.BuildRepository(); got != s.KoDockerRepo {
+		t.Fatalf("override changed: %q", got)
 	}
 }

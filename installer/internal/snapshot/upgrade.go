@@ -104,7 +104,9 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 // the new tree: the cluster, and the new version with where its images come
 // from.
 func (b *Builder) NewExports(st *state.Setup) string {
-	next := Probe{KoDockerRepo: st.KoDockerRepo}
+	setup := *st
+	setup.ArtifactRegistry = b.CreatesArtifactRepository()
+	next := Probe{KoDockerRepo: setup.BuildRepository()}
 	if st.Prebuilt() {
 		next = Probe{ImageRepo: st.ImageRepo, ImageTag: st.ImageTag}
 	}
@@ -132,6 +134,17 @@ func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) 
 		"export NEW_VERSION="+ShellQuote(b.SubstrateVersion(st)))
 	block("When you reach its \"Checkout and environment\" section, check out the new release\nand set this for every ate-setup command of the upgrade:",
 		append([]string{"cd " + ShellQuote(nextDir)}, strings.Split(b.NewExports(st), "\n")...)...)
+	if !st.Prebuilt() && st.KoDockerRepo == "" && b.CreatesArtifactRepository() {
+		commands := []string{
+			"gcloud services enable artifactregistry.googleapis.com --project " + ShellQuote(st.ProjectID),
+			fmt.Sprintf("go run ./tools/setup-gcp create repository --project-id %s --region %s --name %s",
+				ShellQuote(st.ProjectID), ShellQuote(st.Region()), ShellQuote(st.RepositoryName())),
+		}
+		if b.BuildsWithDocker(st) {
+			commands = append(commands, "gcloud auth configure-docker "+ShellQuote(st.Region()+"-docker.pkg.dev"))
+		}
+		block("Before building images for this upgrade, prepare the default registry:", commands...)
+	}
 	block("A rollback runs the same commands from the installed release, with its version:",
 		append([]string{"cd " + ShellQuote(installedDir)}, strings.Split(InstalledExports(st), "\n")...)...)
 	return strings.TrimRight(sb.String(), "\n")

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -407,7 +408,7 @@ func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 
 // The doctor cannot know yet whether this install builds anything with
 // docker, so a docker problem only warns there; the images step repeats it
-// next to "Build from source", and the project step is the one that blocks.
+// next to "Build from source", and installation blocks before provisioning.
 func TestDoctorOnlyWarnsAboutDocker(t *testing.T) {
 	result := func(status doctor.Status) func(context.Context) doctor.Result {
 		return func(context.Context) doctor.Result { return doctor.Result{Status: status, Detail: "d", Fix: "fix"} }
@@ -1886,5 +1887,60 @@ func TestExecCompPromptOnlyForCommands(t *testing.T) {
 	}
 	if !strings.Contains(got, "deploy demo counter-microvm") {
 		t.Errorf("a summary step lost its title:\n%s", got)
+	}
+}
+
+func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	app := testApp(t)
+	app.deps.DryRun = false
+	app.deps.Builder = snapshot.NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true, ArtifactRegistry: true})
+	st := app.deps.Setup
+	st.ProjectID, st.Zone = "acme", "us-west1-c"
+	scr := newProjectScreen(app.deps)
+	if got := scr.dockerRegistry("acme"); got != "" {
+		t.Fatalf("project checked a region-dependent default: %q", got)
+	}
+	st.Zone = "europe-west4-a"
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\necho 29.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	config := t.TempDir()
+	t.Setenv("DOCKER_CONFIG", config)
+	provision := newProvisionScreen(app.deps)
+	cmd := provision.Init()
+	if !provision.checkingDocker || provision.comp.started {
+		t.Fatal("bootstrap started before credential check")
+	}
+	if next := provision.Update(cmd()); next != nil || provision.comp.started {
+		t.Fatal("missing credentials allowed bootstrap")
+	}
+	if !strings.Contains(provision.dockerError, "gcloud auth configure-docker europe-west4-docker.pkg.dev") || !strings.Contains(provision.dockerError, "press [r]") {
+		t.Fatal(provision.dockerError)
+	}
+	if err := os.WriteFile(filepath.Join(config, "config.json"), []byte(`{"auths":{"europe-west4-docker.pkg.dev":{"auth":"dXNlcjpwYXNz"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retry := provision.Update(key("r"))
+	if retry == nil {
+		t.Fatal("retry did not check credentials")
+	}
+	provision.Update(retry())
+	defer provision.comp.stop()
+	if !provision.comp.started || provision.dockerError != "" {
+		t.Fatal("successful retry did not start bootstrap")
+	}
+	if !slices.Contains(provision.comp.spec.Env, "KO_DOCKER_REPO=europe-west4-docker.pkg.dev/acme/ate-images") {
+		t.Fatal(provision.comp.spec.Env)
+	}
+	st.ImageRepo, st.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	prebuilt := newProvisionScreen(app.deps)
+	prebuilt.Init()
+	defer prebuilt.comp.stop()
+	if prebuilt.checkingDocker || !prebuilt.comp.started {
+		t.Fatal("prebuilt install checked Docker credentials")
 	}
 }

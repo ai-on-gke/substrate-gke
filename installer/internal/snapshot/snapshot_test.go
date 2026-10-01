@@ -1263,7 +1263,7 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
 		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
 		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(st.KoDockerRepo), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
+		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
@@ -1354,5 +1354,150 @@ func TestBuildsWithDockerReadsAUserSuppliedTree(t *testing.T) {
 	}
 	if !b.BuildsWithDocker(st) {
 		t.Error("a tree with the Dockerfile must need docker")
+	}
+}
+
+func TestArtifactRegistryBootstrap(t *testing.T) {
+	st := testSetup(t)
+	st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), ArtifactRegistry: true})
+	for _, tc := range []struct{ override, want string }{
+		{"", "europe-west4-docker.pkg.dev/acme/build-images"},
+		{"registry.example.com/shared", "registry.example.com/shared"},
+	} {
+		st.KoDockerRepo = tc.override
+		spec := b.Bootstrap(st)
+		for _, want := range []string{"KO_DOCKER_REPO=" + tc.want, "ARTIFACT_REGISTRY_REPOSITORY=build-images", "GCE_REGION=europe-west4"} {
+			if !slices.Contains(spec.Env, want) {
+				t.Errorf("missing %q in %v", want, spec.Env)
+			}
+		}
+		if !slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") || !slices.Contains(spec.SimLines, "Step 8/8: Creating Monitoring Dashboards...") {
+			t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
+		}
+		if !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.want)) {
+			t.Error("upgrade exports use a different registry")
+		}
+	}
+	st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+	if slices.Contains(b.Bootstrap(st).Env, "KO_DOCKER_REPO="+st.BuildRepository()) {
+		t.Error("prebuilt install received source registry")
+	}
+	b.UseSource(Revision{Repo: RepoURL, Commit: Commit})
+	if !slices.Contains(b.Bootstrap(st).SimLines, "Step 7/7: Creating Monitoring Dashboards...") {
+		t.Error("legacy bootstrap changed")
+	}
+}
+
+func TestArtifactRegistryUsesLocalCheckout(t *testing.T) {
+	root := fakeCheckout(t)
+	b := NewBuilder(root, false)
+	b.UseSource(Revision{ArtifactRegistry: true})
+	if b.CreatesArtifactRepository() {
+		t.Fatal("remote metadata overrode local checkout")
+	}
+	file := filepath.Join(root, artifactRepositoryPath)
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !b.CreatesArtifactRepository() {
+		t.Fatal("local repository support not detected")
+	}
+}
+
+func TestCleanupCommandUsesInstallationSource(t *testing.T) {
+	st := testSetup(t)
+	st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
+	st.KoDockerRepo = "registry.example.com/unrelated"
+	root := filepath.Join(t.TempDir(), "user's checkout")
+	b := NewBuilder(root, true)
+	for _, commit := range []string{Commit, strings.Repeat("a", 40)} {
+		b.UseSource(Revision{Repo: RepoURL, Commit: commit})
+		cmd := b.CleanupCommand(st)
+		for _, want := range []string{"--commit " + ShellQuote(commit), "--region 'europe-west4'", "--repository 'build-images'"} {
+			if !strings.Contains(cmd, want) {
+				t.Errorf("command missing %q: %s", want, cmd)
+			}
+		}
+		if strings.Contains(cmd, st.KoDockerRepo) {
+			t.Fatal("cleanup target must not come from build registry")
+		}
+	}
+	cmd := NewBuilder(root, false).CleanupCommand(st)
+	if !strings.Contains(cmd, "--substrate-root "+ShellQuote(root)) || strings.Contains(cmd, "--commit") {
+		t.Fatal(cmd)
+	}
+	if err := exec.Command("bash", "-n", "-c", cmd).Run(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	for _, tc := range []struct {
+		name, zone, repository, registry string
+		supported, envoy, prebuilt       bool
+	}{
+		{name: "zonal cluster", zone: "us-west1-c", supported: true, envoy: true},
+		{name: "regional cluster with custom repository", zone: "europe-west4", repository: "build-images", supported: true},
+		{name: "explicit registry", zone: "us-west1-c", registry: "registry.example.com/shared", supported: true, envoy: true},
+		{name: "prebuilt target", zone: "us-west1-c", supported: true, envoy: true, prebuilt: true},
+		{name: "legacy revision", zone: "us-west1-c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testSetup(t)
+			st.Upgrade = true
+			st.InstalledCommit, st.InstalledVersion = Commit, ReleaseVersion
+			st.InstalledImageRepo, st.InstalledImageTag = ReleaseRepo, ReleaseVersion
+			st.Zone, st.ArtifactRegistryRepository, st.KoDockerRepo = tc.zone, tc.repository, tc.registry
+			if tc.prebuilt {
+				st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.3.0"
+			}
+			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), ArtifactRegistry: tc.supported, EnvoyDataplane: tc.envoy})
+			installed, next := t.TempDir(), filepath.Join(t.TempDir(), "new tree's checkout")
+			if err := os.Mkdir(next, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var script []string
+			for _, line := range strings.Split(b.UpgradeSummary(st, installed, next), "\n") {
+				if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
+					script = append(script, strings.TrimSpace(line))
+				}
+			}
+			bin, log := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+			for _, name := range []string{"go", "gcloud"} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(`#!/bin/sh
+printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_TEST_LOG"
+`), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", strings.Join(script, "\n"))
+			cmd.Env = []string{"PATH=" + bin, "UPGRADE_TEST_LOG=" + log, "GCE_REGION=wrong-region", "ARTIFACT_REGISTRY_REPOSITORY=wrong-repository"}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("upgrade instructions: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			var want string
+			if tc.supported && !tc.prebuilt && tc.registry == "" {
+				registry := st.Region() + "-docker.pkg.dev/acme/" + st.RepositoryName()
+				want = "gcloud|" + next + "|services enable artifactregistry.googleapis.com --project acme|" + registry + "\n" +
+					"go|" + next + "|run ./tools/setup-gcp create repository --project-id acme --region " + st.Region() + " --name " + st.RepositoryName() + "|" + registry + "\n"
+				if tc.envoy {
+					want += "gcloud|" + next + "|auth configure-docker " + st.Region() + "-docker.pkg.dev|" + registry + "\n"
+				}
+			}
+			if string(data) != want {
+				t.Fatalf("preparation calls = %q, want %q", data, want)
+			}
+		})
 	}
 }

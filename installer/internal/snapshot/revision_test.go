@@ -177,31 +177,27 @@ func TestVerifyCommitRunsOutsideAGitRepository(t *testing.T) {
 	}
 }
 
-// A tree with the envoy-dataplane Dockerfile makes a source install run
-// docker, so the wizard has to know before it provisions anything. Substrate
-// 0.1 has no such file and 0.2 does; nothing else tells the two apart.
-func TestVerifyCommitReportsTheEnvoyDockerfile(t *testing.T) {
+func TestVerifyCommitDetectsSourceFeatures(t *testing.T) {
 	remote, run := testRemote(t)
-	before := run("rev-parse", "HEAD")
-	path := filepath.Join(remote, EnvoyDockerfile)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("FROM scratch\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", EnvoyDockerfile)
-	run("commit", "--quiet", "-m", "envoy")
-	after := run("rev-parse", "HEAD")
-
-	for _, tc := range []struct {
-		sha  string
-		want bool
-	}{{before, false}, {after, true}} {
-		got, err := verifyCommit(context.Background(), remote, tc.sha, false)
-		if err != nil || got != tc.want {
-			t.Errorf("verifyCommit(%s) = %v, %v; want %v", shorten(tc.sha), got, err, tc.want)
+	check := func(want sourceFeatures) {
+		t.Helper()
+		got, err := verifyCommit(context.Background(), remote, run("rev-parse", "HEAD"), false)
+		if err != nil || got != want {
+			t.Fatalf("features = %+v, %v; want %+v", got, err, want)
 		}
+	}
+	check(sourceFeatures{})
+	for _, path := range []string{EnvoyDockerfile, artifactRepositoryPath} {
+		file := filepath.Join(remote, path)
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", path)
+		run("commit", "--quiet", "-m", "add feature")
+		check(sourceFeatures{envoy: true, artifactRegistry: path == artifactRepositoryPath})
 	}
 }
 
