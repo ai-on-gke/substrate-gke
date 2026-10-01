@@ -74,7 +74,11 @@ type Client struct {
 	// crmBase overrides the Cloud Resource Manager endpoint; tests point it
 	// at a local server. Empty means the real one.
 	crmBase string
-	// token overrides how MissingPermissions obtains an access token; nil
+	// billingBase and serviceUsageBase override the Cloud Billing and
+	// Service Usage endpoints the same way.
+	billingBase      string
+	serviceUsageBase string
+	// token overrides how the REST probes obtain an access token; nil
 	// means asking gcloud for the application-default one.
 	token func(ctx context.Context) (string, error)
 }
