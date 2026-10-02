@@ -268,3 +268,26 @@ func TestParseClusterKVMReady(t *testing.T) {
 		t.Fatalf("expected KVMReady=false, got ready=%v err=%v", notReady, err)
 	}
 }
+
+// Each line is drawn once and read two ways: as numbers by the comparisons and
+// as text in everything the user is shown. If the two ever disagreed, the
+// wizard would refuse a cluster at the very version its own message says is
+// fine.
+func TestReleaseTextMatchesItsComparison(t *testing.T) {
+	for _, tc := range []struct {
+		r     Release
+		check func(Cluster) bool
+	}{
+		{MinSupportedRelease, Cluster.SupportedRelease},
+		{BetaAPIsExistRelease, Cluster.BetaAPIsAvailable},
+		{PodCertificateGARelease, Cluster.PodCertificateGA},
+	} {
+		if !tc.check(Cluster{MasterVersion: tc.r.String()}) {
+			t.Errorf("a cluster at %s fails the check drawn at %s", tc.r, tc.r)
+		}
+		below := Release{tc.r.Major, tc.r.Minor - 1}
+		if tc.check(Cluster{MasterVersion: below.String() + ".0-gke.1"}) {
+			t.Errorf("a cluster at %s passes the check drawn at %s", below, tc.r)
+		}
+	}
+}

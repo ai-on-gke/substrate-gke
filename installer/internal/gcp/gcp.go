@@ -27,18 +27,33 @@ import (
 	"time"
 )
 
-// RequiredBetaAPIs are the Kubernetes beta APIs Substrate's podcertificate
-// controller depends on. They are required on every release the installer
-// supports, including those that also serve the same APIs as GA: upstream's
-// controllers are built against the v1beta1 types, so the beta group has to be
-// served whatever the cluster's release offers alongside it.
+// RequiredBetaAPIs are the Kubernetes beta APIs Substrate depends on. They are
+// required on every release the installer supports, 1.37 included, even though
+// 1.37 serves both resources under certificates.k8s.io/v1 by default.
+//
+// That is a fact about the pinned upstream, not about Kubernetes, and it has
+// been argued the other way before — upstream's own tools/setup-gcp README at
+// the pin says 1.37 needs no beta enablement — so the reasoning is worth
+// keeping:
+//
+//   - PodCertificateRequest is read through v1 where it is served (upstream
+//     #1829), but ClusterTrustBundle is still v1beta1-only at the pin: ate-setup
+//     waits on a hardcoded v1beta1 kind and atelet lists v1beta1. A plain 1.37
+//     cluster serves no v1beta1, so the install hangs at "Waiting for
+//     podcertificate ClusterTrustBundles to be ready". Upstream #1924 adds v1
+//     ClusterTrustBundle support; once the pin includes it, 1.37 stops needing
+//     this list.
+//   - setup-gcp's bootstrap requests both APIs on every cluster it creates and
+//     turns both on for an existing cluster that lacks them. Readiness asks for
+//     the same pair, so the badge predicts what provision will actually do.
+//
+// The claim that they cannot be enabled on an existing cluster is also wrong:
+// on both 1.36 and 1.37, `clusters update --enable-kubernetes-unstable-apis`
+// was accepted and the APIs were served afterward (measured 2026-09-21; see
+// agent-substrate/substrate#1819).
 //
 // GKE serves them only when they are listed in the cluster's enableK8sBetaApis,
-// which is off by default. That is enough to make an otherwise healthy cluster
-// unable to run Substrate.
-//
-// The beta APIs are deprecated from 1.37 and removed in 1.40, at which point
-// upstream must move to certificates.k8s.io/v1 and this list goes away.
+// which is off by default. They are deprecated from 1.37 and removed in 1.40.
 var RequiredBetaAPIs = []string{
 	"certificates.k8s.io/v1beta1/podcertificaterequests",
 	"certificates.k8s.io/v1beta1/clustertrustbundles",
@@ -64,11 +79,7 @@ var RequiredBetaAPIs = []string{
 //
 //	Beta API "certificates.k8s.io/v1beta1/podcertificaterequests" is not
 //	available in version "1.34.11-gke.1102000"
-const (
-	MinSupportedMajor   = 1
-	MinSupportedMinor   = 36
-	MinSupportedVersion = "1.36"
-)
+var MinSupportedRelease = Release{1, 36}
 
 // The first Kubernetes release serving the PodCertificate APIs as GA.
 //
@@ -80,15 +91,8 @@ const (
 //     every node. Enabling the beta APIs on the running cluster is the whole fix.
 //   - Below it, the projection is itself gated, and a node only picks it up if
 //     it was created after the APIs were enabled. Existing nodes keep failing to
-//     mount with "unimplemented" until they are recycled.
-//
-// PodCertificateGAVersion is a bare minor, which GKE resolves to the newest
-// patch it serves — there is no patch number here to go stale.
-const (
-	PodCertificateGAMajor   = 1
-	PodCertificateGAMinor   = 37
-	PodCertificateGAVersion = "1.37"
-)
+//     mount with "unimplemented" until their node pool is replaced.
+var PodCertificateGARelease = Release{1, 37}
 
 // The first release carrying both beta APIs — the technical floor the comment
 // above distinguishes from the supported one, and the only reason to care about
@@ -96,11 +100,17 @@ const (
 // enablement, so an unsupported cluster is unsupported and nothing more. Below
 // it GKE also rejects the request outright, which is worth quoting back rather
 // than letting someone discover it by trying.
-const (
-	BetaAPIsExistMajor   = 1
-	BetaAPIsExistMinor   = 35
-	BetaAPIsExistVersion = "1.35"
-)
+var BetaAPIsExistRelease = Release{1, 35}
+
+// Release is a Kubernetes minor release, the granularity every line above is
+// drawn at. One value holds both the number the comparisons read and the text
+// the user is shown, so the two cannot drift apart.
+type Release struct{ Major, Minor int }
+
+// String is the bare minor ("1.36"). GKE accepts it wherever it takes a
+// version and resolves it to the newest patch it serves, so it is also safe to
+// print into a command.
+func (r Release) String() string { return fmt.Sprintf("%d.%d", r.Major, r.Minor) }
 
 // Cluster is one GKE cluster as listed by gcloud.
 type Cluster struct {
@@ -126,7 +136,7 @@ type Cluster struct {
 // through onto an unsupported release costs a failed install the user can
 // retry; being told a working cluster is too old costs a cluster rebuild.
 func (c Cluster) SupportedRelease() bool {
-	atLeast, ok := atLeastMinor(c.MasterVersion, MinSupportedMajor, MinSupportedMinor)
+	atLeast, ok := atLeastMinor(c.MasterVersion, MinSupportedRelease)
 	return !ok || atLeast
 }
 
@@ -136,7 +146,7 @@ func (c Cluster) SupportedRelease() bool {
 // be below the supported floor. An unreadable version reports true, matching
 // SupportedRelease: neither guess should invent an error GKE never returned.
 func (c Cluster) BetaAPIsAvailable() bool {
-	atLeast, ok := atLeastMinor(c.MasterVersion, BetaAPIsExistMajor, BetaAPIsExistMinor)
+	atLeast, ok := atLeastMinor(c.MasterVersion, BetaAPIsExistRelease)
 	return !ok || atLeast
 }
 
@@ -145,18 +155,18 @@ func (c Cluster) BetaAPIsAvailable() bool {
 // above for what it is actually for, which is choosing the repair instructions.
 //
 // A version that cannot be read reports false, which buys the wordier of the two
-// remedies. Telling someone to recycle nodes they did not need to recycle wastes
+// remedies. Telling someone to replace node pools that did not need it wastes
 // their time; omitting it leaves them staring at a pod that will never mount.
 func (c Cluster) PodCertificateGA() bool {
-	atLeast, ok := atLeastMinor(c.MasterVersion, PodCertificateGAMajor, PodCertificateGAMinor)
+	atLeast, ok := atLeastMinor(c.MasterVersion, PodCertificateGARelease)
 	return ok && atLeast
 }
 
 // SubstrateReady reports whether the cluster can run Substrate: a supported
 // release, with the beta APIs enabled on it. Both halves are load-bearing and
 // neither substitutes for the other — a 1.37 cluster without the beta APIs is
-// not ready, because upstream's controllers watch the v1beta1 types whatever
-// else the release serves; and a 1.35 cluster with them is not ready either,
+// not ready, because the pinned upstream still reads ClusterTrustBundle only
+// through v1beta1 (see RequiredBetaAPIs); and a 1.35 cluster with them is not ready either,
 // because the release itself is outside the supported set.
 func (c Cluster) SubstrateReady() bool {
 	if !c.SupportedRelease() {
@@ -171,14 +181,14 @@ func (c Cluster) SubstrateReady() bool {
 }
 
 // atLeastMinor reports whether a GKE version names a Kubernetes release at or
-// after major.minor. Only the leading two segments are read, since a GKE
+// after r. Only the leading two segments are read, since a GKE
 // version carries a patch and a build suffix ("1.37.1-gke.1163012") and the
 // distinction here is a minor-release one.
 //
 // ok is false for anything that does not start with two numbers, leaving the
 // caller to decide what an unreadable version means; there is no answer that is
 // safe in both directions.
-func atLeastMinor(version string, major, minor int) (atLeast, ok bool) {
+func atLeastMinor(version string, r Release) (atLeast, ok bool) {
 	majorPart, rest, found := strings.Cut(version, ".")
 	if !found {
 		return false, false
@@ -192,10 +202,10 @@ func atLeastMinor(version string, major, minor int) (atLeast, ok bool) {
 	if err != nil {
 		return false, false
 	}
-	if gotMajor != major {
-		return gotMajor > major, true
+	if gotMajor != r.Major {
+		return gotMajor > r.Major, true
 	}
-	return gotMinor >= minor, true
+	return gotMinor >= r.Minor, true
 }
 
 // NodePool is one GKE node pool.
@@ -274,7 +284,7 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 		// Between them these cover every verdict the cluster screen can reach,
 		// so a --dry-run walkthrough shows the whole story without a GCP
 		// project. The three that lack the beta APIs each land on a different
-		// branch of the confirm panel — too old to enable, enable and recycle,
+		// branch of the confirm panel — too old to enable, enable and replace pools,
 		// enable and go — and the last two names are also cues for
 		// CheckInstalled's sim, which supplies the installed and partial
 		// states of the reinstall guard.
@@ -287,12 +297,12 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 			{Name: "legacy-prod", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.33.2-gke.100", NodeCount: 12},
 			// Supported, but too old for the projection to be GA: the repair
-			// works and costs a recycle of all 6 nodes.
+			// works and costs replacing the pool behind all 6 nodes.
 			{Name: "ml-staging", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 6},
 			// Missing the beta APIs on a release that also serves them as GA:
 			// not ready either, but repaired by enabling them on the running
-			// cluster, with none of the node recycling ml-staging needs.
+			// cluster, with none of the pool replacement ml-staging needs.
 			{Name: "substrate-ga", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.37.1-gke.1000000", NodeCount: 2},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",

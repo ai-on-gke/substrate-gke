@@ -205,7 +205,7 @@ const (
 // It is the newest release GKE's Regular channel carries, which is where
 // upstream's bootstrap lands a cluster — it sets no release channel, so GKE
 // applies its default. Regular's own default version is below
-// gcp.MinSupportedVersion, so leaving this empty would have the installer
+// gcp.MinSupportedRelease, so leaving this empty would have the installer
 // create clusters it then refuses to install onto.
 //
 // That it currently equals the floor is a coincidence of GKE's rollout, not a
@@ -253,6 +253,13 @@ type Setup struct {
 	ClusterName     string
 	ClusterIsNew    bool
 	ClusterKVMReady bool
+
+	// EnableBetaAPIs records that the chosen existing cluster lacks the beta
+	// PodCertificate APIs, so provision is about to turn them on: a
+	// control-plane update of roughly ten minutes rather than the quick
+	// top-up an existing cluster normally gets. The provision screen words
+	// itself from this, having just told the user to expect it.
+	EnableBetaAPIs bool
 
 	// ClusterVersion shapes a cluster the install creates and is ignored for
 	// one it connects to: upstream's bootstrap reads it only on the creation
