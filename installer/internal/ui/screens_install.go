@@ -48,14 +48,14 @@ type provisionDockerMsg struct {
 func newProvisionScreen(deps *Deps) *provisionScreen {
 	return &provisionScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Builder.CreatesArtifactRepository()), deps.LogPath),
+		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Builder.CreatesArtifactRepository(deps.Setup)), deps.LogPath),
 	}
 }
 
 func (s *provisionScreen) Init() tea.Cmd {
 	s.dockerError = ""
 	st := s.deps.Setup
-	if s.deps.DryRun || !st.ArtifactRegistry || st.KoDockerRepo != "" || !s.deps.Builder.BuildsWithDocker(st) {
+	if s.deps.DryRun || !s.deps.Builder.CreatesArtifactRepository(st) || !s.deps.Builder.BuildsWithDocker(st) {
 		return s.comp.start()
 	}
 	s.checkingDocker = true

@@ -105,7 +105,7 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 // from.
 func (b *Builder) NewExports(st *state.Setup) string {
 	setup := *st
-	setup.ArtifactRegistry = b.CreatesArtifactRepository()
+	setup.ArtifactRegistry = b.SupportsArtifactRegistry()
 	next := Probe{KoDockerRepo: setup.BuildRepository()}
 	if st.Prebuilt() {
 		next = Probe{ImageRepo: st.ImageRepo, ImageTag: st.ImageTag}
@@ -134,7 +134,7 @@ func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) 
 		"export NEW_VERSION="+ShellQuote(b.SubstrateVersion(st)))
 	block("When you reach its \"Checkout and environment\" section, check out the new release\nand set this for every ate-setup command of the upgrade:",
 		append([]string{"cd " + ShellQuote(nextDir)}, strings.Split(b.NewExports(st), "\n")...)...)
-	if !st.Prebuilt() && st.KoDockerRepo == "" && b.CreatesArtifactRepository() {
+	if b.CreatesArtifactRepository(st) {
 		commands := []string{
 			"gcloud services enable artifactregistry.googleapis.com --project " + ShellQuote(st.ProjectID),
 			fmt.Sprintf("go run ./tools/setup-gcp create repository --project-id %s --region %s --name %s",

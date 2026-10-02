@@ -466,6 +466,9 @@ func (b *Builder) UseSource(rev Revision) {
 func (b *Builder) CleanupCommand(st *state.Setup) string {
 	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) +
 		" --region " + ShellQuote(st.Region()) + " --repository " + ShellQuote(st.RepositoryName())
+	if !b.CreatesArtifactRepository(st) {
+		command += " --keep-repository"
+	}
 	if b.Managed {
 		return command + " --commit " + ShellQuote(b.commit)
 	}
@@ -499,13 +502,18 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 	return b.features.envoy
 }
 
-// CreatesArtifactRepository reports whether this checkout provisions an image repository.
-func (b *Builder) CreatesArtifactRepository() bool {
+// SupportsArtifactRegistry reports whether this checkout can provision an image repository.
+func (b *Builder) SupportsArtifactRegistry() bool {
 	if !b.Managed {
 		_, err := os.Stat(filepath.Join(b.Root, artifactRepositoryPath))
 		return err == nil
 	}
 	return b.features.artifactRegistry
+}
+
+// CreatesArtifactRepository reports whether this install provisions its build repository.
+func (b *Builder) CreatesArtifactRepository(st *state.Setup) bool {
+	return !st.Prebuilt() && st.KoDockerRepo == "" && b.SupportsArtifactRegistry()
 }
 
 // EnvoyRouter reports whether ate-setup deploys the envoy router, its default
@@ -538,12 +546,13 @@ func HasEnvoyDockerfile(root string) bool {
 // duplicate, so this overrides the inherited value.
 func (b *Builder) env(st *state.Setup) []string {
 	setup := *st
-	setup.ArtifactRegistry = b.CreatesArtifactRepository()
+	setup.ArtifactRegistry = b.SupportsArtifactRegistry()
 	env := []string{
 		"PROJECT_ID=" + st.ProjectID,
 		"PROJECT_NUMBER=" + st.ProjectNumber,
 		"GCE_REGION=" + st.Region(),
 		"ARTIFACT_REGISTRY_REPOSITORY=" + st.RepositoryName(),
+		"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(b.CreatesArtifactRepository(st)),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
 		"NETWORK=" + st.Network,
@@ -717,7 +726,7 @@ func (b *Builder) fetchSimLines() []string {
 // Bootstrap provisions GCP resources through the selected upstream checkout.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	phases := []string{"Enabling required APIs..."}
-	if b.CreatesArtifactRepository() {
+	if b.CreatesArtifactRepository(st) {
 		phases = append(phases, "Creating Artifact Registry repository...")
 	}
 	phases = append(phases,

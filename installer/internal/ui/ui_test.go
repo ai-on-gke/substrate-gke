@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -387,6 +389,8 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 	labels := func(prebuilt bool) []string {
 		app := testApp(t)
+		app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+		app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit, ArtifactRegistry: true})
 		app.deps.Setup.Track = state.TrackAdvanced
 		if prebuilt {
 			app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
@@ -397,12 +401,68 @@ func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 		}
 		return out
 	}
-	const registry = "Image registry (leave empty for default)"
-	if !slices.Contains(labels(false), registry) {
-		t.Errorf("a source build must be asked where to push: %v", labels(false))
+	source, prebuilt := labels(false), labels(true)
+	for _, registry := range []string{"Image registry (leave empty for default)", "Artifact Registry repository (leave empty for default)"} {
+		if !slices.Contains(source, registry) {
+			t.Errorf("a source build must be asked where to push: %v", source)
+		}
+		if slices.Contains(prebuilt, registry) {
+			t.Errorf("a pre-built install pushes nothing: %v", prebuilt)
+		}
 	}
-	if slices.Contains(labels(true), registry) {
-		t.Errorf("a pre-built install pushes nothing: %v", labels(true))
+}
+
+type permissionTransport func(*http.Request) (*http.Response, error)
+
+func (f permissionTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestProjectRequestsRepositoryPermissionsOnlyWhenCreating(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "gcloud"), []byte("#!/bin/sh\necho 12345\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	client := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = client })
+	http.DefaultClient = &http.Client{Transport: permissionTransport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"permissions":[]}`))}, nil
+	})}
+	for _, tc := range []struct {
+		name, savedRegistry, typedRegistry string
+		supported, prebuilt, want          bool
+	}{
+		{"default source", "", "", true, false, true},
+		{"typed custom registry", "", "registry.example.com/images", true, false, false},
+		{"cleared custom registry", "registry.example.com/images", "", true, false, true},
+		{"prebuilt images", "", "", true, true, false},
+		{"legacy source", "", "", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := testApp(t)
+			app.deps.GCP.DryRun = false
+			app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+			app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit, ArtifactRegistry: tc.supported})
+			st := app.deps.Setup
+			st.Track, st.ProjectID, st.KoDockerRepo = state.TrackAdvanced, "acme", tc.savedRegistry
+			if tc.prebuilt {
+				st.ImageRepo, st.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+			}
+			scr := newProjectScreen(app.deps)
+			for i, f := range scr.fields {
+				if f.label == "Image registry (leave empty for default)" {
+					scr.fields[i].input.SetValue(tc.typedRegistry)
+				}
+			}
+			msg := scr.submit()().(projValidMsg)
+			if msg.err != nil || msg.permErr != nil || len(msg.missing) == 0 {
+				t.Fatalf("permission check failed: %+v", msg)
+			}
+			for _, permission := range []string{"artifactregistry.repositories.get", "artifactregistry.repositories.create"} {
+				if slices.Contains(msg.missing, gcp.RequiredPermission{Permission: permission, Role: "roles/artifactregistry.admin"}) != tc.want {
+					t.Errorf("missing permissions = %v; want repository permissions = %t", msg.missing, tc.want)
+				}
+			}
+		})
 	}
 }
 

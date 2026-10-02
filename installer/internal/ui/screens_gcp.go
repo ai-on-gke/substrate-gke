@@ -88,7 +88,7 @@ func newField(label, value, placeholder string, set func(*state.Setup, string)) 
 
 func newProjectScreen(deps *Deps) *projectScreen {
 	st := deps.Setup
-	st.ArtifactRegistry = deps.Builder.CreatesArtifactRepository()
+	st.ArtifactRegistry = deps.Builder.SupportsArtifactRegistry()
 	fields := []field{
 		newField("GCP project ID", st.ProjectID, "my-project", func(s *state.Setup, v string) { s.ProjectID = v }),
 		newField("Cluster location (zone)", st.Zone, "us-west1-c", func(s *state.Setup, v string) { s.Zone = v }),
@@ -108,7 +108,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			)
 		}
 	}
-	if st.Track == state.TrackAdvanced && st.ArtifactRegistry {
+	if st.Track == state.TrackAdvanced && st.ArtifactRegistry && !st.Prebuilt() {
 		fields = append(fields, newField("Artifact Registry repository (leave empty for default)", st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
 	}
 	scr := &projectScreen{deps: deps, fields: fields}
@@ -147,8 +147,9 @@ func (s *projectScreen) submit() tea.Cmd {
 	s.errText = ""
 	s.validating = true
 	acked := s.permAcked
+	st := s.inputSetup(pid)
 	var repositoryPermissions []gcp.RequiredPermission
-	if s.deps.Builder.CreatesArtifactRepository() {
+	if s.deps.Builder.CreatesArtifactRepository(&st) {
 		repositoryPermissions = []gcp.RequiredPermission{
 			{Permission: "artifactregistry.repositories.get", Role: "roles/artifactregistry.admin"},
 			{Permission: "artifactregistry.repositories.create", Role: "roles/artifactregistry.admin"},
@@ -175,24 +176,27 @@ func (s *projectScreen) submit() tea.Cmd {
 	}
 }
 
+// inputSetup reads the form without committing it before validation succeeds.
+func (s *projectScreen) inputSetup(pid string) state.Setup {
+	st := *s.deps.Setup
+	for _, f := range s.fields {
+		f.set(&st, strings.TrimSpace(f.input.Value()))
+	}
+	st.ProjectID = pid
+	return st
+}
+
 // dockerRegistry selects checks for a known build destination. The default AR
 // destination waits for cluster selection, which may change its region.
 func (s *projectScreen) dockerRegistry(pid string) string {
 	if s.deps.DryRun || s.deps.Builder == nil {
 		return ""
 	}
-	// What the fields would make of the setup, without committing them
-	// before the project has validated.
-	st := *s.deps.Setup
-	for _, f := range s.fields {
-		f.set(&st, strings.TrimSpace(f.input.Value()))
-	}
-	st.ProjectID = pid
+	st := s.inputSetup(pid)
 	if !s.deps.Builder.BuildsWithDocker(&st) {
 		return ""
 	}
 	if st.ArtifactRegistry && st.KoDockerRepo == "" {
-		// The cluster selection determines the default registry's region.
 		return ""
 	}
 	return st.BuildRepository()

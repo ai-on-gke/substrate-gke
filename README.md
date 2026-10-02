@@ -6,7 +6,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 > **New here?** Run `make dry-run` first — it walks the entire wizard without touching GCP, so you can see every prompt before committing to anything.
 
 > [!WARNING]
-> **This creates billable GCP resources.** A completed install provisions a GKE cluster, a snapshot bucket, IAM bindings, monitoring dashboards, and (on supported source revisions) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
+> **This creates billable GCP resources.** A completed install provisions a GKE cluster, a snapshot bucket, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
 
 ![The installer's welcome screen](docs/screenshots/welcome.svg)
 
@@ -66,7 +66,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
-| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an image repository on supported revisions. Idempotent |
+| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
@@ -185,7 +185,7 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Just getting Substrate running | A branch or commit with no published images |
 
-Source revisions with Artifact Registry support create `ate-images` and default to `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster; older revisions keep the GCR default. Advanced mode can override the repository name or image registry. A custom image registry must already exist.
+For source builds using the default registry, supported revisions create `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster; older revisions keep the GCR default. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
 > [!IMPORTANT]
 > If you point at a custom registry/tag, **move the commit with it.** Only the release registry is guaranteed to match its tags — images from anywhere else need the commit they were built from, or they'll run behind manifests from a different Substrate. The wizard warns you as soon as the registry or tag changes.
@@ -247,7 +247,7 @@ The installed tree is fetched at the commit the running API server reports it wa
 
 ## Tearing down
 
-An install creates **billable resources**: the GKE cluster, the snapshot bucket, IAM bindings, monitoring dashboards, and an image repository on supported revisions.
+An install creates **billable resources**: the GKE cluster, the snapshot bucket, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
@@ -258,7 +258,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. Add `--keep-repository` to preserve shared images. It's safe to re-run after a partial failure.
+The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. The printed command includes `--keep-repository` when the install did not provision a repository. Add it yourself to preserve shared images from a source build. It's safe to re-run after a partial failure.
 
 To remove **only** the Substrate control plane and keep the cluster:
 

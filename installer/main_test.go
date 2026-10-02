@@ -134,6 +134,7 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 		"--cluster " + snapshot.ShellQuote(st.ClusterName),
 		"--location " + snapshot.ShellQuote(st.Zone),
 		"--bucket " + snapshot.ShellQuote(st.BucketName),
+		"--keep-repository",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary cleanup line missing %q:\n%s", want, out)

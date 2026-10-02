@@ -16,6 +16,7 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1067,6 +1068,7 @@ func prebuiltSetup(t *testing.T) *state.Setup {
 // atelet actually is — a checkout's commit stamp would overwrite it with a lie.
 func TestPrebuiltEnvDropsTheBuildVariables(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
+	b.UseSource(Revision{Repo: RepoURL, Commit: Commit, ArtifactRegistry: true})
 	env := b.DeployAteSystem(prebuiltSetup(t)).Env
 
 	for _, unwanted := range []string{"KO_DOCKER_REPO", "KO_DEFAULTPLATFORMS"} {
@@ -1358,35 +1360,45 @@ func TestBuildsWithDockerReadsAUserSuppliedTree(t *testing.T) {
 }
 
 func TestArtifactRegistryBootstrap(t *testing.T) {
-	st := testSetup(t)
-	st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
-	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
-	b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), ArtifactRegistry: true})
-	for _, tc := range []struct{ override, want string }{
-		{"", "europe-west4-docker.pkg.dev/acme/build-images"},
-		{"registry.example.com/shared", "registry.example.com/shared"},
+	for _, tc := range []struct {
+		name, override, registry    string
+		supported, prebuilt, create bool
+	}{
+		{"default source registry", "", "europe-west4-docker.pkg.dev/acme/build-images", true, false, true},
+		{"custom source registry", "registry.example.com/shared", "registry.example.com/shared", true, false, false},
+		{"prebuilt images", "", "", true, true, false},
+		{"legacy source", "", "gcr.io/acme/ate-images", false, false, false},
 	} {
-		st.KoDockerRepo = tc.override
-		spec := b.Bootstrap(st)
-		for _, want := range []string{"KO_DOCKER_REPO=" + tc.want, "ARTIFACT_REGISTRY_REPOSITORY=build-images", "GCE_REGION=europe-west4"} {
-			if !slices.Contains(spec.Env, want) {
-				t.Errorf("missing %q in %v", want, spec.Env)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CREATE_ARTIFACT_REPOSITORY", fmt.Sprint(!tc.create))
+			st := testSetup(t)
+			st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
+			st.KoDockerRepo = tc.override
+			if tc.prebuilt {
+				st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
 			}
-		}
-		if !slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") || !slices.Contains(spec.SimLines, "Step 8/8: Creating Monitoring Dashboards...") {
-			t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
-		}
-		if !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.want)) {
-			t.Error("upgrade exports use a different registry")
-		}
-	}
-	st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
-	if slices.Contains(b.Bootstrap(st).Env, "KO_DOCKER_REPO="+st.BuildRepository()) {
-		t.Error("prebuilt install received source registry")
-	}
-	b.UseSource(Revision{Repo: RepoURL, Commit: Commit})
-	if !slices.Contains(b.Bootstrap(st).SimLines, "Step 7/7: Creating Monitoring Dashboards...") {
-		t.Error("legacy bootstrap changed")
+			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), ArtifactRegistry: tc.supported})
+			spec := b.Bootstrap(st)
+			for _, want := range []string{"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(tc.create), "ARTIFACT_REGISTRY_REPOSITORY=build-images", "GCE_REGION=europe-west4"} {
+				if !slices.Contains(spec.Env, want) {
+					t.Errorf("missing %q in %v", want, spec.Env)
+				}
+			}
+			if !tc.prebuilt && (!slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) || !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.registry))) {
+				t.Errorf("build and upgrade must use %q", tc.registry)
+			}
+			steps := 7
+			if tc.create {
+				steps++
+			}
+			if slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
+				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
+			}
+			if strings.Contains(b.CleanupCommand(st), "--keep-repository") == tc.create {
+				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st))
+			}
+		})
 	}
 }
 
@@ -1394,7 +1406,7 @@ func TestArtifactRegistryUsesLocalCheckout(t *testing.T) {
 	root := fakeCheckout(t)
 	b := NewBuilder(root, false)
 	b.UseSource(Revision{ArtifactRegistry: true})
-	if b.CreatesArtifactRepository() {
+	if b.SupportsArtifactRegistry() {
 		t.Fatal("remote metadata overrode local checkout")
 	}
 	file := filepath.Join(root, artifactRepositoryPath)
@@ -1404,7 +1416,7 @@ func TestArtifactRegistryUsesLocalCheckout(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !b.CreatesArtifactRepository() {
+	if !b.SupportsArtifactRegistry() {
 		t.Fatal("local repository support not detected")
 	}
 }
