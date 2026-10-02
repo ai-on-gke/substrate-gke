@@ -41,7 +41,7 @@ type provisionScreen struct {
 func newProvisionScreen(deps *Deps) *provisionScreen {
 	return &provisionScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(), deps.LogPath),
+		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Setup.ClusterIsNew, deps.Setup.EnableBetaAPIs), deps.LogPath),
 	}
 }
 
@@ -87,10 +87,17 @@ func (s *provisionScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Provision GCP resources") + "\n")
-	if st.ClusterIsNew {
+	switch {
+	case st.ClusterIsNew:
 		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
 			"Creating cluster %s in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.Zone)) + "\n\n")
-	} else {
+	case st.EnableBetaAPIs:
+		// The cluster screen has just told the user this update is coming;
+		// the "only fills in the bucket" line below would contradict it
+		// while a ten-minute control-plane update runs underneath.
+		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
+			"Turning on the beta PodCertificate APIs for cluster %s — expect a control-plane update of roughly ten minutes, then the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
+	default:
 		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
 			"Cluster %s already exists; bootstrap is idempotent and only fills in the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
 	}

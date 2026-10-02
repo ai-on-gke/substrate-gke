@@ -36,6 +36,9 @@ type field struct {
 	input textinput.Model
 	// set writes the submitted value into Setup.
 	set func(st *state.Setup, v string)
+	// check, when set, returns why the submitted value cannot be used, or ""
+	// when it can. It runs before anything reaches the network.
+	check func(v string) string
 }
 
 type prefillMsg struct {
@@ -98,6 +101,11 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
 			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
 			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
+			// Only consulted when the run creates a cluster. Offered anyway
+			// rather than hidden behind that choice, which is made on the next
+			// screen: the fields would have to appear after it, splitting one
+			// form into two.
+			clusterVersionField(st.ClusterVersion),
 		)
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
@@ -110,6 +118,35 @@ func newProjectScreen(deps *Deps) *projectScreen {
 	scr := &projectScreen{deps: deps, fields: fields}
 	scr.fields[0].input.Focus()
 	return scr
+}
+
+// clusterVersionField is the advanced track's version for a cluster the run
+// creates. It is validated rather than taken as typed because nothing later
+// would catch a bad one: the new-cluster path never passes the cluster
+// screen's readiness check, so a release below the floor would be created and
+// installed onto without a word. Cleared, it means the default rather than
+// "no version", which would hand the choice to GKE's Regular channel, whose
+// own default is below the floor.
+func clusterVersionField(current string) field {
+	f := newField("Cluster version (new clusters)", current, state.DefaultClusterVersion, func(s *state.Setup, v string) {
+		if v == "" {
+			v = state.DefaultClusterVersion
+		}
+		s.ClusterVersion = v
+	})
+	f.check = clusterVersionProblem
+	return f
+}
+
+// clusterVersionProblem rejects a version below the supported floor. An empty
+// value is the default, and an unreadable one is left for GKE to judge: it
+// knows aliases like "latest" that this check does not, and it rejects a
+// version that does not exist with a clearer error than ours.
+func clusterVersionProblem(v string) string {
+	if v == "" || (gcp.Cluster{MasterVersion: v}).SupportedRelease() {
+		return ""
+	}
+	return fmt.Sprintf("Cluster version %s is below %s, the oldest release Substrate is supported on.", v, gcp.MinSupportedRelease)
 }
 
 func (s *projectScreen) Init() tea.Cmd {
@@ -139,6 +176,15 @@ func (s *projectScreen) submit() tea.Cmd {
 	if pid == "" {
 		s.errText = "A project ID is required."
 		return s.setFocus(0)
+	}
+	for i, f := range s.fields {
+		if f.check == nil {
+			continue
+		}
+		if problem := f.check(strings.TrimSpace(f.input.Value())); problem != "" {
+			s.errText = problem
+			return s.setFocus(i)
+		}
 	}
 	s.errText = ""
 	s.validating = true
@@ -437,9 +483,24 @@ func (s *clusterScreen) Hints() []Hint {
 		}
 		return []Hint{{"esc", "cancel"}}
 	case "confirm":
-		return []Hint{{"y", "use it anyway"}, {"esc", "choose another"}}
+		// Below the floor 'y' leads somewhere nobody supports, and often to a
+		// bootstrap that asks GKE for an API that release has never had and
+		// stops there. Keep the key — a canned fixture or a misread version
+		// should not trap anyone — but stop advertising it as a way forward.
+		if s.cursor < len(s.clusters) && !s.clusters[s.cursor].SupportedRelease() {
+			return []Hint{{"y", "use it anyway (unsupported)"}, {"esc", "choose another"}}
+		}
+		return []Hint{{"y", "enable and continue"}, {"esc", "choose another"}}
 	}
 	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
+}
+
+// selected is the cluster under the cursor, and false on the create-new row.
+func (s *clusterScreen) selected() (gcp.Cluster, bool) {
+	if s.cursor < 0 || s.cursor >= len(s.clusters) {
+		return gcp.Cluster{}, false
+	}
+	return s.clusters[s.cursor], true
 }
 
 // choose is the one place a selection reaches Setup. Everything before it —
@@ -452,6 +513,7 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.Zone = c.Location
 	st.ClusterIsNew = false
 	st.ClusterKVMReady = c.KVMReady
+	st.EnableBetaAPIs = !c.SubstrateReady()
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -544,8 +606,31 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		s.loading = false
+		prev, hadSelection := s.selected()
 		s.clusters, s.err = m.clusters, m.err
 		s.cursor = len(s.clusters) // default to "create new"
+		// Every mode but the list and the name prompt is about one cluster,
+		// read through s.cursor. A reload landing mid-way (two [r]s in
+		// flight) must not leave such a mode pointing past the new list, so
+		// keep the selection if the cluster is still there and drop back to
+		// the list if it is not.
+		if s.mode != "list" && s.mode != "name" {
+			kept := false
+			if hadSelection {
+				for i, c := range s.clusters {
+					if c.Name == prev.Name && c.Location == prev.Location {
+						s.cursor, kept = i, true
+						break
+					}
+				}
+			}
+			if !kept {
+				if s.comp != nil {
+					s.comp.stop()
+				}
+				s.mode = "list"
+			}
+		}
 		return s.bgProbes()
 
 	case bgProbeMsg:
@@ -586,6 +671,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st.ClusterName = name
 				st.ClusterIsNew = true
 				st.ClusterKVMReady = false
+				st.EnableBetaAPIs = false
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
@@ -713,6 +799,16 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// newClusterVersion is the release a cluster created on this run comes up at:
+// the advanced track's choice, or the default. The copy quotes it, so a user
+// who asked for 1.38 is not told new clusters come at 1.36.
+func (s *clusterScreen) newClusterVersion() string {
+	if v := s.deps.Setup.ClusterVersion; v != "" {
+		return v
+	}
+	return state.DefaultClusterVersion
+}
+
 func (s *clusterScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
@@ -729,11 +825,19 @@ func (s *clusterScreen) View(w int) string {
 	}
 
 	for i, c := range s.clusters {
-		// "substrate-ready" is capability (the beta APIs), not install state:
-		// what the probe learned about an actual install is its own badge, so
-		// a teardown visibly clears it while readiness rightly stays.
+		// "substrate-ready" is capability (the beta PodCertificate APIs), not
+		// install state: what the probe learned about an actual install is its
+		// own badge, so a teardown visibly clears it while readiness rightly
+		// stays. Name the missing capability rather than only saying something
+		// is — the confirm panel then explains how to get it.
 		badge := theme.Good.Render(theme.GlyphDone + " substrate-ready")
-		if !c.SubstrateReady() {
+		switch {
+		case c.SubstrateReady():
+		case !c.SupportedRelease():
+			// Distinct from "missing" because the remedy differs: no
+			// enablement helps this one until the control plane moves.
+			badge = theme.Bad.Render(theme.GlyphFail + " needs " + gcp.MinSupportedRelease.String() + "+")
+		default:
 			badge = theme.Bad.Render(theme.GlyphFail + " beta APIs missing")
 		}
 		if res, ok := s.probed[c.Name+"/"+c.Location]; ok && res.Installed {
@@ -815,15 +919,69 @@ func (s *clusterScreen) View(w int) string {
 				"deploy steps are idempotent.\n\n"+
 				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
 	case "confirm":
-		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 74)).Render(
+		sel := s.clusters[s.cursor]
+		// Three outcomes, and the release picks which. Below the floor there is
+		// nothing to enable that would help; above it the request always
+		// works, but below the GA release the kubelet honors pod certificate
+		// projection only on nodes created after it, so the existing ones
+		// mount "unimplemented" until their pool is replaced. Say which case
+		// this is rather than making the user find out at deploy time.
+		var lede, fix, keys string
+		switch {
+		case !sel.SupportedRelease():
+			lede = "Its release is below " + gcp.MinSupportedRelease.String() + ", the oldest Substrate is supported on.\n"
+			// Only worth saying where it is true. From 1.35 GKE accepts the
+			// enablement happily; such a cluster is unsupported, not broken,
+			// and quoting an error it would never return sends the user
+			// looking for a problem that is not there.
+			if !sel.BetaAPIsAvailable() {
+				lede += "GKE will not even enable them there: \"Beta API … is not available\n" +
+					"in version " + sel.MasterVersion + "\".\n"
+			}
+			fix = "  • Upgrade this cluster's control plane to " + gcp.MinSupportedRelease.String() + " or newer first,\n" +
+				"    then come back — from there it is enabled in place.\n" +
+				"  • Or create a new cluster instead: the installer makes them at\n" +
+				"    " + s.newClusterVersion() + " with the APIs already on.\n"
+			keys = theme.Key.Render("[y]") + " use it anyway (unsupported)   " + theme.Key.Render("[esc]") + " choose another"
+		default:
+			lede = "GKE serves them only for clusters that opted in, and this one did not.\n" +
+				"It is fixable without recreating the cluster.\n"
+			fix = "  • Continue here: the provision step turns them on for this cluster.\n" +
+				"    Expect a control-plane update of roughly ten minutes.\n"
+			if sel.PodCertificateGA() {
+				fix += "    Its nodes keep working as they are — pod certificate projection\n" +
+					"    is GA on " + sel.MasterVersion + ".\n" +
+					"  • Or create a new cluster instead, which is made with them on.\n"
+			} else {
+				// Replacing the pool, not upgrading it in place. An upgrade to
+				// the version a pool already runs is the obvious command, and
+				// GKE skips it without replacing a single node (measured; see
+				// agent-substrate/substrate#1819). Kept as short as it is
+				// because the panel already fills a 40-row terminal, and the
+				// key line at the bottom is the part that must stay visible.
+				fix += "    One catch on " + sel.MasterVersion + ": the kubelet serves pod certificate\n" +
+					"    projection only on nodes created after that update, so each\n" +
+					"    existing node pool must be replaced or pods fail to mount with\n" +
+					"    \"unimplemented\". After provision, add a pool, move workloads:\n" +
+					"    gcloud container node-pools create <new-pool> \\\n" +
+					"      --cluster " + snapshot.ShellQuote(sel.Name) + " --location " + snapshot.ShellQuote(sel.Location) + " ...\n" +
+					"    then delete the old pool with `gcloud container node-pools delete`.\n" +
+					"  • Or create a new cluster instead, made at " + s.newClusterVersion() + " with the APIs on.\n"
+			}
+			keys = theme.Key.Render("[y]") + " enable them and continue   " + theme.Key.Render("[esc]") + " choose another"
+		}
+		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 78)).Render(
 			theme.Warning.Render("This cluster cannot run Substrate as-is.")+"\n\n"+
-				"It was created without the PodCertificate beta APIs\n"+
+				"Substrate's controllers speak the beta PodCertificate APIs\n"+
 				"("+strings.Join(gcp.RequiredBetaAPIs, ",\n ")+").\n"+
-				"GKE only honors these at cluster creation time — enabling them later\n"+
-				"is accepted but never served, and the install will hang.\n\n"+
-				theme.Key.Render("[y]")+" use it anyway (not recommended)   "+theme.Key.Render("[esc]")+" choose another"))
+				lede+"\n"+
+				theme.Title.Render("Ways forward:")+"\n"+fix+"\n"+keys))
 	default:
-		b.WriteString("\n" + theme.Subtle.Render("Substrate needs the PodCertificate beta APIs, which GKE can only\nenable at cluster creation — that's why creating a new cluster is\nthe recommended path."))
+		b.WriteString("\n" + theme.Subtle.Render(
+			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer, plus the beta PodCertificate APIs,\n"+
+				"which GKE serves only for clusters that opted in. A cluster without them\n"+
+				"is fixed in place by the provision step — though below "+gcp.PodCertificateGARelease.String()+" its node\n"+
+				"pools must be replaced afterward. New clusters are created at "+s.newClusterVersion()+"."))
 	}
 	return b.String()
 }

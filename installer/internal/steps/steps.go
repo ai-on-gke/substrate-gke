@@ -47,11 +47,23 @@ func containsAny(subs ...string) func(string) bool {
 
 // Bootstrap tracks the seven idempotent phases of `setup-gcp bootstrap`,
 // preceded by the pinned substrate fetch this step pays for on a cold cache.
-func Bootstrap() []ChecklistItem {
+//
+// Step 2 is the one phase whose work depends on the cluster, so its label does
+// too. Upstream logs "Creating GKE Cluster" either way, but on an existing
+// cluster it creates nothing: it either checks the cluster, or turns the beta
+// APIs on in a control-plane update the user was just told to expect.
+func Bootstrap(clusterIsNew, enableBetaAPIs bool) []ChecklistItem {
+	clusterStep := "Check the existing GKE cluster"
+	switch {
+	case clusterIsNew:
+		clusterStep = "Create the GKE cluster (with the beta PodCertificate APIs)"
+	case enableBetaAPIs:
+		clusterStep = "Turn on the beta PodCertificate APIs (control-plane update)"
+	}
 	return []ChecklistItem{
 		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Step 1/7")},
-		{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Step 2/7")},
+		{clusterStep, contains("Step 2/7")},
 		{"Create the GCS snapshot bucket", contains("Step 3/7")},
 		{"Grant GKE node permissions", contains("Step 4/7")},
 		{"Grant atelet Workload Identity permissions", contains("Step 5/7")},
