@@ -94,10 +94,10 @@ A terminal wizard walks the ten steps below, running the real command it shows a
   | Release | Remedy |
   |---|---|
   | **1.37+** | Provision enables them in place (~10 min control-plane update). Nothing else. |
-  | **1.36** | Same enablement, but the kubelet serves pod certificate projection only on nodes created *after* it — so every existing node has to be recycled too. |
+  | **1.36** | Same enablement, but the kubelet serves pod certificate projection only on nodes created *after* it — so each existing node pool has to be replaced too: add a new pool, move workloads to it, delete the old one. Upgrading a pool to the version it already runs doesn't help; GKE skips it without replacing any node. |
   | **below 1.36** | Not fixable in place: [1.36 is the oldest release Substrate is supported on](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate#cluster-requirements), and below 1.35 GKE rejects the enablement outright because `PodCertificateRequest` didn't reach `v1beta1` until then. The control plane has to be upgraded first. |
 
-  New clusters are created at 1.37, the top row.
+  New clusters are created at 1.36 by default, with the APIs on from the start, so neither repair applies. 1.37 would avoid the node-pool caveat entirely, but GKE carries it only in the Rapid channel, which the installer can't select yet.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
 - **Sandbox runtime comes right before the demo** so steps 1–8 finish setting up the cluster, storage, and node pools first, and step 10 immediately deploys the matching demo (`counter` or `counter-microvm`).
 
@@ -300,5 +300,5 @@ Bump `ReleaseVersion` and `Commit` together when a newer release is published �
 |---|---|
 | `ate-setup` | CLI that installs/upgrades/deletes the Substrate control plane on a cluster |
 | `atenet`, `atelet` | Substrate control-plane components installed alongside the API server and controller |
-| `PodCertificate` APIs | `certificates.k8s.io/v1beta1` APIs Substrate's controllers require: `clustertrustbundles` and `podcertificaterequests`. GKE serves them only for clusters that enabled them — at creation, or later with `gcloud container clusters update --enable-kubernetes-unstable-apis`. Required on every release, including 1.37+ where the same APIs are also GA, because the controllers are built against the `v1beta1` types |
+| `PodCertificate` APIs | `certificates.k8s.io/v1beta1` APIs Substrate's controllers require: `clustertrustbundles` and `podcertificaterequests`. GKE serves them only for clusters that enabled them — at creation, or later with `gcloud container clusters update --enable-kubernetes-unstable-apis`. Required on every release at the pinned upstream, including 1.37+ where the same APIs are also served as `v1`: upstream reads `PodCertificateRequest` through `v1` where it can, but `ClusterTrustBundle` only through `v1beta1` |
 | Pinned commit | The exact commit of `agent-substrate/substrate` this installer's manifests and default images are built from |
