@@ -115,10 +115,8 @@ func CheckInstalled(projectID, cluster, location string) execx.Spec {
 	}
 }
 
-// CleanupCommand renders the tools/cleanup-gcp invocation that deletes
-// everything an install created, quoted for pasting. bucket may be empty
-// when the install's bucket is unknown — a cluster this run did not install —
-// leaving a placeholder for the user to fill in.
+// CleanupCommand renders cluster cleanup while keeping image repositories.
+// An unknown bucket is left as a placeholder for the user to fill in.
 func CleanupCommand(projectID, cluster, location, bucket string) string {
 	quoted := "<snapshot-bucket>"
 	if bucket != "" {
@@ -275,12 +273,10 @@ func (p Probe) versionExports(st *state.Setup, version string) []string {
 		lines = append(lines, "unset KO_DOCKER_REPO KO_DEFAULTPLATFORMS",
 			"export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
 	} else {
-		// A build from source needs a registry to push to. A cluster that
-		// ran pre-built images never had one, and one described by hand
-		// names none; both get the project's default, as an install does.
+		// If the installed registry is unknown, retain the legacy default.
 		repo := p.KoDockerRepo
 		if repo == "" {
-			repo = st.DefaultKoDockerRepo()
+			repo = "gcr.io/" + st.ProjectID + "/ate-images"
 		}
 		lines = append(lines, "unset ATE_IMAGE_REPO ATE_IMAGE_TAG",
 			"export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")

@@ -15,6 +15,7 @@
 package steps
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
@@ -30,27 +31,37 @@ func feed(items []ChecklistItem, lines []string) int {
 }
 
 func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
-	items := Bootstrap()
-	// Item 0 is the substrate fetch, so the seven bootstrap phases sit at 1..7.
-	lines := []string{
-		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
-		"time=... msg=Starting full bootstrap...",
-		"time=... msg=Step 1/7: Enabling required APIs...",
-		"time=... msg=Step 2/7: Creating GKE Cluster...",
-		"time=... msg=Cluster does not exist. Creating... cluster=substrate-poc",
-		"time=... msg=Step 3/7: Creating GCS Bucket for snapshots...",
-	}
-	if got := feed(items, lines); got != 3 {
-		t.Fatalf("active = %d, want 3 (bucket step)", got)
-	}
-	if got := feed(items, []string{"Step 7/7: Creating Monitoring Dashboards..."}); got != 7 {
-		t.Fatalf("active = %d, want 7", got)
+	for _, ar := range []bool{false, true} {
+		t.Run(fmt.Sprintf("artifact-registry=%t", ar), func(t *testing.T) {
+			items := Bootstrap(ar)
+			phases := []string{"Enabling required APIs"}
+			if ar {
+				phases = append(phases, "Creating Artifact Registry repository")
+			}
+			phases = append(phases, "Creating GKE Cluster", "Creating GCS Bucket for snapshots",
+				"Granting GKE Node permissions", "Granting Atelet permissions",
+				"Creating IAM policy bindings for bucket", "Creating Monitoring Dashboards")
+			if len(items) != len(phases)+1 {
+				t.Fatalf("%d checklist items for %d phases", len(items), len(phases))
+			}
+			active := feed(items, []string{snapshot.FetchLine})
+			for i, phase := range phases {
+				line := fmt.Sprintf("time=... msg=Step %d/%d: %s...", i+1, len(phases), phase)
+				active = Progress(items, active, line)
+				if active != i+1 {
+					t.Fatalf("%q: active = %d, want %d", line, active, i+1)
+				}
+				if got := Progress(items, active, "Cluster does not exist. Creating..."); got != active {
+					t.Fatalf("noise moved progress to %d", got)
+				}
+			}
+		})
 	}
 }
 
 // A warm cache prints a different line; it must still light up the fetch item.
 func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
-	if got := feed(Bootstrap(), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
+	if got := feed(Bootstrap(false), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
 		t.Fatalf("active = %d, want 0 (fetch step)", got)
 	}
 }

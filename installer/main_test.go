@@ -134,6 +134,7 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 		"--cluster " + snapshot.ShellQuote(st.ClusterName),
 		"--location " + snapshot.ShellQuote(st.Zone),
 		"--bucket " + snapshot.ShellQuote(st.BucketName),
+		"--keep-repository",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary cleanup line missing %q:\n%s", want, out)
@@ -210,28 +211,13 @@ func TestCleanupGcpScriptIsRunnable(t *testing.T) {
 	}
 }
 
-// cleanup-gcp delegates its deletions to the pinned tree's hack/teardown.sh,
-// and it reads the pin from the installer source rather than carrying a
-// copy. This pins both halves of that contract: the parse must yield the
-// exact Commit const, and the delegation must run the full teardown.
-func TestCleanupGcpDelegatesAtThePin(t *testing.T) {
+func TestCleanupGcpDefaultPin(t *testing.T) {
 	out, err := exec.Command("bash", "../tools/cleanup-gcp", "--print-pin").Output()
-	if err != nil {
-		t.Fatalf("--print-pin failed: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != snapshot.Commit {
-		t.Errorf("script parsed pin %q, want snapshot.Commit %q", got, snapshot.Commit)
-	}
-
-	script, err := os.ReadFile("../tools/cleanup-gcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(script), "./hack/teardown.sh --all") {
-		t.Errorf("cleanup-gcp no longer delegates to hack/teardown.sh --all")
-	}
-	if strings.Contains(string(script), "remove-iam-policy-binding") {
-		t.Errorf("cleanup-gcp still carries its own IAM deletions; that knowledge belongs upstream")
+	if got := strings.TrimSpace(string(out)); got != snapshot.Commit {
+		t.Errorf("pin = %q, want %q", got, snapshot.Commit)
 	}
 }
 

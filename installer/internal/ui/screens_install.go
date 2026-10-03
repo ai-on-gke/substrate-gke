@@ -34,32 +34,75 @@ import (
 // ─── Provision GCP resources ───────────────────────────────────────────────
 
 type provisionScreen struct {
-	deps *Deps
-	comp *execComp
+	deps           *Deps
+	comp           *execComp
+	checkingDocker bool
+	dockerError    string
+}
+
+type provisionDockerMsg struct {
+	owner    *provisionScreen
+	failures []failedCheck
 }
 
 func newProvisionScreen(deps *Deps) *provisionScreen {
 	return &provisionScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(), deps.LogPath),
+		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Builder.CreatesArtifactRepository(deps.Setup)), deps.LogPath),
 	}
 }
 
-func (s *provisionScreen) Init() tea.Cmd      { return s.comp.start() }
+func (s *provisionScreen) Init() tea.Cmd {
+	s.dockerError = ""
+	st := s.deps.Setup
+	if s.deps.DryRun || !s.deps.Builder.CreatesArtifactRepository(st) || !s.deps.Builder.BuildsWithDocker(st) {
+		return s.comp.start()
+	}
+	s.checkingDocker = true
+	registry := s.deps.Builder.BuildRepository(st)
+	return func() tea.Msg {
+		msg := provisionDockerMsg{owner: s}
+		for _, check := range doctor.DockerChecks(registry) {
+			if res := check.Run(context.Background()); res.Status == doctor.Fail {
+				msg.failures = append(msg.failures, failedCheck{check.Name, res})
+			}
+		}
+		return msg
+	}
+}
 func (s *provisionScreen) CapturesText() bool { return false }
 func (s *provisionScreen) logComp() *execComp { return s.comp }
 
 func (s *provisionScreen) Hints() []Hint {
 	switch {
+	case s.checkingDocker:
+		return []Hint{{"b/esc", "back"}}
 	case s.comp.ok():
 		return []Hint{{"enter", "continue"}}
-	case s.comp.failed != nil:
+	case s.comp.failed != nil || s.dockerError != "":
 		return []Hint{{"r", "retry"}, {"b", "back"}}
 	}
 	return nil
 }
 
 func (s *provisionScreen) Update(msg tea.Msg) tea.Cmd {
+	if m, ok := msg.(provisionDockerMsg); ok {
+		if m.owner != s {
+			return nil
+		}
+		s.checkingDocker = false
+		if len(m.failures) > 0 {
+			s.dockerError = dockerProblem(m.failures, "r")
+			return nil
+		}
+		return s.comp.start()
+	}
+	if s.checkingDocker {
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "b" || key.String() == "esc") {
+			return goBack
+		}
+		return nil
+	}
 	if cmd, handled := s.comp.update(msg); handled {
 		return cmd
 	}
@@ -70,6 +113,9 @@ func (s *provisionScreen) Update(msg tea.Msg) tea.Cmd {
 				return goNext
 			}
 		case "r":
+			if s.dockerError != "" {
+				return s.Init()
+			}
 			if s.comp.failed != nil {
 				return s.comp.restart()
 			}
@@ -92,9 +138,15 @@ func (s *provisionScreen) View(w int) string {
 			"Creating cluster %s in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.Zone)) + "\n\n")
 	} else {
 		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
-			"Cluster %s already exists; bootstrap is idempotent and only fills in the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
+			"Cluster %s already exists; bootstrap is idempotent and creates any missing supporting resources.", st.ClusterName)) + "\n\n")
 	}
-	b.WriteString(s.comp.view(w))
+	if s.checkingDocker {
+		b.WriteString("Checking Docker and registry credentials...\n")
+	} else if s.dockerError != "" {
+		b.WriteString(theme.Bad.Render(s.dockerError))
+	} else {
+		b.WriteString(s.comp.view(w))
+	}
 	if s.comp.ok() {
 		b.WriteString("\n" + theme.Good.Render("GCP resources are ready. Press [enter] to turn on Substrate."))
 	}
@@ -162,7 +214,7 @@ func (s *controlPlaneScreen) View(w int) string {
 	b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
 	subtitle := "Builds the control-plane images from the substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet."
 	if s.deps.Setup.Prebuilt() {
-		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
+		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Builder.ImageSummary(s.deps.Setup) + "."
 	}
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
@@ -963,7 +1015,7 @@ func (s *completeScreen) View(w int) string {
 		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
 		SandboxSummary(st),
 		st.BucketName,
-		st.ImageSummary(),
+		s.deps.Builder.ImageSummary(st),
 		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
 		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
 		DemoSummary(st),

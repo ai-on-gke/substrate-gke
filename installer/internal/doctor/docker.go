@@ -26,13 +26,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
-
-// DefaultRegistryHost is the host of the registry a build from source pushes
-// to when none is given, read off state's default so the two cannot drift.
-var DefaultRegistryHost = registryHost((&state.Setup{}).DefaultKoDockerRepo())
 
 // dockerTimeout bounds each docker probe. A hung daemon would otherwise hold
 // the project step, which cannot be cancelled while it validates, for the
@@ -46,18 +40,16 @@ const dockerHub = "docker.io"
 // DockerChecks returns the probes behind ate-setup's `docker buildx build
 // --push` of the envoy-dataplane image to registry, which Substrate 0.2 added.
 //
-// The doctor runs them against DefaultRegistryHost, before the images step
-// decides the track, so there they only warn (see warnOnly). The project step
-// runs them as they are against the real registry whenever the install will
-// build with docker (snapshot.Builder.BuildsWithDocker), and there they
-// block. The build runs inside the control-plane deploy, after the bundle is
-// applied, so any one of them failing there leaves a half-installed cluster.
+// An empty registry checks only the daemon and buildx. Registry credentials
+// are checked once the installation has selected a destination. The build runs
+// inside the control-plane deploy, after the bundle is applied, so a failure
+// there leaves a half-installed cluster.
 //
 // Without docker the other two are not checked, so a missing docker shows
 // as one failure rather than three.
 func DockerChecks(registry string) []Check {
 	host := registryHost(registry)
-	return []Check{
+	checks := []Check{
 		{
 			Key: "docker", Name: "Docker daemon", Fatal: true,
 			Run: func(ctx context.Context) Result {
@@ -101,6 +93,10 @@ func DockerChecks(registry string) []Check {
 			},
 		},
 	}
+	if registry == "" {
+		return checks[:2]
+	}
+	return checks
 }
 
 // warnOnly is c as the doctor runs it. The doctor comes before the images
@@ -171,6 +167,33 @@ type dockerConfig struct {
 	CredHelpers map[string]string          `json:"credHelpers"`
 	CredsStore  string                     `json:"credsStore"`
 	Auths       map[string]json.RawMessage `json:"auths"`
+}
+
+// dockerAuthConfigured checks for credential configuration before a registry is chosen.
+func dockerAuthConfigured(_ context.Context) Result {
+	if res, ok := notChecked(); ok {
+		return res
+	}
+	const fix = "gcloud auth configure-docker <region>-docker.pkg.dev   # or docker login <registry>"
+	data, err := os.ReadFile(dockerConfigPath())
+	if err != nil {
+		return Result{Fail, "cannot read Docker credential configuration: " + err.Error(), fix}
+	}
+	var cfg dockerConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Result{Fail, "invalid Docker credential configuration: " + err.Error(), fix}
+	}
+	configured := cfg.CredsStore != ""
+	for _, helper := range cfg.CredHelpers {
+		configured = configured || helper != ""
+	}
+	for _, entry := range cfg.Auths {
+		configured = configured || hasToken(entry)
+	}
+	if !configured {
+		return Result{Fail, "no Docker credential helper or saved credentials configured", fix}
+	}
+	return Result{Pass, "credential configuration found; registry credentials are checked after selection", ""}
 }
 
 // dockerAuth reports whether docker can authenticate to host. ko finds

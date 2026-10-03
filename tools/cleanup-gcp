@@ -14,33 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# cleanup-gcp deletes the GCP resources the installer's provision step
-# (upstream `setup-gcp bootstrap`) creates: monitoring dashboards, IAM
-# bindings, the snapshot bucket, and the GKE cluster.
-#
-# It is a thin wrapper: the deletions themselves live in upstream's
-# hack/teardown.sh, fetched at the same pinned commit the installer builds
-# from — the teardown that matches what that bootstrap actually created.
-# Keeping the resource knowledge upstream means a new bootstrap step gets its
-# teardown in the same repo, and this wrapper inherits it at every pin bump
-# instead of drifting. What stays here is the user experience: friendly
-# flags, a confirmation prompt, and project-number derivation.
-#
-# It does NOT remove the Substrate control plane from a cluster you keep; the
-# installer's exit summary prints the `ate-setup delete ate-system` command
-# for that. Deleting the cluster removes the control plane with it.
-#
-# Upstream's deletions are idempotent, so re-running after a partial failure
-# is safe.
-
+# Delegate resource deletion to the same upstream source used for installation.
 set -o errexit -o nounset -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SNAPSHOT_GO="${REPO_ROOT}/installer/internal/snapshot/snapshot.go"
 
-# The pin is read from the installer source rather than copied here, so the
-# wrapper can never tear down with a different revision than the one the
-# installer provisioned with.
 pin_commit() {
   sed -n 's/^\tCommit = "\([0-9a-f]\{40\}\)"$/\1/p' "${SNAPSHOT_GO}"
 }
@@ -52,32 +31,57 @@ PROJECT_ID=""
 CLUSTER_NAME=""
 CLUSTER_LOCATION=""
 BUCKET_NAME=""
-ASSUME_YES="false"
+GCE_REGION=""
+ARTIFACT_REGISTRY_REPOSITORY="ate-images"
+COMMIT=""
+SOURCE_ROOT=""
+KEEP_REPOSITORY=true
+ASSUME_YES=false
 
 usage() {
   cat >&2 <<'EOF'
-Usage: tools/cleanup-gcp --project ID --cluster NAME --location ZONE --bucket NAME [--yes]
+Usage: tools/cleanup-gcp --project ID --cluster NAME --location LOCATION --bucket NAME [options]
 
-Deletes everything the installer's provision step created in GCP:
-the Substrate monitoring dashboards, the IAM bindings it granted, the
-snapshot bucket and its contents, and the GKE cluster (and, with it, the
-Substrate control plane).
+Deletes the GKE cluster, snapshot bucket, IAM bindings, and monitoring dashboards.
+Image repositories are kept unless --delete-repository is given.
 
-The values are printed by the installer's exit summary; they are the answers
-you gave the wizard. --yes skips the confirmation prompt. Needs gcloud and
-git (the deletions run from a temporary checkout of the pinned substrate
-revision).
+Options:
+  --commit SHA            Upstream commit used for installation (default: release pin)
+  --substrate-root PATH   Use the local checkout used for installation instead
+  --region REGION         Repository region (default: derived from --location)
+  --repository NAME       Repository created during setup (default: ate-images)
+  --delete-repository     Also delete the repository and its images
+  --keep-repository       Keep the repository (default); overrides an earlier --delete-repository
+  --yes                   Skip the confirmation prompt
+  --print-pin             Print the default upstream commit
+
+The installer prints a command with the values for your installation.
+Needs gcloud and git; deletion is delegated to upstream hack/teardown.sh.
 EOF
   exit 1
 }
 
 while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    --project) PROJECT_ID="$2"; shift ;;
-    --cluster) CLUSTER_NAME="$2"; shift ;;
-    --location) CLUSTER_LOCATION="$2"; shift ;;
-    --bucket) BUCKET_NAME="$2"; shift ;;
-    --yes) ASSUME_YES="true" ;;
+  case "$1" in
+    --project|--cluster|--location|--bucket|--commit|--substrate-root|--region|--repository)
+      if [[ "$#" -lt 2 || -z "$2" || "$2" == --* ]]; then
+        echo "$1 requires a value" >&2
+        usage
+      fi
+      case "$1" in
+        --project) PROJECT_ID="$2" ;;
+        --cluster) CLUSTER_NAME="$2" ;;
+        --location) CLUSTER_LOCATION="$2" ;;
+        --bucket) BUCKET_NAME="$2" ;;
+        --commit) COMMIT="$2" ;;
+        --substrate-root) SOURCE_ROOT="$2" ;;
+        --region) GCE_REGION="$2" ;;
+        --repository) ARTIFACT_REGISTRY_REPOSITORY="$2" ;;
+      esac
+      shift ;;
+    --delete-repository) KEEP_REPOSITORY=false ;;
+    --keep-repository) KEEP_REPOSITORY=true ;;
+    --yes) ASSUME_YES=true ;;
     --print-pin) pin_commit; exit 0 ;;
     *) usage ;;
   esac
@@ -86,21 +90,60 @@ done
 
 for var in PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION BUCKET_NAME; do
   if [ -z "${!var}" ]; then
-    echo "missing ${var}; see --help" >&2
+    echo "${var} is required" >&2
     usage
   fi
 done
-
-COMMIT="$(pin_commit)"
-if [ -z "${COMMIT}" ]; then
-  echo "could not read the substrate pin from ${SNAPSHOT_GO}" >&2
+if [[ -n "${COMMIT}" && -n "${SOURCE_ROOT}" ]]; then
+  echo "--commit and --substrate-root cannot be used together" >&2
   exit 1
 fi
-REPO_URL="https://$(module_path).git"
+if [[ ! "${ARTIFACT_REGISTRY_REPOSITORY}" =~ ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  echo "invalid repository name: ${ARTIFACT_REGISTRY_REPOSITORY}" >&2
+  exit 1
+fi
+if [ -z "${GCE_REGION}" ]; then
+  GCE_REGION="${CLUSTER_LOCATION}"
+  if [[ "${CLUSTER_LOCATION}" =~ ^(.+[0-9])-[a-z]$ ]]; then
+    GCE_REGION="${BASH_REMATCH[1]}"
+  fi
+fi
+if [ -z "${SOURCE_ROOT}" ]; then
+  COMMIT="${COMMIT:-$(pin_commit)}"
+  if [[ ! "${COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "an upstream commit must be a full 40-character SHA" >&2
+    exit 1
+  fi
+else
+  SOURCE_ROOT="$(cd "${SOURCE_ROOT}" && pwd)"
+  if [ ! -f "${SOURCE_ROOT}/hack/teardown.sh" ]; then
+    echo "--substrate-root must contain hack/teardown.sh" >&2
+    exit 1
+  fi
+fi
 
-# The IAM principals are keyed to the project number, not the ID.
+cleanup_dir=$(mktemp -d)
+trap 'rm -rf "${cleanup_dir}"' EXIT
+if [ -z "${SOURCE_ROOT}" ]; then
+  REPO_URL="https://$(module_path).git"
+  echo "Fetching substrate@${COMMIT:0:12} for its teardown script..."
+  git -C "${cleanup_dir}" init -q
+  git -C "${cleanup_dir}" fetch -q --depth 1 "${REPO_URL}" "${COMMIT}"
+  git -C "${cleanup_dir}" checkout -q FETCH_HEAD
+  SOURCE_ROOT="${cleanup_dir}"
+fi
+TEARDOWN="${SOURCE_ROOT}/hack/teardown.sh"
+
+set -- --all
+if ${KEEP_REPOSITORY}; then
+  if grep -q -- '--keep-repository' "${TEARDOWN}"; then
+    set -- "$@" --keep-repository
+  elif grep -q -- '--delete-repository' "${TEARDOWN}"; then
+    echo "this upstream version cannot keep the repository; choose a version with --keep-repository support" >&2
+    exit 1
+  fi
+fi
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-
 cat <<EOF
 About to delete from project ${PROJECT_ID}:
   - the Substrate monitoring dashboards
@@ -108,26 +151,29 @@ About to delete from project ${PROJECT_ID}:
   - gs://${BUCKET_NAME} and every snapshot in it
   - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
 EOF
-if [ "${ASSUME_YES}" != "true" ]; then
+if grep -q -- '--delete-repository' "${TEARDOWN}"; then
+  if ${KEEP_REPOSITORY}; then
+    echo "  Repository ${ARTIFACT_REGISTRY_REPOSITORY} in ${GCE_REGION} will be kept."
+  else
+    echo "  - Artifact Registry repository ${ARTIFACT_REGISTRY_REPOSITORY} in ${GCE_REGION} and its images"
+  fi
+fi
+if ! ${ASSUME_YES}; then
   read -r -p "Type 'yes' to continue: " answer
   [ "${answer}" = "yes" ] || { echo "aborted"; exit 1; }
 fi
 
-echo "Fetching substrate@${COMMIT:0:12} for its teardown script..."
-d=$(mktemp -d)
-trap 'rm -rf "$d"' EXIT
-git -C "$d" init -q
-git -C "$d" fetch -q --depth 1 "${REPO_URL}" "${COMMIT}"
-git -C "$d" checkout -q FETCH_HEAD
-cd "$d"
-
-# NODE_POOL_NAME stays unset on purpose: deleting the cluster removes its
-# pools, and teardown.sh skips the separate pool step without it.
+# Run outside the checkout so its .ate-dev-env.sh cannot override these targets.
+mkdir "${cleanup_dir}/run"
+cd "${cleanup_dir}/run"
 PROJECT_ID="${PROJECT_ID}" \
 PROJECT_NUMBER="${PROJECT_NUMBER}" \
 CLUSTER_NAME="${CLUSTER_NAME}" \
 CLUSTER_LOCATION="${CLUSTER_LOCATION}" \
 BUCKET_NAME="${BUCKET_NAME}" \
-  ./hack/teardown.sh --all
+GCE_REGION="${GCE_REGION}" \
+ARTIFACT_REGISTRY_REPOSITORY="${ARTIFACT_REGISTRY_REPOSITORY}" \
+NODE_POOL_NAME="" \
+  bash "${TEARDOWN}" "$@"
 
 echo "Done. APIs enabled by bootstrap were left enabled (they are free while unused)."

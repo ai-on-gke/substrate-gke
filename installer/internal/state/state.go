@@ -240,8 +240,9 @@ type Setup struct {
 	ClusterIsNew    bool
 	ClusterKVMReady bool
 
-	BucketName   string
-	KoDockerRepo string
+	BucketName                 string
+	KoDockerRepo               string
+	ArtifactRegistryRepository string
 
 	FilestoreCSIDeployed bool
 
@@ -296,14 +297,6 @@ func (s *Setup) MicroVMActive() bool {
 // building them.
 func (s *Setup) Prebuilt() bool { return s.ImageRepo != "" }
 
-// ImageSummary says where this install's images come from, for the recaps.
-func (s *Setup) ImageSummary() string {
-	if s.Prebuilt() {
-		return s.ImageRepo + ":" + s.ImageTag
-	}
-	return s.KoDockerRepo + " (built from source)"
-}
-
 // Region derives the GCE region from Zone: a zonal location like us-west1-c
 // maps to us-west1, and a regional location is returned unchanged.
 func (s *Setup) Region() string {
@@ -340,12 +333,12 @@ func (s *Setup) ApplyProjectDefaults() error {
 	if s.BucketName == "" {
 		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName, s.Zone)
 	}
-	if s.KoDockerRepo == "" && !s.Prebuilt() {
-		s.KoDockerRepo = s.DefaultKoDockerRepo()
-	}
 	return nil
 }
 
-// DefaultKoDockerRepo is the registry a build from source pushes to when
-// none was given: one in the project itself.
-func (s *Setup) DefaultKoDockerRepo() string { return "gcr.io/" + s.ProjectID + "/ate-images" }
+func (s *Setup) RepositoryName() string {
+	if s.ArtifactRegistryRepository != "" {
+		return s.ArtifactRegistryRepository
+	}
+	return "ate-images"
+}

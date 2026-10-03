@@ -322,7 +322,7 @@ func (s *imagesScreen) View(w int) string {
 		}
 		if s.deps.DockerWarned {
 			options[1].desc += "\n" + theme.Warning.Render(
-				"The setup check found Docker problems. Building Substrate 0.2 or\nlater from source needs Docker, so step 3 checks it again against\nyour registry and will fail until the Docker check passes.")
+				"The setup check found Docker problems. Building Substrate 0.2 or\nlater from source needs Docker. Fix them before building images.")
 		}
 		for i, o := range options {
 			panel, title := theme.Panel, theme.Subtle

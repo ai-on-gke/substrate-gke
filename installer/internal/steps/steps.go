@@ -45,19 +45,24 @@ func containsAny(subs ...string) func(string) bool {
 	}
 }
 
-// Bootstrap tracks the seven idempotent phases of `setup-gcp bootstrap`,
+// Bootstrap tracks the idempotent phases of `setup-gcp bootstrap`,
 // preceded by the pinned substrate fetch this step pays for on a cold cache.
-func Bootstrap() []ChecklistItem {
-	return []ChecklistItem{
+func Bootstrap(artifactRegistry bool) []ChecklistItem {
+	items := []ChecklistItem{
 		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
-		{"Enable required GCP APIs", contains("Step 1/7")},
-		{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Step 2/7")},
-		{"Create the GCS snapshot bucket", contains("Step 3/7")},
-		{"Grant GKE node permissions", contains("Step 4/7")},
-		{"Grant atelet Workload Identity permissions", contains("Step 5/7")},
-		{"Bind bucket IAM policies", contains("Step 6/7")},
-		{"Create Cloud Monitoring dashboards", contains("Step 7/7")},
+		{"Enable required GCP APIs", contains("Enabling required APIs")},
 	}
+	if artifactRegistry {
+		items = append(items, ChecklistItem{"Create the Artifact Registry repository", contains("Creating Artifact Registry repository")})
+	}
+	return append(items,
+		ChecklistItem{"Create the GKE cluster (with PodCertificate beta APIs)", contains("Creating GKE Cluster")},
+		ChecklistItem{"Create the GCS snapshot bucket", contains("Creating GCS Bucket for snapshots")},
+		ChecklistItem{"Grant GKE node permissions", contains("Granting GKE Node permissions")},
+		ChecklistItem{"Grant atelet Workload Identity permissions", contains("Granting Atelet permissions")},
+		ChecklistItem{"Bind bucket IAM policies", contains("Creating IAM policy bindings for bucket")},
+		ChecklistItem{"Create Cloud Monitoring dashboards", contains("Creating Monitoring Dashboards")},
+	)
 }
 
 // Deploy tracks the phases of `ate-setup deploy ate-system`, keyed off its

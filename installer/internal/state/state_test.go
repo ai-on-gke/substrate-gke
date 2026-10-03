@@ -122,9 +122,6 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	if want := defaultBucketName("acme", s.ClusterName, s.Zone); s.BucketName != want {
 		t.Errorf("BucketName = %q, want %q", s.BucketName, want)
 	}
-	if s.KoDockerRepo != "gcr.io/acme/ate-images" {
-		t.Errorf("KoDockerRepo = %q", s.KoDockerRepo)
-	}
 
 	custom := NewSetup()
 	custom.ProjectID = "acme"

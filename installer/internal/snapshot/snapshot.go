@@ -62,6 +62,8 @@ const (
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
+	// TODO: When this pin supports Artifact Registry, update the default
+	// features in NewBuilder and submitRelease.
 	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
@@ -415,10 +417,8 @@ type Builder struct {
 	// repo and commit are the tree to fetch. They start at the pin and move
 	// only when the wizard's images step picks something else.
 	repo, commit string
-	// envoy is the chosen revision's EnvoyDataplane. The pin it starts from
-	// predates the image; the source track always resolves a revision, which
-	// sets it.
-	envoy bool
+	// features records capabilities detected in the chosen revision.
+	features sourceFeatures
 	// lock, while open, is the shared flock marking Root as in use by this
 	// process. Taken by Lock, released by Cleanup (or process exit).
 	lock *os.File
@@ -442,7 +442,8 @@ func NewBuilder(root string, managed bool) *Builder {
 // build produces are never mistaken for another's. A tree the user supplied
 // with --substrate-root is theirs, and is left exactly where it is.
 func (b *Builder) UseSource(rev Revision) {
-	b.repo, b.commit, b.envoy = rev.Repo, rev.Commit, rev.EnvoyDataplane
+	b.repo, b.commit = rev.Repo, rev.Commit
+	b.features = sourceFeatures{envoy: rev.EnvoyDataplane, artifactRegistry: rev.ArtifactRegistry}
 	if !b.Managed {
 		return
 	}
@@ -459,6 +460,21 @@ func (b *Builder) UseSource(rev Revision) {
 	if relock {
 		b.Lock()
 	}
+}
+
+// CleanupCommand preserves the source and repository configuration used by this install.
+func (b *Builder) CleanupCommand(st *state.Setup) string {
+	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) +
+		" --region " + ShellQuote(st.Region()) + " --repository " + ShellQuote(st.RepositoryName())
+	if b.CreatesArtifactRepository(st) {
+		command += " --delete-repository"
+	} else {
+		command += " --keep-repository"
+	}
+	if b.Managed {
+		return command + " --commit " + ShellQuote(b.commit)
+	}
+	return command + " --substrate-root " + ShellQuote(b.Root)
 }
 
 // BuildsWithDocker reports whether deploying the control plane runs `docker
@@ -485,7 +501,40 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 		// the images step recorded.
 		return HasEnvoyDockerfile(b.Root)
 	}
-	return b.envoy
+	return b.features.envoy
+}
+
+// SupportsArtifactRegistry reports whether this checkout can provision an image repository.
+func (b *Builder) SupportsArtifactRegistry() bool {
+	if !b.Managed {
+		_, err := os.Stat(filepath.Join(b.Root, artifactRepositoryPath))
+		return err == nil
+	}
+	return b.features.artifactRegistry
+}
+
+// CreatesArtifactRepository reports whether this install provisions its build repository.
+func (b *Builder) CreatesArtifactRepository(st *state.Setup) bool {
+	return !st.Prebuilt() && st.KoDockerRepo == "" && b.SupportsArtifactRegistry()
+}
+
+// BuildRepository resolves the image destination for this checkout.
+func (b *Builder) BuildRepository(st *state.Setup) string {
+	if st.KoDockerRepo != "" {
+		return st.KoDockerRepo
+	}
+	if b.SupportsArtifactRegistry() {
+		return st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/" + st.RepositoryName()
+	}
+	return "gcr.io/" + st.ProjectID + "/ate-images"
+}
+
+// ImageSummary describes where this install's images come from.
+func (b *Builder) ImageSummary(st *state.Setup) string {
+	if st.Prebuilt() {
+		return st.ImageRepo + ":" + st.ImageTag
+	}
+	return b.BuildRepository(st) + " (built from source)"
 }
 
 // EnvoyRouter reports whether ate-setup deploys the envoy router, its default
@@ -521,6 +570,8 @@ func (b *Builder) env(st *state.Setup) []string {
 		"PROJECT_ID=" + st.ProjectID,
 		"PROJECT_NUMBER=" + st.ProjectNumber,
 		"GCE_REGION=" + st.Region(),
+		"ARTIFACT_REGISTRY_REPOSITORY=" + st.RepositoryName(),
+		"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(b.CreatesArtifactRepository(st)),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
 		"NETWORK=" + st.Network,
@@ -544,7 +595,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		return append(env, "VERSION="+imageVersion(st.ImageTag))
 	}
 	return append(env,
-		"KO_DOCKER_REPO="+st.KoDockerRepo,
+		"KO_DOCKER_REPO="+b.BuildRepository(st),
 		"KO_DEFAULTPLATFORMS="+targetPlatform,
 		"VERSION="+b.Version,
 	)
@@ -691,26 +742,30 @@ func (b *Builder) fetchSimLines() []string {
 	return []string{CachedLine + shorten(b.commit)}
 }
 
-// Bootstrap provisions GCP resources (APIs, cluster, bucket, IAM,
-// dashboards) via the upstream tools/setup-gcp. All seven steps are
-// idempotent, so it is safe to run against an existing cluster. This is the
-// first step to touch the checkout, so it usually pays the fetch.
+// Bootstrap provisions GCP resources through the selected upstream checkout.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
+	phases := []string{"Enabling required APIs..."}
+	if b.CreatesArtifactRepository(st) {
+		phases = append(phases, "Creating Artifact Registry repository...")
+	}
+	phases = append(phases,
+		"Creating GKE Cluster...",
+		"Creating GCS Bucket for snapshots...",
+		"Granting GKE Node permissions...",
+		"Granting Atelet permissions...",
+		"Creating IAM policy bindings for bucket...",
+		"Creating Monitoring Dashboards...",
+	)
+	lines := b.fetchSimLines()
+	for i, phase := range phases {
+		lines = append(lines, fmt.Sprintf("Step %d/%d: %s", i+1, len(phases), phase))
+	}
 	return execx.Spec{
-		Label:   "setup-gcp bootstrap",
-		Display: "go run ./tools/setup-gcp bootstrap",
-		Argv:    b.inTree("go run ./tools/setup-gcp bootstrap"),
-		Env:     b.env(st),
-		SimLines: append(b.fetchSimLines(),
-			"Step 1/7: Enabling required APIs...",
-			"Step 2/7: Creating GKE Cluster...",
-			"Step 3/7: Creating GCS Bucket for snapshots...",
-			"Step 4/7: Granting GKE Node permissions...",
-			"Step 5/7: Granting Atelet permissions...",
-			"Step 6/7: Creating IAM policy bindings for bucket...",
-			"Step 7/7: Creating Monitoring Dashboards...",
-			"Bootstrap completed successfully.",
-		),
+		Label:    "setup-gcp bootstrap",
+		Display:  "go run ./tools/setup-gcp bootstrap",
+		Argv:     b.inTree("go run ./tools/setup-gcp bootstrap"),
+		Env:      b.env(st),
+		SimLines: append(lines, "Bootstrap completed successfully."),
 	}
 }
 

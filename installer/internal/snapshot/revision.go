@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -40,6 +41,8 @@ type Revision struct {
 	// which ate-setup builds with docker buildx rather than ko. Set by
 	// Resolve; a revision it did not verify reports false.
 	EnvoyDataplane bool
+	// ArtifactRegistry reports setup-gcp repository provisioning support.
+	ArtifactRegistry bool
 }
 
 const resolveTimeout = 60 * time.Second
@@ -72,11 +75,12 @@ func Resolve(ctx context.Context, repo, ref string, needImageFlags bool) (Revisi
 	if err != nil {
 		return Revision{}, err
 	}
-	envoy, err := verifyCommit(ctx, repo, rev.Commit, needImageFlags)
+	features, err := verifyCommit(ctx, repo, rev.Commit, needImageFlags)
 	if err != nil {
 		return Revision{}, err
 	}
-	rev.EnvoyDataplane = envoy
+	rev.EnvoyDataplane = features.envoy
+	rev.ArtifactRegistry = features.artifactRegistry
 	return rev, nil
 }
 
@@ -215,6 +219,12 @@ const (
 // docker at all.
 const EnvoyDockerfile = "cmd/dataplane/envoy/Dockerfile"
 
+const artifactRepositoryPath = "tools/setup-gcp/cmd/repository.go"
+
+type sourceFeatures struct {
+	envoy, artifactRegistry bool
+}
+
 // verifyCommit checks the remote will actually serve a SHA, since naming a
 // commit and being served it are different things: no ref points at an
 // arbitrary commit, so ls-remote cannot answer it, and the install's own
@@ -227,37 +237,41 @@ const EnvoyDockerfile = "cmd/dataplane/envoy/Dockerfile"
 // --filter=blob:none makes it cheap, and leaves a tree the flag check can read
 // a single blob out of on demand.
 //
-// It also reports whether the tree has EnvoyDockerfile. That asks only about
-// a path, which the trees a blobless fetch brings down already answer.
-func verifyCommit(ctx context.Context, repo, sha string, needImageFlags bool) (envoy bool, err error) {
+// Feature detection uses paths available in the blobless fetch.
+func verifyCommit(ctx context.Context, repo, sha string, needImageFlags bool) (features sourceFeatures, err error) {
 	dir, err := os.MkdirTemp("", "substrate-gke-verify-")
 	if err != nil {
-		return false, err
+		return features, err
 	}
 	defer os.RemoveAll(dir)
 	if _, err := git(ctx, "init", "--quiet", "--bare", dir); err != nil {
-		return false, err
+		return features, err
 	}
 	if _, err := git(ctx, "--git-dir", dir, "fetch", "--quiet", "--depth", "1", "--filter=blob:none", repo, sha); err != nil {
-		return false, fmt.Errorf("%s does not have commit %s: %w", repo, shorten(sha), err)
+		return features, fmt.Errorf("%s does not have commit %s: %w", repo, shorten(sha), err)
 	}
 	// ls-tree rather than `cat-file -e`, which would go back to the remote
 	// for the blob the filter left out just to say that it exists.
-	out, err := git(ctx, "--git-dir", dir, "ls-tree", "--name-only", "FETCH_HEAD", "--", EnvoyDockerfile)
-	envoy = err == nil && strings.TrimSpace(out) == EnvoyDockerfile
+	out, err := git(ctx, "--git-dir", dir, "ls-tree", "--name-only", "FETCH_HEAD", "--", EnvoyDockerfile, artifactRepositoryPath)
+	if err != nil {
+		return features, err
+	}
+	paths := strings.Fields(out)
+	features.envoy = slices.Contains(paths, EnvoyDockerfile)
+	features.artifactRegistry = slices.Contains(paths, artifactRepositoryPath)
 	if !needImageFlags {
-		return envoy, nil
+		return features, nil
 	}
 	// A tree that has moved the file elsewhere is left alone: that is upstream
 	// restructuring, and refusing the install over it would be a guess. Only a
 	// file that is there and does not declare the flag is an answer.
 	out, err = git(ctx, "--git-dir", dir, "cat-file", "-p", "FETCH_HEAD:"+imageFlagsPath)
 	if err == nil && !strings.Contains(out, imageFlagsName) {
-		return false, fmt.Errorf(
+		return features, fmt.Errorf(
 			"substrate %s predates ate-setup's --%s, so it cannot install pre-built images; name a newer commit, or build from source instead",
 			shorten(sha), imageFlagsName)
 	}
-	return envoy, nil
+	return features, nil
 }
 
 func git(ctx context.Context, args ...string) (string, error) {

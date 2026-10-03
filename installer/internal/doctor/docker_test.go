@@ -205,9 +205,7 @@ func TestDockerChecksWithoutDockerFailOnce(t *testing.T) {
 	}
 }
 
-// The doctor runs before the images step, so it checks docker for everyone,
-// against the default registry, and a failure only warns, saying who it
-// matters to. Nothing else is marked SourceOnly.
+// Docker checks only warn before the images step decides whether to build.
 func TestDoctorOnlyWarnsAboutDocker(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
 	t.Setenv("PATH", t.TempDir()) // no docker
@@ -219,9 +217,6 @@ func TestDoctorOnlyWarnsAboutDocker(t *testing.T) {
 		sourceOnly[c.Key] = true
 		if c.Fatal {
 			t.Errorf("check %q should not be fatal in the doctor", c.Key)
-		}
-		if c.Key == "docker-auth" && c.Name != "Docker credentials for gcr.io" {
-			t.Errorf("the doctor should check the default registry's host, got %q", c.Name)
 		}
 		if c.Key == "docker" {
 			res := c.Run(context.Background())
@@ -237,6 +232,50 @@ func TestDoctorOnlyWarnsAboutDocker(t *testing.T) {
 	}
 	if len(sourceOnly) != 3 {
 		t.Errorf("only the docker checks are SourceOnly, got %v", sourceOnly)
+	}
+}
+
+func TestDoctorChecksCredentialConfiguration(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	for _, tc := range []struct {
+		name, config string
+		want         Status
+	}{
+		{"missing", "", Warn},
+		{"invalid", "{", Warn},
+		{"empty entries", `{"credHelpers":{"host":""},"auths":{"host":{}}}`, Warn},
+		{"helper", `{"credHelpers":{"us-west1-docker.pkg.dev":"gcloud"}}`, Pass},
+		{"store", `{"credsStore":"desktop"}`, Pass},
+		{"login", `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`, Pass},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("DOCKER_CONFIG", dir)
+			if tc.config != "" {
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tc.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, check := range Checks(t.TempDir(), true) {
+				if check.Key != "docker-auth" {
+					continue
+				}
+				res := check.Run(t.Context())
+				if res.Status != tc.want {
+					t.Fatalf("status = %v, want %v (%s)", res.Status, tc.want, res.Detail)
+				}
+				if res.Status == Pass && !strings.Contains(res.Detail, "after selection") {
+					t.Error("configuration check must not imply registry credentials were verified")
+				}
+				return
+			}
+			t.Fatal("doctor has no credential configuration check")
+		})
 	}
 }
 
