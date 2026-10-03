@@ -311,17 +311,54 @@ func probeProblem(projectID string, err error) string {
 		"Press [enter] again to continue anyway; the cluster step may fail.", projectID, err)
 }
 
-// enableProblem renders a failed `gcloud services enable`.
+// enableProblem renders a failed `gcloud services enable`, with the fix that
+// matches why it failed. Blaming IAM for everything misleads: when the
+// billing probe could not run, [e] is still offered, and on a project
+// without billing the enable fails on that, not on a missing role.
 func enableProblem(projectID, cause string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Could not enable %s on %s", gcp.GKEService, projectID)
 	if cause != "" {
 		b.WriteString(":\n" + cause)
 	}
-	fmt.Fprintf(&b, "\nEnabling it needs serviceusage.services.enable (roles/serviceusage.serviceUsageAdmin).\n"+
-		"  fix: %s\n"+
+	b.WriteString("\n")
+	switch enableFailureKind(cause) {
+	case enableFailedBilling:
+		fmt.Fprintf(&b, "Billing must be enabled on %s before any API can be.\n", projectID)
+		fmt.Fprintf(&b, "  fix: gcloud billing projects link %s --billing-account=ACCOUNT_ID\n", projectID)
+		fmt.Fprintf(&b, "   or: https://console.cloud.google.com/billing/linkedaccount?project=%s\n", projectID)
+		b.WriteString("Link an account, then press [enter] to check again.")
+		return b.String()
+	case enableFailedPermission:
+		b.WriteString("Enabling it needs serviceusage.services.enable (roles/serviceusage.serviceUsageAdmin).\n")
+	}
+	fmt.Fprintf(&b, "  fix: %s\n"+
 		"Press [e] to try again, or [enter] to check again.", gcp.EnableServiceCommand(projectID, gcp.GKEService))
 	return b.String()
+}
+
+type enableFailure int
+
+const (
+	enableFailedOther enableFailure = iota
+	enableFailedPermission
+	enableFailedBilling
+)
+
+// enableFailureKind sorts a `gcloud services enable` error by its cause.
+// gcloud prints the API's status, e.g. "FAILED_PRECONDITION: Billing must
+// be enabled for activation of service(s)" or "PERMISSION_DENIED:
+// Permission denied to enable service".
+func enableFailureKind(cause string) enableFailure {
+	lower := strings.ToLower(cause)
+	switch {
+	case strings.Contains(lower, "billing"):
+		return enableFailedBilling
+	case strings.Contains(cause, "PERMISSION_DENIED"), strings.Contains(lower, "permission denied"),
+		strings.Contains(cause, "403"):
+		return enableFailedPermission
+	}
+	return enableFailedOther
 }
 
 // enable runs `gcloud services enable` for the offered project.

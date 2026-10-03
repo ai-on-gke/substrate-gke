@@ -525,12 +525,13 @@ func driveProject(t *testing.T, scr *projectScreen, cmd tea.Cmd) (advanced bool)
 }
 
 // enableRunner records the specs it is handed and, with fail set, fails
-// `gcloud services enable` the way a missing role does. Everything else it
-// replays.
+// `gcloud services enable` the way a missing role does (or with failLine,
+// when set). Everything else it replays.
 type enableRunner struct {
-	inner execx.Runner
-	fail  bool
-	argv  *[][]string
+	inner    execx.Runner
+	fail     bool
+	failLine string
+	argv     *[][]string
 }
 
 func (r enableRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
@@ -538,8 +539,12 @@ func (r enableRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.E
 	if !r.fail || spec.Label != "enable "+gcp.GKEService {
 		return r.inner.Start(ctx, spec)
 	}
+	line := r.failLine
+	if line == "" {
+		line = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
+	}
 	ch := make(chan execx.Event, 2)
-	ch <- execx.Event{Line: "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]", Stderr: true}
+	ch <- execx.Event{Line: line, Stderr: true}
 	ch <- execx.Event{Done: true, Err: errors.New("exit status 1")}
 	close(ch)
 	return ch
@@ -655,6 +660,49 @@ func TestProjectScreenEnableFailureOffersRetry(t *testing.T) {
 	}
 	if scr.enableFor != "acme" {
 		t.Error("a failed enable should stay retryable with [e]")
+	}
+}
+
+// The failure panel's hint follows the cause: a billing precondition gets
+// the billing fix, not an IAM role, and an unrecognized failure gets
+// neither.
+func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		want, not  []string
+	}{
+		{
+			name: "billing",
+			line: "ERROR: (gcloud.services.enable) FAILED_PRECONDITION: Billing must be enabled for activation of service(s) 'container.googleapis.com' to proceed.",
+			want: []string{"FAILED_PRECONDITION", "gcloud billing projects link acme", "billing/linkedaccount?project=acme"},
+			not:  []string{"serviceUsageAdmin", "serviceusage.services.enable"},
+		},
+		{
+			name: "other",
+			line: "ERROR: (gcloud.services.enable) UNAVAILABLE: The service is currently unavailable.",
+			want: []string{"UNAVAILABLE", gcp.EnableServiceCommand("acme", gcp.GKEService), "[e] to try again"},
+			not:  []string{"serviceUsageAdmin", "billing projects link"},
+		},
+	} {
+		app := testApp(t)
+		var argv [][]string
+		app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, fail: true, failLine: tc.line, argv: &argv}
+		scr := newProjectScreen(app.deps)
+		scr.fields[0].input.SetValue("acme")
+		scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+		if driveProject(t, scr, scr.Update(key("e"))) {
+			t.Fatalf("%s: a failed enable must not advance the wizard", tc.name)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(scr.errText, w) {
+				t.Errorf("%s: error should mention %q, got %q", tc.name, w, scr.errText)
+			}
+		}
+		for _, n := range tc.not {
+			if strings.Contains(scr.errText, n) {
+				t.Errorf("%s: error should not mention %q, got %q", tc.name, n, scr.errText)
+			}
+		}
 	}
 }
 
