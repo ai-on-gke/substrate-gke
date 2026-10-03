@@ -127,7 +127,7 @@ func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) (
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+		return nil, fmt.Errorf("%s: %s", resp.Status, apiErrorText(respBody))
 	}
 	// A cut-off body would only fail later as unparseable JSON, which
 	// reads like a broken API rather than an oversized answer.
@@ -140,6 +140,34 @@ func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) (
 // maxAPIResponse caps what callAPI reads. The probes ask for single fields,
 // so anything near it means a request forgot to.
 const maxAPIResponse = 1 << 20
+
+// maxErrorQuote caps how much of a non-JSON error body an error quotes.
+// These errors end up verbatim in on-screen panels, and a proxy or
+// captive-portal HTML page can run to hundreds of KB.
+const maxErrorQuote = 2 << 10
+
+// apiErrorText is what an error says about a failed call's body: the
+// Google error envelope's status and message when it is one, or else the
+// start of the body.
+func apiErrorText(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Error.Message != "" {
+		if envelope.Error.Status != "" {
+			return envelope.Error.Status + ": " + envelope.Error.Message
+		}
+		return envelope.Error.Message
+	}
+	text := strings.TrimSpace(string(body))
+	if len(text) > maxErrorQuote {
+		text = strings.ToValidUTF8(text[:maxErrorQuote], "") + "…"
+	}
+	return text
+}
 
 // missingFrom returns the bootstrap permissions absent from held, in the
 // stable BootstrapPermissions order.

@@ -143,6 +143,41 @@ func TestCallAPIHandlesLargeResponses(t *testing.T) {
 	}
 }
 
+// A failed call's error ends up verbatim in an on-screen panel, so it quotes
+// only Google's status and message, or the first couple of KB of anything
+// else, never a whole proxy error page.
+func TestCallAPIErrorQuotesLittleOfTheBody(t *testing.T) {
+	googleErr := `{"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "The caller does not have permission", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "IAM_PERMISSION_DENIED"}]}}`
+	html := "<html><body>" + strings.Repeat("Your proxy says no. ", 25000) + "</body></html>" // ~500KB
+	for _, tc := range []struct {
+		name, body string
+		want       string
+		maxLen     int
+	}{
+		{"google", googleErr, "403 Forbidden: PERMISSION_DENIED: The caller does not have permission", 0},
+		{"html", html, "<html><body>Your proxy says no.", maxErrorQuote + 200},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(tc.body))
+		}))
+		_, err := probeClient(srv.URL).callAPI(context.Background(), http.MethodGet, srv.URL, nil)
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%s: want an error for a 403", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %.300q, want it to contain %q", tc.name, err.Error(), tc.want)
+		}
+		if tc.name == "google" && strings.Contains(err.Error(), "ErrorInfo") {
+			t.Errorf("google: error should carry the message alone, got %q", err.Error())
+		}
+		if tc.maxLen > 0 && len(err.Error()) > tc.maxLen {
+			t.Errorf("%s: error is %d bytes, want at most %d", tc.name, len(err.Error()), tc.maxLen)
+		}
+	}
+}
+
 // Dry-run must not touch the network or gcloud, and must report a healthy
 // project so the walkthrough continues.
 func TestProjectProbesDryRun(t *testing.T) {
