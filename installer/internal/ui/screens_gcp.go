@@ -85,6 +85,9 @@ type projectScreen struct {
 	// probeAcked does the same for a billing or API probe that could not
 	// run. A project provably without billing or the API is never waved
 	// through: the very next screen would fail on it.
+	//
+	// Both acks hold only for the fields as they were: any edit resets
+	// them, so changing the project shows its problems afresh.
 	probeAcked bool
 	// enableFor is the project [e] would enable GKEService on, set while
 	// that offer is on screen; "" when there is no offer. Any edit to the
@@ -447,8 +450,12 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			}
 		}
 		// Editing a field withdraws the offer: it was for the project as
-		// validated, and e has to type again.
+		// validated, and e has to type again. It also re-arms the
+		// advisory warnings: "continue anyway" was said about the project
+		// as it was, and must not wave a different one through.
 		s.enableFor = ""
+		s.probeAcked = false
+		s.permAcked = false
 		var cmd tea.Cmd
 		s.fields[s.focus].input, cmd = s.fields[s.focus].input.Update(msg)
 		return cmd

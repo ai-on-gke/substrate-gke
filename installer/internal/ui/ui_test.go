@@ -732,6 +732,38 @@ func TestProjectScreenProbeErrorIsAdvisory(t *testing.T) {
 	}
 }
 
+// An ack is for the project it was given on. Ack a probe failure (and a
+// permission failure) on one project, change the field, and the next
+// project's failures are shown again rather than waved through.
+func TestProjectScreenEditResetsTheAcks(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	probeFail := projValidMsg{owner: scr, number: "42", probeErr: errors.New("403 Forbidden")}
+	permFail := projValidMsg{owner: scr, number: "42", missing: gcp.BootstrapPermissions[:1]}
+	scr.Update(probeFail)
+	scr.Update(permFail)
+	if !scr.probeAcked || !scr.permAcked {
+		t.Fatalf("both problems should be acknowledged on acme, probe=%v perm=%v", scr.probeAcked, scr.permAcked)
+	}
+
+	for _, r := range "-b" {
+		scr.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if scr.probeAcked || scr.permAcked {
+		t.Fatal("editing the project should reset both acks")
+	}
+	if cmd := scr.Update(probeFail); cmd != nil {
+		t.Error("acme-b's probe error must be shown, not swallowed by acme's ack")
+	}
+	if !strings.Contains(scr.errText, "acme-b") {
+		t.Errorf("the warning should be about acme-b, got %q", scr.errText)
+	}
+	if cmd := scr.Update(permFail); cmd != nil {
+		t.Error("acme-b's missing permissions must be shown, not swallowed by acme's ack")
+	}
+}
+
 // Building from source points the whole run at the commit the user chose: the
 // checkout the steps fetch, and the doctor that reports on it.
 func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {
