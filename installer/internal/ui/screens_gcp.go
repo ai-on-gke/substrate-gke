@@ -347,6 +347,9 @@ func (s *projectScreen) Stop() {
 	}
 }
 
+// logComp exposes the running enable, so [l]/[v] show its live output.
+func (s *projectScreen) logComp() *execComp { return s.enabling }
+
 func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 	if s.enabling != nil {
 		if cmd, handled := s.enabling.update(msg); handled {

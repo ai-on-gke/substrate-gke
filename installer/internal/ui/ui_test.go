@@ -610,6 +610,29 @@ func TestProjectScreenEnablesTheGKEAPI(t *testing.T) {
 	}
 }
 
+// The running enable is the screen's execComp, so [l]/[v] show its live
+// output and stopCurrent can cancel it, as on every other exec screen.
+func TestProjectScreenExposesTheEnableToTheLogOverlay(t *testing.T) {
+	app := testApp(t)
+	var argv [][]string
+	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, argv: &argv}
+	scr := newProjectScreen(app.deps)
+	var _ execCompProvider = scr
+	if scr.logComp() != nil {
+		t.Fatal("no enable is running yet, logComp should be nil")
+	}
+	scr.fields[0].input.SetValue("acme")
+	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+	cmd := scr.Update(key("e"))
+	if scr.logComp() == nil || scr.logComp() != scr.enabling {
+		t.Fatal("while enabling, logComp should return the running enable")
+	}
+	driveProject(t, scr, cmd)
+	if scr.logComp() != nil {
+		t.Error("once the enable is over, logComp should be nil again")
+	}
+}
+
 // A failed enable says why and how to fix it, and offers [e] again.
 func TestProjectScreenEnableFailureOffersRetry(t *testing.T) {
 	app := testApp(t)
