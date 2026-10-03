@@ -678,6 +678,42 @@ func TestProjectScreenEditWithdrawsTheEnableOffer(t *testing.T) {
 	}
 }
 
+// Moving to another field withdraws the offer too: an e typed into the zone
+// or machine type must land there, not start the enable.
+func TestProjectScreenFocusChangeWithdrawsTheEnableOffer(t *testing.T) {
+	for _, move := range []string{"tab", "down", "shift+tab", "up"} {
+		app := testApp(t)
+		var argv [][]string
+		app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, argv: &argv}
+		scr := newProjectScreen(app.deps)
+		scr.fields[0].input.SetValue("acme")
+		scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+		var msg tea.KeyMsg
+		switch move {
+		case "tab":
+			msg = tea.KeyMsg{Type: tea.KeyTab}
+		case "down":
+			msg = tea.KeyMsg{Type: tea.KeyDown}
+		case "shift+tab":
+			msg = tea.KeyMsg{Type: tea.KeyShiftTab}
+		case "up":
+			msg = tea.KeyMsg{Type: tea.KeyUp}
+		}
+		scr.Update(msg)
+		if scr.enableFor != "" {
+			t.Errorf("%s: moving focus should withdraw the offer", move)
+		}
+		before := scr.fields[scr.focus].input.Value()
+		scr.Update(key("e"))
+		if scr.enabling != nil || len(argv) != 0 {
+			t.Errorf("%s: e must not enable after a focus change", move)
+		}
+		if got := scr.fields[scr.focus].input.Value(); got != before+"e" {
+			t.Errorf("%s: e should type into the focused field, got %q", move, got)
+		}
+	}
+}
+
 // A billing or API probe that could not run proves nothing: it is shown
 // once, and the next enter goes on, as a failed permission probe does.
 func TestProjectScreenProbeErrorIsAdvisory(t *testing.T) {

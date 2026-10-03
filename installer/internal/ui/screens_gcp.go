@@ -152,6 +152,10 @@ func (s *projectScreen) Hints() []Hint {
 }
 
 func (s *projectScreen) setFocus(i int) tea.Cmd {
+	// Moving to another field withdraws the [e] offer, like an edit does:
+	// otherwise the first e typed there (europe-west1-b, e2-standard-4)
+	// would start the enable instead.
+	s.enableFor = ""
 	s.fields[s.focus].input.Blur()
 	s.focus = (i + len(s.fields)) % len(s.fields)
 	return s.fields[s.focus].input.Focus()
