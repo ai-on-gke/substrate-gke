@@ -212,7 +212,6 @@ func (s *imagesScreen) submitSource() tea.Cmd {
 func (s *imagesScreen) useSource(rev snapshot.Revision) {
 	s.stopResolving()
 	s.deps.Builder.UseSource(rev)
-	s.deps.Setup.ArtifactRegistry = s.deps.Builder.SupportsArtifactRegistry()
 }
 
 func (s *imagesScreen) Update(msg tea.Msg) tea.Cmd {

@@ -178,7 +178,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 
 	section("Resources")
 	fmt.Printf("  project    %s\n  cluster    %s (%s)\n  sandbox    %s\n  bucket     gs://%s\n  images     %s\n",
-		st.ProjectID, st.ClusterName, st.Zone, ui.SandboxSummary(st), st.BucketName, st.ImageSummary())
+		st.ProjectID, st.ClusterName, st.Zone, ui.SandboxSummary(st), st.BucketName, b.ImageSummary(st))
 	if deps.LogPath != "" {
 		fmt.Printf("  log        %s\n", deps.LogPath)
 	}

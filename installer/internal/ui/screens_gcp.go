@@ -17,6 +17,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -86,9 +87,12 @@ func newField(label, value, placeholder string, set func(*state.Setup, string)) 
 	return field{label: label, input: in, set: set}
 }
 
+var repositoryNameRE = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+const repositoryFieldLabel = "Artifact Registry repository (leave empty for default)"
+
 func newProjectScreen(deps *Deps) *projectScreen {
 	st := deps.Setup
-	st.ArtifactRegistry = deps.Builder.SupportsArtifactRegistry()
 	fields := []field{
 		newField("GCP project ID", st.ProjectID, "my-project", func(s *state.Setup, v string) { s.ProjectID = v }),
 		newField("Cluster location (zone)", st.Zone, "us-west1-c", func(s *state.Setup, v string) { s.Zone = v }),
@@ -103,13 +107,17 @@ func newProjectScreen(deps *Deps) *projectScreen {
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
 		if !st.Prebuilt() {
+			placeholder := "gcr.io/<project>/ate-images"
+			if deps.Builder.SupportsArtifactRegistry() {
+				placeholder = "<region>-docker.pkg.dev/<project>/ate-images"
+			}
 			fields = append(fields,
-				newField("Image registry (leave empty for default)", st.KoDockerRepo, st.DefaultKoDockerRepo(), func(s *state.Setup, v string) { s.KoDockerRepo = v }),
+				newField("Image registry (leave empty for default)", st.KoDockerRepo, placeholder, func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 			)
 		}
 	}
-	if st.Track == state.TrackAdvanced && st.ArtifactRegistry && !st.Prebuilt() {
-		fields = append(fields, newField("Artifact Registry repository (leave empty for default)", st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
+	if st.Track == state.TrackAdvanced && deps.Builder.SupportsArtifactRegistry() && !st.Prebuilt() {
+		fields = append(fields, newField(repositoryFieldLabel, st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
 	}
 	scr := &projectScreen{deps: deps, fields: fields}
 	scr.fields[0].input.Focus()
@@ -144,16 +152,22 @@ func (s *projectScreen) submit() tea.Cmd {
 		s.errText = "A project ID is required."
 		return s.setFocus(0)
 	}
+	for i, f := range s.fields {
+		if f.label == repositoryFieldLabel {
+			name := strings.TrimSpace(f.input.Value())
+			if name != "" && !repositoryNameRE.MatchString(name) {
+				s.errText = "Repository names must be 1–63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit."
+				return s.setFocus(i)
+			}
+		}
+	}
 	s.errText = ""
 	s.validating = true
 	acked := s.permAcked
 	st := s.inputSetup(pid)
 	var repositoryPermissions []gcp.RequiredPermission
 	if s.deps.Builder.CreatesArtifactRepository(&st) {
-		repositoryPermissions = []gcp.RequiredPermission{
-			{Permission: "artifactregistry.repositories.get", Role: "roles/artifactregistry.admin"},
-			{Permission: "artifactregistry.repositories.create", Role: "roles/artifactregistry.admin"},
-		}
+		repositoryPermissions = gcp.RepositoryPermissions
 	}
 	registry := s.dockerRegistry(pid)
 	s.checkingDocker = registry != ""
@@ -196,10 +210,10 @@ func (s *projectScreen) dockerRegistry(pid string) string {
 	if !s.deps.Builder.BuildsWithDocker(&st) {
 		return ""
 	}
-	if st.ArtifactRegistry && st.KoDockerRepo == "" {
+	if s.deps.Builder.CreatesArtifactRepository(&st) {
 		return ""
 	}
-	return st.BuildRepository()
+	return s.deps.Builder.BuildRepository(&st)
 }
 
 // dockerProblem renders the docker checks that failed. Unlike a permission

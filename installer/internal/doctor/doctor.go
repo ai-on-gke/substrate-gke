@@ -214,13 +214,14 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 	}
-	// Registry authentication is checked after selecting a destination. Only
-	// the envoy router is built with docker, and a tree the user supplied says for
-	// itself whether it has one.
+	// Check credential configuration now; verify access after selecting a registry.
 	if snapshot.EnvoyRouter() && (managed || snapshot.HasEnvoyDockerfile(snapshotRoot)) {
 		for _, c := range DockerChecks("") {
 			checks = append(checks, warnOnly(c))
 		}
+		checks = append(checks, warnOnly(Check{
+			Key: "docker-auth", Name: "Docker credential configuration", Run: dockerAuthConfigured,
+		}))
 	}
 	return checks
 }

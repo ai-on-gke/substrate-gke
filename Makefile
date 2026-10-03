@@ -24,6 +24,7 @@ teardown:
 	./tools/cleanup-gcp --project "$(PROJECT_ID)" --cluster "$(CLUSTER_NAME)" --location "$(CLUSTER_LOCATION)" --bucket "$(BUCKET_NAME)" \
 		$(if $(GCE_REGION),--region "$(GCE_REGION)") $(if $(ARTIFACT_REGISTRY_REPOSITORY),--repository "$(ARTIFACT_REGISTRY_REPOSITORY)") \
 		$(if $(SUBSTRATE_COMMIT),--commit "$(SUBSTRATE_COMMIT)") $(if $(SUBSTRATE_ROOT),--substrate-root "$(SUBSTRATE_ROOT)") \
+		$(if $(filter true,$(DELETE_REPOSITORY)),--delete-repository) \
 		$(if $(filter true,$(KEEP_REPOSITORY)),--keep-repository)
 
 # Run the preflight checks only.

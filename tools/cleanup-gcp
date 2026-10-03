@@ -35,22 +35,23 @@ GCE_REGION=""
 ARTIFACT_REGISTRY_REPOSITORY="ate-images"
 COMMIT=""
 SOURCE_ROOT=""
-KEEP_REPOSITORY=false
+KEEP_REPOSITORY=true
 ASSUME_YES=false
 
 usage() {
   cat >&2 <<'EOF'
 Usage: tools/cleanup-gcp --project ID --cluster NAME --location LOCATION --bucket NAME [options]
 
-Deletes the GKE cluster, snapshot bucket, IAM bindings, monitoring dashboards,
-and, on upstream versions that provision it, the Artifact Registry repository.
+Deletes the GKE cluster, snapshot bucket, IAM bindings, and monitoring dashboards.
+Image repositories are kept unless --delete-repository is given.
 
 Options:
   --commit SHA            Upstream commit used for installation (default: release pin)
   --substrate-root PATH   Use the local checkout used for installation instead
   --region REGION         Repository region (default: derived from --location)
   --repository NAME       Repository created during setup (default: ate-images)
-  --keep-repository       Keep the repository and its images
+  --delete-repository     Also delete the repository and its images
+  --keep-repository       Keep the repository (default); overrides an earlier --delete-repository
   --yes                   Skip the confirmation prompt
   --print-pin             Print the default upstream commit
 
@@ -78,6 +79,7 @@ while [[ "$#" -gt 0 ]]; do
         --repository) ARTIFACT_REGISTRY_REPOSITORY="$2" ;;
       esac
       shift ;;
+    --delete-repository) KEEP_REPOSITORY=false ;;
     --keep-repository) KEEP_REPOSITORY=true ;;
     --yes) ASSUME_YES=true ;;
     --print-pin) pin_commit; exit 0 ;;

@@ -59,7 +59,7 @@ func (s *provisionScreen) Init() tea.Cmd {
 		return s.comp.start()
 	}
 	s.checkingDocker = true
-	registry := st.BuildRepository()
+	registry := s.deps.Builder.BuildRepository(st)
 	return func() tea.Msg {
 		msg := provisionDockerMsg{owner: s}
 		for _, check := range doctor.DockerChecks(registry) {
@@ -75,6 +75,8 @@ func (s *provisionScreen) logComp() *execComp { return s.comp }
 
 func (s *provisionScreen) Hints() []Hint {
 	switch {
+	case s.checkingDocker:
+		return []Hint{{"b/esc", "back"}}
 	case s.comp.ok():
 		return []Hint{{"enter", "continue"}}
 	case s.comp.failed != nil || s.dockerError != "":
@@ -96,6 +98,9 @@ func (s *provisionScreen) Update(msg tea.Msg) tea.Cmd {
 		return s.comp.start()
 	}
 	if s.checkingDocker {
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "b" || key.String() == "esc") {
+			return goBack
+		}
 		return nil
 	}
 	if cmd, handled := s.comp.update(msg); handled {
@@ -209,7 +214,7 @@ func (s *controlPlaneScreen) View(w int) string {
 	b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
 	subtitle := "Builds the control-plane images from the substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet."
 	if s.deps.Setup.Prebuilt() {
-		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
+		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Builder.ImageSummary(s.deps.Setup) + "."
 	}
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
@@ -1010,7 +1015,7 @@ func (s *completeScreen) View(w int) string {
 		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
 		SandboxSummary(st),
 		st.BucketName,
-		st.ImageSummary(),
+		s.deps.Builder.ImageSummary(st),
 		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
 		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
 		DemoSummary(st),

@@ -44,6 +44,12 @@ var BootstrapPermissions = []RequiredPermission{
 	{"monitoring.dashboards.create", "roles/monitoring.editor"},
 }
 
+// RepositoryPermissions are needed when bootstrap provisions an image repository.
+var RepositoryPermissions = []RequiredPermission{
+	{"artifactregistry.repositories.get", "roles/artifactregistry.admin"},
+	{"artifactregistry.repositories.create", "roles/artifactregistry.admin"},
+}
+
 // MissingPermissions reports which of the bootstrap permissions the active
 // application-default credentials do not hold on projectID. It asks Cloud
 // Resource Manager's testIamPermissions, which evaluates the caller's full

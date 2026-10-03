@@ -258,7 +258,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. The printed command includes `--keep-repository` when the install did not provision a repository. Add it yourself to preserve shared images from a source build. It's safe to re-run after a partial failure.
+The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. Repositories are kept by default. The installer's command adds `--delete-repository` when it provisioned one; replace it with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` to delete the repository. It's safe to re-run after a partial failure.
 
 To remove **only** the Substrate control plane and keep the cluster:
 

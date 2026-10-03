@@ -129,10 +129,7 @@ func TestMissingPermissionsDryRun(t *testing.T) {
 }
 
 func TestMissingPermissionsIncludesRepositoryPermissions(t *testing.T) {
-	extra := []RequiredPermission{
-		{"artifactregistry.repositories.get", "roles/artifactregistry.admin"},
-		{"artifactregistry.repositories.create", "roles/artifactregistry.admin"},
-	}
+	extra := RepositoryPermissions
 	held := []string{extra[0].Permission}
 	for _, p := range BootstrapPermissions {
 		held = append(held, p.Permission)

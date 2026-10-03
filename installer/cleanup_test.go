@@ -36,10 +36,11 @@ func TestCleanupGcpDelegatesToInstallationSource(t *testing.T) {
 	}{
 		{name: "release pin", support: "legacy", location: "us-west1-c", region: "us-west1", repository: "ate-images", commit: snapshot.Commit},
 		{name: "selected source", support: "current", args: "--commit " + selected, location: "us-central1", region: "us-central1", repository: "ate-images", commit: selected},
-		{name: "custom target", support: "current", args: "--region europe-west4 --repository shared-images", location: "us-west1-c", region: "europe-west4", repository: "shared-images", commit: snapshot.Commit},
+		{name: "custom target", support: "current", args: "--delete-repository --region europe-west4 --repository shared-images", location: "us-west1-c", region: "europe-west4", repository: "shared-images", commit: snapshot.Commit},
+		{name: "keep overrides deletion", support: "current", args: "--delete-repository --keep-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images", commit: snapshot.Commit},
 		{name: "keep repository", support: "current", args: "--keep-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images", commit: snapshot.Commit},
 		{name: "legacy keep", support: "legacy", args: "--keep-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images", commit: snapshot.Commit},
-		{name: "unsupported keep", support: "delete-only", args: "--keep-repository", location: "us-west1-c", wantErr: "cannot keep the repository"},
+		{name: "unsupported keep", support: "delete-only", location: "us-west1-c", wantErr: "cannot keep the repository"},
 		{name: "local checkout", support: "current", local: true, location: "us-west1-c", region: "us-west1", repository: "ate-images"},
 		{name: "declined", support: "current", local: true, decline: true, location: "us-west1-c", wantErr: "aborted"},
 		{name: "deletion failure", support: "failure", local: true, location: "us-west1-c", wantErr: "deletion failed"},
@@ -118,7 +119,7 @@ fi
 				return
 			}
 			flags := "--all"
-			if tc.support == "current" && strings.Contains(tc.args, "--keep-repository") {
+			if tc.support == "current" && (!strings.Contains(tc.args, "--delete-repository") || strings.Contains(tc.args, "--keep-repository")) {
 				flags += " --keep-repository"
 			}
 			want := "teardown " + flags + "|acme|12345|cluster|" + tc.location + "|snapshots|" + tc.region + "|" + tc.repository + "|\n"

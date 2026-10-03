@@ -169,6 +169,33 @@ type dockerConfig struct {
 	Auths       map[string]json.RawMessage `json:"auths"`
 }
 
+// dockerAuthConfigured checks for credential configuration before a registry is chosen.
+func dockerAuthConfigured(_ context.Context) Result {
+	if res, ok := notChecked(); ok {
+		return res
+	}
+	const fix = "gcloud auth configure-docker <region>-docker.pkg.dev   # or docker login <registry>"
+	data, err := os.ReadFile(dockerConfigPath())
+	if err != nil {
+		return Result{Fail, "cannot read Docker credential configuration: " + err.Error(), fix}
+	}
+	var cfg dockerConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Result{Fail, "invalid Docker credential configuration: " + err.Error(), fix}
+	}
+	configured := cfg.CredsStore != ""
+	for _, helper := range cfg.CredHelpers {
+		configured = configured || helper != ""
+	}
+	for _, entry := range cfg.Auths {
+		configured = configured || hasToken(entry)
+	}
+	if !configured {
+		return Result{Fail, "no Docker credential helper or saved credentials configured", fix}
+	}
+	return Result{Pass, "credential configuration found; registry credentials are checked after selection", ""}
+}
+
 // dockerAuth reports whether docker can authenticate to host. ko finds
 // gcloud's credentials on its own; docker only looks in its config, and
 // without an entry there it pushes anonymously and gets a 403 from gcr.io and

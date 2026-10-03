@@ -104,9 +104,7 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 // the new tree: the cluster, and the new version with where its images come
 // from.
 func (b *Builder) NewExports(st *state.Setup) string {
-	setup := *st
-	setup.ArtifactRegistry = b.SupportsArtifactRegistry()
-	next := Probe{KoDockerRepo: setup.BuildRepository()}
+	next := Probe{KoDockerRepo: b.BuildRepository(st)}
 	if st.Prebuilt() {
 		next = Probe{ImageRepo: st.ImageRepo, ImageTag: st.ImageTag}
 	}

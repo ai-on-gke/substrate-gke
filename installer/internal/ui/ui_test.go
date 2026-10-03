@@ -457,8 +457,8 @@ func TestProjectRequestsRepositoryPermissionsOnlyWhenCreating(t *testing.T) {
 			if msg.err != nil || msg.permErr != nil || len(msg.missing) == 0 {
 				t.Fatalf("permission check failed: %+v", msg)
 			}
-			for _, permission := range []string{"artifactregistry.repositories.get", "artifactregistry.repositories.create"} {
-				if slices.Contains(msg.missing, gcp.RequiredPermission{Permission: permission, Role: "roles/artifactregistry.admin"}) != tc.want {
+			for _, permission := range gcp.RepositoryPermissions {
+				if slices.Contains(msg.missing, permission) != tc.want {
 					t.Errorf("missing permissions = %v; want repository permissions = %t", msg.missing, tc.want)
 				}
 			}
@@ -2002,5 +2002,52 @@ func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 	defer prebuilt.comp.stop()
 	if prebuilt.checkingDocker || !prebuilt.comp.started {
 		t.Fatal("prebuilt install checked Docker credentials")
+	}
+}
+
+func TestProjectValidatesRepositoryBeforeCloudChecks(t *testing.T) {
+	for _, name := range []string{"", "ate-images", "My_Images", "../images", strings.Repeat("a", 64)} {
+		t.Run(name, func(t *testing.T) {
+			app := testApp(t)
+			app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+			app.deps.Builder.UseSource(snapshot.Revision{ArtifactRegistry: true})
+			app.deps.Setup.Track, app.deps.Setup.ProjectID = state.TrackAdvanced, "acme"
+			scr := newProjectScreen(app.deps)
+			for i, f := range scr.fields {
+				if strings.HasPrefix(f.label, "Artifact Registry repository") {
+					scr.fields[i].input.SetValue(name)
+				}
+				if strings.HasPrefix(f.label, "Image registry") && f.input.Placeholder != "<region>-docker.pkg.dev/<project>/ate-images" {
+					t.Errorf("registry placeholder = %q", f.input.Placeholder)
+				}
+			}
+			scr.submit()
+			valid := name == "" || name == "ate-images"
+			if scr.validating != valid || (scr.errText == "") != valid {
+				t.Fatalf("validating=%t, error=%q", scr.validating, scr.errText)
+			}
+		})
+	}
+}
+
+func TestProvisionCanGoBackDuringDockerCheck(t *testing.T) {
+	for _, press := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("b")}, {Type: tea.KeyEsc}} {
+		t.Run(press.String(), func(t *testing.T) {
+			app := testApp(t)
+			scr := newProvisionScreen(app.deps)
+			scr.checkingDocker = true
+			if len(scr.Hints()) == 0 {
+				t.Error("no hint for returning during the check")
+			}
+			cmd := scr.Update(press)
+			if cmd == nil || cmd() != navBack {
+				t.Fatal("cannot go back during Docker check")
+			}
+			next := newProvisionScreen(app.deps)
+			next.checkingDocker = true
+			if cmd := next.Update(provisionDockerMsg{owner: scr}); cmd != nil || next.comp.started || !next.checkingDocker {
+				t.Fatal("old check result changed the new screen")
+			}
+		})
 	}
 }

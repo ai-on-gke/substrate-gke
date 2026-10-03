@@ -466,7 +466,9 @@ func (b *Builder) UseSource(rev Revision) {
 func (b *Builder) CleanupCommand(st *state.Setup) string {
 	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) +
 		" --region " + ShellQuote(st.Region()) + " --repository " + ShellQuote(st.RepositoryName())
-	if !b.CreatesArtifactRepository(st) {
+	if b.CreatesArtifactRepository(st) {
+		command += " --delete-repository"
+	} else {
 		command += " --keep-repository"
 	}
 	if b.Managed {
@@ -516,6 +518,25 @@ func (b *Builder) CreatesArtifactRepository(st *state.Setup) bool {
 	return !st.Prebuilt() && st.KoDockerRepo == "" && b.SupportsArtifactRegistry()
 }
 
+// BuildRepository resolves the image destination for this checkout.
+func (b *Builder) BuildRepository(st *state.Setup) string {
+	if st.KoDockerRepo != "" {
+		return st.KoDockerRepo
+	}
+	if b.SupportsArtifactRegistry() {
+		return st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/" + st.RepositoryName()
+	}
+	return "gcr.io/" + st.ProjectID + "/ate-images"
+}
+
+// ImageSummary describes where this install's images come from.
+func (b *Builder) ImageSummary(st *state.Setup) string {
+	if st.Prebuilt() {
+		return st.ImageRepo + ":" + st.ImageTag
+	}
+	return b.BuildRepository(st) + " (built from source)"
+}
+
 // EnvoyRouter reports whether ate-setup deploys the envoy router, its default
 // unless ATE_ATENET_DATAPLANE names another. Only the envoy router is built
 // with docker.
@@ -545,8 +566,6 @@ func HasEnvoyDockerfile(root string) bool {
 // Empty means "use the current context" to both. exec.Cmd keeps the last
 // duplicate, so this overrides the inherited value.
 func (b *Builder) env(st *state.Setup) []string {
-	setup := *st
-	setup.ArtifactRegistry = b.SupportsArtifactRegistry()
 	env := []string{
 		"PROJECT_ID=" + st.ProjectID,
 		"PROJECT_NUMBER=" + st.ProjectNumber,
@@ -576,7 +595,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		return append(env, "VERSION="+imageVersion(st.ImageTag))
 	}
 	return append(env,
-		"KO_DOCKER_REPO="+setup.BuildRepository(),
+		"KO_DOCKER_REPO="+b.BuildRepository(st),
 		"KO_DEFAULTPLATFORMS="+targetPlatform,
 		"VERSION="+b.Version,
 	)
