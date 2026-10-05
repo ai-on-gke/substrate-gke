@@ -186,12 +186,16 @@ func (s *projectScreen) submit() tea.Cmd {
 		if msg.err == nil {
 			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(context.Background(), s.deps.GCP, pid)
 		}
+		// No billing or no API blocks the step, and Update then shows
+		// that alone, so the checks below would be paid for and thrown
+		// away, on every retry.
+		blocked := msg.err != nil || msg.billingOff || msg.apiOff
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
-		if msg.err == nil && !acked {
+		if !blocked && !acked {
 			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
 		}
-		if msg.err == nil && registry != "" {
+		if !blocked && registry != "" {
 			for _, c := range doctor.DockerChecks(registry) {
 				if res := c.Run(context.Background()); res.Status == doctor.Fail {
 					msg.docker = append(msg.docker, failedCheck{c.Name, res})
