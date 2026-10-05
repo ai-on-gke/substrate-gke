@@ -16,10 +16,14 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeGET serves body at wantPath and fails the test on any other request.
@@ -175,6 +179,65 @@ func TestCallAPIErrorQuotesLittleOfTheBody(t *testing.T) {
 		if tc.maxLen > 0 && len(err.Error()) > tc.maxLen {
 			t.Errorf("%s: error is %d bytes, want at most %d", tc.name, len(err.Error()), tc.maxLen)
 		}
+	}
+}
+
+// Each token fetch is a gcloud spawn (~1s cold), so a Client fetches once
+// and its probes, concurrent ones included, share the token until it ages
+// out. A failed fetch is not remembered: the next call tries again.
+func TestAccessTokenIsFetchedOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Write([]byte(`{"billingEnabled": true, "state": "ENABLED", "permissions": []}`))
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	c := &Client{
+		billingBase: srv.URL, serviceUsageBase: srv.URL, crmBase: srv.URL,
+		token: func(context.Context) (string, error) {
+			fetches.Add(1)
+			return "test-token\n", nil
+		},
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(3)
+		go func() { defer wg.Done(); c.BillingEnabled(context.Background(), "acme") }()
+		go func() { defer wg.Done(); c.ServiceEnabled(context.Background(), "acme", GKEService) }()
+		go func() { defer wg.Done(); c.MissingPermissions(context.Background(), "acme") }()
+	}
+	wg.Wait()
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("24 concurrent probes fetched the token %d times, want 1", n)
+	}
+
+	// Once the token has aged out, the next call fetches a fresh one.
+	c.tokenMu.Lock()
+	c.tokenExpiry = time.Now().Add(-time.Second)
+	c.tokenMu.Unlock()
+	c.BillingEnabled(context.Background(), "acme")
+	if n := fetches.Load(); n != 2 {
+		t.Errorf("after expiry: %d fetches, want 2", n)
+	}
+}
+
+func TestAccessTokenFailureIsNotCached(t *testing.T) {
+	calls := 0
+	c := &Client{token: func(context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("gcloud: not logged in")
+		}
+		return "test-token", nil
+	}}
+	if _, err := c.accessToken(context.Background()); err == nil {
+		t.Fatal("want the fetch error")
+	}
+	if tok, err := c.accessToken(context.Background()); err != nil || tok != "test-token" {
+		t.Errorf("after a failed fetch the next call should retry, got (%q, %v)", tok, err)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // RequiredPermission is one permission the bootstrap step exercises, paired
@@ -90,14 +91,7 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 // error carrying the status and the body, which is where Google APIs put the
 // reason ("API has not been used in project…", "permission denied").
 func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) ([]byte, error) {
-	fetchToken := c.token
-	if fetchToken == nil {
-		fetchToken = func(ctx context.Context) (string, error) {
-			out, err := c.run(ctx, "auth", "application-default", "print-access-token")
-			return string(out), err
-		}
-	}
-	token, err := fetchToken(ctx)
+	token, err := c.accessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +134,36 @@ func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) (
 // maxAPIResponse caps what callAPI reads. The probes ask for single fields,
 // so anything near it means a request forgot to.
 const maxAPIResponse = 1 << 20
+
+// tokenTTL is how long accessToken reuses a token. ADC access tokens live
+// about an hour; reusing one for a few minutes saves a gcloud spawn (~1s
+// cold) per REST call without ever handing out one near expiry.
+const tokenTTL = 5 * time.Minute
+
+// accessToken returns the application-default access token, asking gcloud
+// (or the token override) at most once per tokenTTL. Concurrent callers
+// share one fetch. A failed fetch is not cached.
+func (c *Client) accessToken(ctx context.Context) (string, error) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.cachedToken != "" && time.Now().Before(c.tokenExpiry) {
+		return c.cachedToken, nil
+	}
+	fetch := c.token
+	if fetch == nil {
+		fetch = func(ctx context.Context) (string, error) {
+			out, err := c.run(ctx, "auth", "application-default", "print-access-token")
+			return string(out), err
+		}
+	}
+	token, err := fetch(ctx)
+	if err != nil {
+		return "", err
+	}
+	c.cachedToken = strings.TrimSpace(token)
+	c.tokenExpiry = time.Now().Add(tokenTTL)
+	return c.cachedToken, nil
+}
 
 // maxErrorQuote caps how much of a non-JSON error body an error quotes.
 // These errors end up verbatim in on-screen panels, and a proxy or

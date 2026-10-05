@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -265,19 +266,31 @@ func permProblem(projectID string, missing []gcp.RequiredPermission, permErr err
 
 // projectServing asks whether projectID has billing and the GKE API on.
 // Each probe that could not run adds to probeErr instead of claiming either
-// answer.
+// answer. The two probes run concurrently and share the Client's cached
+// access token, so together they cost one round trip, not two.
 func projectServing(ctx context.Context, gc *gcp.Client, projectID string) (billingOff, apiOff bool, probeErr error) {
-	if on, err := gc.BillingEnabled(ctx, projectID); err != nil {
-		probeErr = err
-	} else {
-		billingOff = !on
+	var (
+		wg                 sync.WaitGroup
+		billingOn, apiOn   bool
+		billingErr, apiErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		billingOn, billingErr = gc.BillingEnabled(ctx, projectID)
+	}()
+	go func() {
+		defer wg.Done()
+		apiOn, apiErr = gc.ServiceEnabled(ctx, projectID, gcp.GKEService)
+	}()
+	wg.Wait()
+	if billingErr == nil {
+		billingOff = !billingOn
 	}
-	if on, err := gc.ServiceEnabled(ctx, projectID, gcp.GKEService); err != nil {
-		probeErr = errors.Join(probeErr, err)
-	} else {
-		apiOff = !on
+	if apiErr == nil {
+		apiOff = !apiOn
 	}
-	return billingOff, apiOff, probeErr
+	return billingOff, apiOff, errors.Join(billingErr, apiErr)
 }
 
 // billingProblem renders a project without billing. There is no offer to fix

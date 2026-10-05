@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,6 +82,12 @@ type Client struct {
 	// token overrides how the REST probes obtain an access token; nil
 	// means asking gcloud for the application-default one.
 	token func(ctx context.Context) (string, error)
+
+	// tokenMu guards the access token accessToken caches, so one submit's
+	// REST probes, run concurrently, share a single gcloud spawn.
+	tokenMu     sync.Mutex
+	cachedToken string
+	tokenExpiry time.Time
 }
 
 const cmdTimeout = 60 * time.Second
