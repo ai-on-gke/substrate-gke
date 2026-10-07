@@ -1,3 +1,4 @@
 bin/
 *.swp
 .DS_Store
+/tools/setup-gcp/setup-gcp

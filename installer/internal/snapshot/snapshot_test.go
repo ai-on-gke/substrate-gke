@@ -300,7 +300,7 @@ func TestFetchPreambleQuotesPathsSafely(t *testing.T) {
 		// Run just the assignments, then ask the shell what it resolved.
 		prelude, _, ok := strings.Cut(script, "\nif [ ")
 		if !ok {
-			prelude, _, _ = strings.Cut(script, "\ngo run ")
+			prelude, _, _ = strings.Cut(script, "\ngo -C ")
 			prelude = strings.Replace(prelude, "cd ", "SUBSTRATE_DIR=", 1)
 		}
 		out, err := exec.Command("bash", "-c", prelude+"\nprintf '%s' \"${SUBSTRATE_DIR}\"").Output()
@@ -937,6 +937,7 @@ func TestFetchTreeChecksOutTheCommit(t *testing.T) {
 
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
+	b.SetupGCP = "/src/substrate-gke/tools/setup-gcp"
 	spec := b.Bootstrap(testSetup(t))
 
 	for _, want := range []string{
@@ -954,8 +955,57 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 			t.Errorf("Bootstrap env missing %q", want)
 		}
 	}
-	if !strings.Contains(spec.Argv[2], "go run ./tools/setup-gcp bootstrap") {
+	// setup-gcp runs from this repository, not from the Substrate checkout,
+	// but only after the checkout is fetched.
+	script := spec.Argv[2]
+	run := "go -C '/src/substrate-gke/tools/setup-gcp' run . bootstrap"
+	if !strings.Contains(script, run) {
 		t.Errorf("unexpected argv: %v", spec.Argv)
+	}
+	if strings.Contains(script, "./tools/setup-gcp") {
+		t.Errorf("Bootstrap must not run the checkout's tools/setup-gcp: %v", spec.Argv)
+	}
+	if strings.Index(script, `cd "${SUBSTRATE_DIR}"`) > strings.Index(script, run) {
+		t.Errorf("Bootstrap must fetch the checkout before running setup-gcp: %v", spec.Argv)
+	}
+}
+
+func TestFindSetupGCP(t *testing.T) {
+	repo := t.TempDir()
+	tool := filepath.Join(repo, SetupGCPPath)
+	if err := os.MkdirAll(tool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"go.mod", "main.go"} {
+		if err := os.WriteFile(filepath.Join(tool, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installer := filepath.Join(repo, "installer")
+	if err := os.MkdirAll(installer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// From installer/ (go run . / make run) and from bin/ (make build), with
+	// an unrelated first start such as a go-build temp dir.
+	for _, starts := range [][]string{
+		{installer},
+		{t.TempDir(), filepath.Join(repo, "bin")},
+	} {
+		got, err := FindSetupGCP("", starts...)
+		if err != nil || got != tool {
+			t.Errorf("FindSetupGCP(%v) = %q, %v; want %q", starts, got, err, tool)
+		}
+	}
+
+	if got, err := FindSetupGCP(tool); err != nil || got != tool {
+		t.Errorf("explicit FindSetupGCP = %q, %v; want %q", got, err, tool)
+	}
+	if _, err := FindSetupGCP(installer); err == nil {
+		t.Error("explicit path without the module must fail")
+	}
+	if _, err := FindSetupGCP("", t.TempDir()); err == nil {
+		t.Error("search outside a checkout must fail")
 	}
 }
 
