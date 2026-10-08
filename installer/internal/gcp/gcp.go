@@ -55,6 +55,11 @@ type Cluster struct {
 	Network     string
 	Subnetwork  string
 	DataplaneV2 bool
+	// FilestoreCSIAddon reports whether GKE's managed Filestore CSI driver is
+	// enabled. Bootstrap turns it off on an existing cluster
+	// (agent-substrate/substrate#2357), so the installer warns before that
+	// happens to a cluster whose workloads may be using it.
+	FilestoreCSIAddon bool
 }
 
 // NetworkName and SubnetworkName are the last segments of the cluster's
@@ -279,6 +284,11 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			Subnetwork       string `json:"subnetwork"`
 			DatapathProvider string `json:"datapathProvider"`
 		} `json:"networkConfig"`
+		AddonsConfig struct {
+			GcpFilestoreCsiDriverConfig struct {
+				Enabled bool `json:"enabled"`
+			} `json:"gcpFilestoreCsiDriverConfig"`
+		} `json:"addonsConfig"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing cluster list: %w", err)
@@ -296,6 +306,8 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			Network:       r.NetworkConfig.Network,
 			Subnetwork:    r.NetworkConfig.Subnetwork,
 			DataplaneV2:   r.NetworkConfig.DatapathProvider == "ADVANCED_DATAPATH",
+
+			FilestoreCSIAddon: r.AddonsConfig.GcpFilestoreCsiDriverConfig.Enabled,
 		})
 	}
 	return clusters, nil

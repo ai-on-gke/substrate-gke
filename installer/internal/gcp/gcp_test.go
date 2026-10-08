@@ -208,3 +208,18 @@ func TestBootstrapRecreatesOnlyClustersNoSettingCanMatch(t *testing.T) {
 		}
 	}
 }
+
+// Whether the managed Filestore driver is on decides whether the installer
+// warns that provision will turn it off; read from the same listing, or the
+// warning silently never fires.
+func TestParseClustersReadsTheFilestoreAddon(t *testing.T) {
+	clusters, err := ParseClusters([]byte(`[
+	  {"name": "on", "addonsConfig": {"gcpFilestoreCsiDriverConfig": {"enabled": true}}},
+	  {"name": "off", "addonsConfig": {}}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clusters[0].FilestoreCSIAddon || clusters[1].FilestoreCSIAddon {
+		t.Errorf("FilestoreCSIAddon = %v, %v; want true, false", clusters[0].FilestoreCSIAddon, clusters[1].FilestoreCSIAddon)
+	}
+}

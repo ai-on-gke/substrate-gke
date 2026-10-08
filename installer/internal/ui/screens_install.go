@@ -95,6 +95,14 @@ func (s *provisionScreen) View(w int) string {
 		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
 			"Cluster %s already exists; bootstrap is idempotent and only fills in the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
 	}
+	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
+		// Said here, as it happens, rather than left for the Filestore step
+		// to mention afterward: by then the driver is already off, and a
+		// user who skips that step has none at all. Wrapped to the content
+		// width, or Bubble Tea's renderer cuts it at the edge.
+		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render(
+			"Bootstrap also turns off GKE's managed Filestore CSI driver on this cluster. Pods using Filestore volumes lose their driver until the Filestore step installs Substrate's.") + "\n\n")
+	}
 	b.WriteString(s.comp.view(w))
 	if s.comp.ok() {
 		b.WriteString("\n" + theme.Good.Render("GCP resources are ready. Press [enter] to turn on Substrate."))
@@ -520,7 +528,19 @@ func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
 func (s *filestoreScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Install Filestore CSI driver") + "\n")
-	b.WriteString(theme.Subtle.Render("Optional: install GCP Filestore CSI Driver configured for Substrate.\nNote: This will disable the managed Filestore CSI driver if enabled.") + "\n\n")
+	st := s.deps.Setup
+	skip := "[2] Skip — I'll configure storage drivers later"
+	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
+		// Provision has already turned the managed driver off, so the usual
+		// note would describe something that has happened as something that
+		// might, and "skip" would hide that it leaves the cluster with no
+		// Filestore driver at all.
+		b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render("Optional: install GCP Filestore CSI Driver configured for Substrate.") + "\n")
+		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("Provision already turned off GKE's managed Filestore CSI driver on this cluster. Skipping leaves it with no Filestore CSI driver.") + "\n\n")
+		skip = "[2] Skip — the cluster then has no Filestore CSI driver"
+	} else {
+		b.WriteString(theme.Subtle.Render("Optional: install GCP Filestore CSI Driver configured for Substrate.\nNote: This will disable the managed Filestore CSI driver if enabled.") + "\n\n")
+	}
 
 	if s.comp != nil {
 		b.WriteString(s.comp.view(w))
@@ -532,7 +552,7 @@ func (s *filestoreScreen) View(w int) string {
 
 	options := []string{
 		"[1] Install Filestore CSI driver (Substrate overlay)",
-		"[2] Skip — I'll configure storage drivers later",
+		skip,
 	}
 	for i, opt := range options {
 		if i == s.cursor {

@@ -252,6 +252,13 @@ type Setup struct {
 	ClusterSubnetwork  string
 	ClusterDataplaneV2 bool
 
+	// ClusterFilestoreAddon records that the existing cluster had GKE's
+	// managed Filestore CSI driver on. Provision's bootstrap turns it off
+	// (agent-substrate/substrate#2357), before the user has decided whether
+	// the optional Filestore step installs Substrate's replacement, so both
+	// screens say so.
+	ClusterFilestoreAddon bool
+
 	BucketName   string
 	KoDockerRepo string
 

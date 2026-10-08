@@ -1246,6 +1246,51 @@ func TestChoosingAnExistingClusterRecordsItsOwnNetwork(t *testing.T) {
 	}
 }
 
+// Provision's bootstrap turns off GKE's managed Filestore CSI driver on an
+// existing cluster (agent-substrate/substrate#2357), before the user has
+// chosen whether the optional Filestore step installs Substrate's. Workloads
+// on Filestore volumes lose their driver at that moment, so the user has to
+// hear it then — and hear again, at the Filestore step, that skipping leaves
+// the cluster with none. A new cluster has no such workloads and gets neither.
+func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  execx.DryRun{Delay: time.Millisecond},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	st := deps.Setup
+	st.ProjectID, st.ClusterName, st.ClusterIsNew, st.ClusterFilestoreAddon = "acme", "prod", false, true
+
+	if view := newProvisionScreen(deps).View(120); !strings.Contains(view, "turns off GKE's managed Filestore CSI driver") {
+		t.Errorf("provision should warn that the managed Filestore driver is turned off:\n%s", view)
+	}
+	if view := newFilestoreScreen(deps).View(120); !strings.Contains(view, "already turned off") || !strings.Contains(view, "no Filestore CSI driver") {
+		t.Errorf("the Filestore step should say the driver is already off and skipping leaves none:\n%s", view)
+	}
+
+	st.ClusterIsNew = true
+	if view := newProvisionScreen(deps).View(120); strings.Contains(view, "Filestore") {
+		t.Errorf("a new cluster should get no Filestore warning:\n%s", view)
+	}
+	if view := newFilestoreScreen(deps).View(120); strings.Contains(view, "already turned off") {
+		t.Errorf("a new cluster's Filestore step should not claim the driver was turned off:\n%s", view)
+	}
+}
+
+// The flag reaches Setup from the cluster listing at selection, and does not
+// survive into the create path.
+func TestChoosingAClusterRecordsItsFilestoreAddon(t *testing.T) {
+	s, drive := networkScreen(t, gcp.Cluster{
+		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, FilestoreCSIAddon: true,
+	})
+	drive(key("enter"))
+	if !s.deps.Setup.ClusterFilestoreAddon {
+		t.Error("choosing a cluster with the managed Filestore driver did not record it")
+	}
+}
+
 // Outside --dry-run the teardown must re-probe for real: the runner flips to
 // clean only after the delete spec has run, and the screen has to see that
 // rather than assume it.

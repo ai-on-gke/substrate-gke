@@ -460,6 +460,7 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.ClusterIsNew = false
 	st.ClusterKVMReady = c.KVMReady
 	st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2 = c.NetworkName(), c.SubnetworkName(), c.DataplaneV2
+	st.ClusterFilestoreAddon = c.FilestoreCSIAddon
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -610,6 +611,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st.ClusterIsNew = true
 				st.ClusterKVMReady = false
 				st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2 = "", "", false
+				st.ClusterFilestoreAddon = false
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
