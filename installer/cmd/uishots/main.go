@@ -63,6 +63,11 @@ func main() {
 		DryRun:  true,
 		LogPath: "~/.cache/substrate-gke/logs/installer.log",
 	}
+	// Bootstrap's command line shows the resolved setup-gcp directory. Use
+	// install.sh's default clone location ($HOME/.substrate-gke) with a
+	// placeholder home directory, so the screenshot shows neither this
+	// machine's path nor an unexpandable '~' (ShellQuote single-quotes it).
+	deps.Builder.SetupGCP = "/home/you/.substrate-gke/tools/setup-gcp"
 	app := ui.NewApp(deps)
 	pump(app, tea.WindowSizeMsg{Width: 110, Height: 26})
 	for _, m := range runCmd(app.Init()) {

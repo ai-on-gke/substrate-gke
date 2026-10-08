@@ -26,6 +26,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// conditionalPolicyVersion is the IAM policy version that represents
+// conditional role bindings. Reading a policy at a lower version renames each
+// conditional role to "<role>_withcond_<hash>" and drops its condition, so a
+// read-modify-write at that version would destroy those bindings
+// (https://cloud.google.com/iam/docs/policies#versions).
+const conditionalPolicyVersion = 3
+
+// projectPolicyRequest reads a project's IAM policy at
+// conditionalPolicyVersion.
+func projectPolicyRequest(resource string) *iampb.GetIamPolicyRequest {
+	return &iampb.GetIamPolicyRequest{
+		Resource: resource,
+		Options:  &iampb.GetPolicyOptions{RequestedPolicyVersion: conditionalPolicyVersion},
+	}
+}
+
 func addProjectIamBinding(policy *iampb.Policy, role, member string) bool {
 	for _, b := range policy.Bindings {
 		// Skip if the policy has any conditions.
@@ -49,18 +65,14 @@ func addProjectIamBinding(policy *iampb.Policy, role, member string) bool {
 }
 
 func grantGkeNodePermissions(ctx context.Context, cfg *Config) error {
-	client, err := resourcemanager.NewProjectsClient(ctx)
+	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	resource := fmt.Sprintf("projects/%s", cfg.ProjectID)
-	req := &iampb.GetIamPolicyRequest{
-		Resource: resource,
-	}
-
-	policy, err := client.GetIamPolicy(ctx, req)
+	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest(resource))
 	if err != nil {
 		return fmt.Errorf("get project iam policy: %w", err)
 	}
@@ -78,6 +90,9 @@ func grantGkeNodePermissions(ctx context.Context, cfg *Config) error {
 	}
 
 	slog.Info("Setting IAM policy (grant gke node permissions)...", slog.String("project", cfg.ProjectID))
+	// Version 3 keeps conditional bindings intact; the etag read with the
+	// policy makes IAM reject the write if the policy changed in between.
+	policy.Version = conditionalPolicyVersion
 	setReq := &iampb.SetIamPolicyRequest{
 		Resource: resource,
 		Policy:   policy,
@@ -90,18 +105,14 @@ func grantGkeNodePermissions(ctx context.Context, cfg *Config) error {
 	return nil
 }
 func grantAteletPermissions(ctx context.Context, cfg *Config) error {
-	client, err := resourcemanager.NewProjectsClient(ctx)
+	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	resource := fmt.Sprintf("projects/%s", cfg.ProjectID)
-	req := &iampb.GetIamPolicyRequest{
-		Resource: resource,
-	}
-
-	policy, err := client.GetIamPolicy(ctx, req)
+	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest(resource))
 	if err != nil {
 		return fmt.Errorf("get project iam policy: %w", err)
 	}
@@ -115,11 +126,14 @@ func grantAteletPermissions(ctx context.Context, cfg *Config) error {
 	changed2 := addProjectIamBinding(policy, "roles/artifactregistry.reader", member)
 
 	if !changed1 && !changed2 {
-		slog.Info("IAM policy already has required GKE node permissions. Skipping update.", slog.String("project", cfg.ProjectID))
+		slog.Info("IAM policy already has required atelet permissions. Skipping update.", slog.String("project", cfg.ProjectID))
 		return nil
 	}
 
-	slog.Info("Setting IAM policy (grant api server permissions)...", slog.String("project", cfg.ProjectID))
+	slog.Info("Setting IAM policy (grant atelet permissions)...", slog.String("project", cfg.ProjectID))
+	// Version 3 keeps conditional bindings intact; the etag read with the
+	// policy makes IAM reject the write if the policy changed in between.
+	policy.Version = conditionalPolicyVersion
 	setReq := &iampb.SetIamPolicyRequest{
 		Resource: resource,
 		Policy:   policy,

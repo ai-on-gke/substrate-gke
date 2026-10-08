@@ -20,6 +20,10 @@ set -o errexit -o nounset -o pipefail
 # from agent-substrate/substrate's hack/teardown.sh (upstream commit f69f41d3)
 # together with tools/setup-gcp (agent-substrate/substrate#2304), so the two
 # halves of the lifecycle change together.
+#
+# A resource that is already gone counts as deleted, so re-running after a
+# partial teardown is safe. Any other failure is reported: the remaining steps
+# still run, and the script exits 1 at the end naming every failed step.
 
 # Source the environment variables. The file is optional: an installer (or a
 # user pasting a one-liner) can pass the same variables through the
@@ -37,14 +41,48 @@ fi
 # require checks that each named variable is set, so a step fails up front
 # with the variable's name rather than mid-deletion with a gcloud error. Each
 # step declares only what it uses: deleting a bucket must not demand a node
-# pool name.
+# pool name. --all checks the union before its first step.
 require() {
   for var in "$@"; do
     if [ -z "${!var:-}" ]; then
-      echo "${var} is not set; export it or create .ate-dev-env.sh from hack/ate-dev-env.sh.example in agent-substrate/substrate" >&2
+      echo "${var} is not set; export it (see tools/setup-gcp/README.md, Teardown)" >&2
       exit 1
     fi
   done
+}
+
+# failed lists the steps that hit a failure other than "already gone".
+failed=()
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "${scratch}"' EXIT
+
+# already_gone reports whether gcloud's error output means the resource or
+# binding does not exist, which is the state teardown wants. These are the
+# forms gcloud uses: GKE's code=404/Not found, Cloud Storage's "not found: 404"
+# and "matched no objects", IAM's "binding ... not found!", and Monitoring's
+# NOT_FOUND.
+already_gone() {
+  grep -qiE 'not found|NOT_FOUND|code=404|matched no objects' "$1"
+}
+
+# gcloud_step STEP ARGS... runs `gcloud ARGS...` with its output shown as it
+# runs, and sets last_status to "ok", "gone" (failed because the resource is
+# already deleted), or "failed" (anything else; STEP is added to failed).
+last_status=""
+gcloud_step() {
+  local step="$1"
+  shift
+  local log="${scratch}/last"
+  if gcloud "$@" 2>&1 | tee "${log}"; then
+    last_status="ok"
+  elif already_gone "${log}"; then
+    last_status="gone"
+    echo "(already deleted)"
+  else
+    last_status="failed"
+    failed+=("${step}")
+  fi
 }
 
 # --- Helper Functions ---
@@ -68,16 +106,15 @@ function usage() {
 revoke_gke_node_permissions() {
   require PROJECT_ID PROJECT_NUMBER
   echo "Revoking GKE node permissions..."
-  gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-    --role="roles/storage.objectViewer" \
-    --condition=None \
-    --quiet || true
-  gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-    --role="roles/artifactregistry.reader" \
-    --condition=None \
-    --quiet || true
+  local role
+  for role in roles/storage.objectViewer roles/artifactregistry.reader; do
+    gcloud_step "revoke GKE node permissions (${role})" \
+      projects remove-iam-policy-binding "${PROJECT_ID}" \
+      --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+      --role="${role}" \
+      --condition=None \
+      --quiet
+  done
 }
 
 # Revoke Atelet's project-level bindings (Reverse of grant_atelet_permissions)
@@ -85,16 +122,15 @@ revoke_atelet_permissions() {
   require PROJECT_ID PROJECT_NUMBER
   echo "Revoking atelet project-level permissions..."
   local member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/ate-system/sa/atelet"
-  gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-    --member="${member}" \
-    --role="roles/storage.objectAdmin" \
-    --condition=None \
-    --quiet || true
-  gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-    --member="${member}" \
-    --role="roles/artifactregistry.reader" \
-    --condition=None \
-    --quiet || true
+  local role
+  for role in roles/storage.objectAdmin roles/artifactregistry.reader; do
+    gcloud_step "revoke atelet permissions (${role})" \
+      projects remove-iam-policy-binding "${PROJECT_ID}" \
+      --member="${member}" \
+      --role="${role}" \
+      --condition=None \
+      --quiet
+  done
 }
 
 # Delete Monitoring Dashboards (Reverse of create_monitoring_dashboards)
@@ -107,14 +143,22 @@ delete_dashboards() {
     "Substrate Routing & E2E Latency"
     "Substrate gRPC Server — latency / QPS / errors"
   )
+  local display_name dashboard found
   for display_name in "${names[@]}"; do
-    for dashboard in $(gcloud monitoring dashboards list \
+    # A failed list must not read as "no dashboards to delete".
+    if ! found=$(gcloud monitoring dashboards list \
         --project="${PROJECT_ID}" \
         --filter="displayName=\"${display_name}\"" \
-        --format="value(name)" 2>/dev/null); do
-      gcloud monitoring dashboards delete "${dashboard}" \
+        --format="value(name)" 2>"${scratch}/list-err"); then
+      cat "${scratch}/list-err" >&2
+      failed+=("delete dashboards (listing \"${display_name}\")")
+      continue
+    fi
+    for dashboard in ${found}; do
+      gcloud_step "delete dashboard \"${display_name}\"" \
+        monitoring dashboards delete "${dashboard}" \
         --project="${PROJECT_ID}" \
-        --quiet || true
+        --quiet
     done
   done
 }
@@ -127,10 +171,11 @@ delete_iam_policy_bindings() {
   local subject role
   for subject in atelet ate-api-server; do
     for role in roles/storage.objectAdmin roles/storage.bucketViewer; do
-      gcloud storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
+      gcloud_step "delete bucket IAM binding (${subject}, ${role})" \
+        storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
         --member="${wi}/${subject}" \
         --role="${role}" \
-        --quiet || true
+        --quiet
     done
   done
 }
@@ -139,29 +184,52 @@ delete_iam_policy_bindings() {
 delete_snapshot_bucket() {
   require PROJECT_ID BUCKET_NAME
   echo "Deleting snapshot bucket..."
-  gcloud storage rm --recursive "gs://${BUCKET_NAME}/**" --project="${PROJECT_ID}" --quiet || true
-  gcloud storage buckets delete "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --quiet || true
+  gcloud_step "empty snapshot bucket" \
+    storage rm --recursive "gs://${BUCKET_NAME}/**" --project="${PROJECT_ID}" --quiet
+  gcloud_step "delete snapshot bucket" \
+    storage buckets delete "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --quiet
 }
 
 # Delete gVisor Node Pool (Reverse of create_gvisor_node_pool)
 delete_gvisor_node_pool() {
   require PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION NODE_POOL_NAME
   echo "Deleting gVisor node pool..."
-  gcloud container node-pools delete "${NODE_POOL_NAME}" \
+  gcloud_step "delete node pool" \
+    container node-pools delete "${NODE_POOL_NAME}" \
     --cluster="${CLUSTER_NAME}" \
     --location="${CLUSTER_LOCATION}" \
     --project="${PROJECT_ID}" \
-    --quiet || true
+    --quiet
 }
 
 # Delete Cluster (Reverse of create_cluster)
 delete_cluster() {
   require PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION
   echo "Deleting GKE cluster..."
-  gcloud container clusters delete "${CLUSTER_NAME}" \
+  gcloud_step "delete cluster" \
+    container clusters delete "${CLUSTER_NAME}" \
     --location="${CLUSTER_LOCATION}" \
     --project="${PROJECT_ID}" \
-    --quiet || true
+    --quiet
+  if [ "${last_status}" != "gone" ]; then
+    return 0
+  fi
+  # GKE answers a wrong --location with the same NOT_FOUND as a deleted
+  # cluster. Look for the name in every location before calling it deleted.
+  local elsewhere
+  if ! elsewhere=$(gcloud container clusters list \
+      --project="${PROJECT_ID}" \
+      --filter="name=${CLUSTER_NAME}" \
+      --format="value(location)" 2>"${scratch}/list-err"); then
+    cat "${scratch}/list-err" >&2
+    failed+=("delete cluster (could not check other locations for ${CLUSTER_NAME})")
+    return 0
+  fi
+  if [ -n "${elsewhere}" ]; then
+    elsewhere="$(echo ${elsewhere} | tr ' ' ',')"
+    echo "Cluster ${CLUSTER_NAME} is not in ${CLUSTER_LOCATION} but exists in: ${elsewhere}" >&2
+    failed+=("delete cluster (${CLUSTER_NAME} is in ${elsewhere}, not ${CLUSTER_LOCATION})")
+  fi
 }
 
 # --- Main Logic ---
@@ -179,6 +247,9 @@ while [[ "$#" -gt 0 ]]; do
     --delete-cluster) delete_cluster ;;
     --delete-dashboards) delete_dashboards ;;
     --all)
+      # Check every variable the steps below use before any of them runs,
+      # so a missing one cannot stop the teardown halfway through.
+      require PROJECT_ID PROJECT_NUMBER BUCKET_NAME CLUSTER_NAME CLUSTER_LOCATION
       delete_dashboards
       delete_iam_policy_bindings
       revoke_atelet_permissions
@@ -197,3 +268,12 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo >&2
+  echo "Teardown incomplete; see the errors above. Resources from these steps may still exist (and bill):" >&2
+  for step in "${failed[@]}"; do
+    echo "  FAILED: ${step}" >&2
+  done
+  exit 1
+fi

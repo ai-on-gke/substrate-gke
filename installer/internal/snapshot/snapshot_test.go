@@ -970,17 +970,27 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	}
 }
 
-func TestFindSetupGCP(t *testing.T) {
-	repo := t.TempDir()
-	tool := filepath.Join(repo, SetupGCPPath)
-	if err := os.MkdirAll(tool, 0o755); err != nil {
+// writeMainModule creates dir as a Go main module with the given module path.
+func writeMainModule(t *testing.T, dir, module string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"go.mod", "main.go"} {
-		if err := os.WriteFile(filepath.Join(tool, f), nil, 0o644); err != nil {
+	files := map[string]string{
+		"go.mod":  "module " + module + "\n\ngo 1.26.4\n",
+		"main.go": "package main\n\nfunc main() {}\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestFindSetupGCP(t *testing.T) {
+	repo := t.TempDir()
+	tool := filepath.Join(repo, SetupGCPPath)
+	writeMainModule(t, tool, "github.com/ai-on-gke/substrate-gke/tools/setup-gcp")
 	installer := filepath.Join(repo, "installer")
 	if err := os.MkdirAll(installer, 0o755); err != nil {
 		t.Fatal(err)
@@ -1006,6 +1016,73 @@ func TestFindSetupGCP(t *testing.T) {
 	}
 	if _, err := FindSetupGCP("", t.TempDir()); err == nil {
 		t.Error("search outside a checkout must fail")
+	}
+
+	// This repository's own copy must pass the check, from this package's
+	// directory just as from installer/.
+	real, err := filepath.Abs(filepath.Join("..", "..", "..", SetupGCPPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FindSetupGCP("", "."); err != nil || got != real {
+		t.Errorf("FindSetupGCP from this repository = %q, %v; want %q", got, err, real)
+	}
+}
+
+// Review question: does FindSetupGCP accept any Go main module? installer/
+// also has a go.mod and a main.go, and Bootstrap would then run
+// `go -C installer run . bootstrap`, relaunching the installer instead of
+// provisioning. Only the setup-gcp module may pass, explicitly or found by
+// the upward search.
+func TestFindSetupGCPRejectsOtherMainModules(t *testing.T) {
+	repo := t.TempDir()
+	installer := filepath.Join(repo, "installer")
+	writeMainModule(t, installer, "github.com/ai-on-gke/substrate-gke/installer")
+	if got, err := FindSetupGCP(installer); err == nil {
+		t.Errorf("FindSetupGCP(%q) = %q, want an error: it is the installer module, not setup-gcp", installer, got)
+	}
+
+	// A directory at the setup-gcp path holding some other main module.
+	impostor := filepath.Join(t.TempDir(), "checkout")
+	writeMainModule(t, filepath.Join(impostor, SetupGCPPath), "example.com/other")
+	if got, err := FindSetupGCP("", impostor); err == nil {
+		t.Errorf("FindSetupGCP search accepted %q, which holds module example.com/other", got)
+	}
+}
+
+// Review question: does Bootstrap still export the deprecated
+// GVISOR_NODE_MACHINE_TYPE? setup-gcp now lives in this repository and reads
+// NODE_MACHINE_TYPE, warning on every run that sees only the old name. No
+// other consumer of the environment reads the old name: upstream ate-setup
+// on release-0.2 and main does not reference either variable.
+func TestBootstrapEnvUsesNodeMachineType(t *testing.T) {
+	st := testSetup(t)
+	st.MachineType = "c3-standard-8"
+	spec := NewBuilder("/tmp/substrate-pin", true).Bootstrap(st)
+	if !slices.Contains(spec.Env, "NODE_MACHINE_TYPE=c3-standard-8") {
+		t.Errorf("Bootstrap env lacks NODE_MACHINE_TYPE=c3-standard-8: %v", spec.Env)
+	}
+	for _, kv := range spec.Env {
+		if strings.HasPrefix(kv, "GVISOR_NODE_MACHINE_TYPE=") {
+			t.Errorf("Bootstrap env still exports the deprecated %s", kv)
+		}
+	}
+}
+
+// Review question: is Bootstrap's Display a command that works where it is
+// shown? The step runs from the Substrate checkout, so a Display relative to
+// this repository names the checkout's own (stale or missing) copy if
+// replayed there. Display must name the resolved setup-gcp directory, and
+// running it must not depend on the working directory.
+func TestBootstrapDisplayNamesTheResolvedSetupGCP(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	b.SetupGCP = "/home/dev/substrate-gke/tools/setup-gcp"
+	spec := b.Bootstrap(testSetup(t))
+	if !strings.Contains(spec.Display, b.SetupGCP) {
+		t.Errorf("Bootstrap Display %q does not name the resolved setup-gcp directory %q", spec.Display, b.SetupGCP)
+	}
+	if strings.Contains(spec.Display, "-C "+SetupGCPPath) || strings.Contains(spec.Display, "./"+SetupGCPPath) {
+		t.Errorf("Bootstrap Display %q is relative to this repository, but the step runs in the Substrate checkout", spec.Display)
 	}
 }
 

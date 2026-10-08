@@ -265,6 +265,11 @@ if [ "$1 $2" = "projects describe" ]; then echo 42; fi`,
 		"gcloud storage buckets delete gs://acme-snapshots --project=acme",
 		"serviceAccount:42-compute@developer.gserviceaccount.com",
 		"gcloud monitoring dashboards list --project=acme",
+		// The two workload-identity steps, the only ones that combine
+		// PROJECT_ID, PROJECT_NUMBER, and BUCKET_NAME. Without these, --all
+		// could drop either step and this test would still pass.
+		"gcloud storage buckets remove-iam-policy-binding gs://acme-snapshots --member=principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet",
+		"gcloud projects remove-iam-policy-binding acme --member=principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("teardown did not run %q; calls:\n%s", want, log)
@@ -275,6 +280,37 @@ if [ "$1 $2" = "projects describe" ]; then echo 42; fi`,
 	}
 	if strings.Contains(log, "git ") {
 		t.Errorf("cleanup-gcp fetched a Substrate tree; the teardown is local now:\n%s", log)
+	}
+}
+
+// A failed deletion must fail cleanup-gcp (and so `make teardown`) instead of
+// ending in "Done.", or the user walks away from a cluster that still bills.
+func TestCleanupGcpFailsWhenADeleteFails(t *testing.T) {
+	script, err := filepath.Abs("../tools/cleanup-gcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	gcloud := `#!/usr/bin/env bash
+if [ "$1 $2" = "projects describe" ]; then echo 42; exit 0; fi
+if [ "$1 $2 $3" = "container clusters delete" ]; then
+  echo "ERROR: (gcloud.container.clusters.delete) PERMISSION_DENIED: Required \"container.clusters.delete\" permission" >&2
+  exit 1
+fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "gcloud"), []byte(gcloud), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", script, "--project", "acme", "--cluster", "substrate-test",
+		"--location", "us-west1-c", "--bucket", "acme-snapshots", "--yes")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("cleanup-gcp exited 0 after a denied cluster delete:\n%s", out)
+	}
+	if strings.Contains(string(out), "Done.") {
+		t.Errorf("cleanup-gcp reported Done. after a denied cluster delete:\n%s", out)
 	}
 }
 
