@@ -823,13 +823,13 @@ var restoreDemoTemplates = []string{
 // the counter demo). When the Micro-VM sandbox runtime is selected and staged,
 // it runs `ate-setup deploy demo counter-microvm` if the checkout has it (see
 // counterMicroVMDemoDir), exactly as the gVisor demo runs ate-setup. Older
-// trees, the pinned Commit among them, fall back to hack/install-ate.sh
+// trees, such as v0.1.0, fall back to hack/install-ate.sh
 // --deploy-demo-counter-microvm (the demo step from hack/run-microvm-demo.sh),
 // which those trees keep for good.
 //
-// TODO: When v0.2.0 release images are published, bump Commit past v0.2.0
-// and drop the install-ate.sh fallback (deprecated upstream), the template
-// rewrite, and the jq/make entries in doctor.MicroVMTools.
+// TODO: Drop the install-ate.sh fallback (deprecated upstream), the template
+// rewrite, and the jq/make entries in doctor.MicroVMTools. Commit is past
+// v0.2.0, so they only serve older commits typed into the images step.
 func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	display, argv := imageArgs(st)
 	if st.MicroVMActive() {
