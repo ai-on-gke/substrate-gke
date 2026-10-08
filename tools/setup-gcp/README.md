@@ -1,0 +1,339 @@
+# GCP Setup Tool (`setup-gcp`)
+
+This tool automates the provisioning and configuration of Google Cloud Platform (GCP) resources required to run Agent Substrate. It is designed to be idempotent, meaning it can be run multiple times safely to ensure the environment is correctly configured.
+
+This tool was moved here from `tools/setup-gcp` in
+[agent-substrate/substrate](https://github.com/agent-substrate/substrate)
+([agent-substrate/substrate#2304](https://github.com/agent-substrate/substrate/issues/2304)),
+imported from upstream commit `f69f41d3`. It is a separate Go module; run the
+commands below from the root of this repository. The installer's provisioning
+step runs this copy, whatever Substrate revision it installs.
+
+## Overview
+
+The `setup-gcp` tool provisions and configures GCP resources for Agent Substrate.
+It uses a hierarchical command structure:
+
+*   `setup-gcp` (root)
+    *   `enable apis` - Enable required GCP APIs.
+    *   `create` - Parent command for resource creation.
+        *   `cluster` - Create GKE cluster.
+        *   `bucket` - Create GCS bucket.
+        *   `iam` - Create IAM policy bindings and grant permissions.
+        *   `dashboards` - Create Cloud Monitoring dashboards.
+        *   `cloudsql` - Create a Cloud SQL PostgreSQL instance for the ateapi store, with IAM database authentication (see [cloud-sql.md](cloud-sql.md)).
+    *   `bootstrap` - Run all setup steps in order.
+
+## Prerequisites
+
+1.  **Go**: Ensure Go is installed (version compatible with the module, see `tools/setup-gcp/go.mod`).
+2.  **Google Cloud SDK (`gcloud`)**: Installed and authenticated.
+3.  **Application Default Credentials (ADC)**: The tool uses Google Cloud client libraries. You must set up ADC:
+    ```bash
+    gcloud auth application-default login
+    ```
+4.  **Target Project**: You must have a GCP project created and have sufficient permissions (typically Owner or Editor) to create resources like GKE clusters, GCS buckets, and IAM bindings.
+
+## Configuration & Defaults
+
+All CLI flags can be configured via environment variables. If an environment variable is set, it will be used as the default value for the corresponding flag. Command-line flags always take precedence over environment variables.
+
+A convenient way to manage these is to copy the example environment file from a Substrate checkout, customize it, and source it before running the tool:
+
+```bash
+cp <substrate checkout>/hack/ate-dev-env.sh.example .ate-dev-env.sh
+# Edit .ate-dev-env.sh to match your project and preferences
+source .ate-dev-env.sh
+```
+
+## Global Flags
+
+These flags can be passed to the root command and apply to all subcommands:
+
+| Flag | Description | Default Env Var | Fallback Default |
+| :--- | :--- | :--- | :--- |
+| `--project-id` | GCP Project ID. | `PROJECT_ID` | None (Required) |
+| `--project-number` | GCP Project Number (optional, resolved from `--project-id` if needed). | `PROJECT_NUMBER` | None |
+| `--region` | GCP Region for regional resources. | `GCE_REGION` | `us-west1` |
+
+## Subcommands
+
+### 1. Enable APIs
+
+Enables the required GCP APIs for the project.
+
+```bash
+go -C tools/setup-gcp run . enable apis [flags]
+```
+
+**Flags:**
+*   (Uses global `--project-id`)
+
+### 2. Create Cluster
+
+Creates a GKE cluster configured for Agent Substrate (with Workload Identity,
+required Kubernetes beta APIs, and Managed OpenTelemetry enabled, and the
+Filestore CSI driver disabled).
+
+> [!WARNING]
+> Agent Substrate requires PodCertificateRequest and ClusterTrustBundle APIs.
+> ClusterTrustBundle discovery prefers `certificates.k8s.io/v1`, falling back
+> to `certificates.k8s.io/v1beta1` only when the stable resource is not served.
+> PodCertificateRequest discovery independently prefers `v1` over `v1beta1`.
+> For GKE deployments, the supported configurations are:
+>
+> * **GKE 1.36 with the beta APIs enabled at cluster creation.** GKE only
+>   honors `enableK8sBetaApis` **at creation time**. Enabling the APIs later
+>   on an existing cluster is not recoverable in place: the tool's reconcile
+>   path issues the update, but the APIs do not become served — the cluster
+>   must be **recreated** with them enabled.
+> * **GKE 1.37 or higher**, where the APIs are served by default and no beta
+>   enablement is needed.
+>
+> Versions below 1.36 are not supported. `create cluster` handles the
+> enablement for you; if you bring your own 1.36 cluster, create it with both
+> APIs enabled from the start, e.g.:
+>
+> ```bash
+> gcloud container clusters create "${CLUSTER_NAME}" ... \
+>   --enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/podcertificaterequests,certificates.k8s.io/v1beta1/clustertrustbundles
+> ```
+>
+> The symptom of a cluster without the APIs: the install hangs at "Waiting for
+> podcertificate ClusterTrustBundles to be ready" and `kubectl get
+> clustertrustbundles` reports the resource type is not served.
+
+> [!WARNING]
+> **Turn node auto-upgrade off on any node pool that runs workers, and do not
+> use spot or preemptible nodes for them.** When a worker pod is deleted,
+> `SIGTERM` is forwarded into the actor's containers and the control plane keeps
+> accepting a suspend for 30 minutes. An actor suspended inside that
+> window keeps its state. One still awake when the window closes is moved to
+> `ACTOR_STATE_CRASHED` with its worker assignment cleared, and `CRASHED` is
+> terminal: `resume` and `suspend` are both refused, there is no recover verb,
+> and the snapshot the actor still holds cannot be used to start it. The only
+> way out is to delete the actor and create a new one, which loses its state.
+>
+> Auto-upgrade is the trigger to plan for, because GKE enables it by default and
+> it fires on Google's maintenance schedule rather than yours. `create cluster`
+> does not disable it, so do it yourself on every pool that runs workers:
+>
+> ```bash
+> gcloud container node-pools update "${NODE_POOL}" \
+>   --cluster "${CLUSTER_NAME}" --location "${CLUSTER_LOCATION}" \
+>   --no-enable-autoupgrade
+> ```
+>
+> This is a management setting, so it takes effect without recreating nodes and
+> is safe to apply to a serving cluster. Node auto-repair, preemption and OOM
+> kills reach the same path and cannot be configured away, so treat the setting
+> as removing the scheduled risk rather than all of it. Change versions through
+> the [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md), which has you suspend
+> every actor on a node at your own pace before the node moves.
+
+```bash
+go -C tools/setup-gcp run . create cluster [flags]
+```
+
+**Flags:**
+| Flag | Description | Default Env Var | Fallback Default |
+| :--- | :--- | :--- | :--- |
+| `--name` | Name of the GKE cluster. | `CLUSTER_NAME` | `substrate-poc` |
+| `--location` | Zone or region for the cluster (must be compatible with `--region`). | `CLUSTER_LOCATION` | `us-west1-c` |
+| `--version` | Kubernetes version. | `CLUSTER_VERSION` | None |
+| `--network` | VPC network name. | `NETWORK` | `default` |
+| `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
+| `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
+| `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for micro-VM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
+| `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
+| `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default). | `BOOT_DISK_TYPE` | None |
+
+`NODE_MACHINE_TYPE` was named `GVISOR_NODE_MACHINE_TYPE`. The old name still
+works and warns; rename it in your `.ate-dev-env.sh`.
+
+**Node version labels:** pool labels are the birth default for every node GKE
+creates later (autoscaling, auto-repair, node upgrades), and `setup-gcp` does
+not set `ate.dev/substrate-version` on the pool, so those nodes arrive
+unlabeled and run no dataplane pods (see the README's note on node version
+labels). Stamp the pool with
+`gcloud container node-pools update ... --node-labels=...` (list the existing
+labels first and carry them all over; the flag replaces the full set), and
+create additional pools with
+`--node-labels=ate.dev/substrate-version=<build version>`.
+
+### 3. Create Bucket
+
+Creates a GCS bucket for storing snapshots.
+
+```bash
+go -C tools/setup-gcp run . create bucket [flags]
+```
+
+**Flags:**
+| Flag | Description | Default Env Var | Fallback Default |
+| :--- | :--- | :--- | :--- |
+| `--name` | Name of the GCS bucket. | `BUCKET_NAME` | None (Required*) |
+
+*\*Note: Required unless the `BUCKET_NAME` environment variable is set.*
+
+### 4. Create IAM
+
+Configures IAM permissions and Workload Identity bindings.
+
+```bash
+go -C tools/setup-gcp run . create iam [flags]
+```
+
+**Flags:**
+| Flag | Description | Default Env Var | Fallback Default |
+| :--- | :--- | :--- | :--- |
+| `--bucket` | GCS bucket name. | `BUCKET_NAME` | None (Required for bucket bindings*) |
+| `--gke-nodes` | Grant GKE nodes permission to pull images. | - | `true` |
+| `--atelet` | Grant atelet project-level permissions. | - | `true` |
+| `--bucket-bindings` | Grant atelet and ate-api-server access to the snapshot bucket. | - | `true` |
+
+*\*Note: Required for bucket bindings unless the `BUCKET_NAME` environment variable is set.*
+
+#### What `create iam` actually grants
+
+On a fresh GCP project these bindings do not exist, and nothing else creates
+them — without them atelet cannot read or write external snapshots (`403` from
+GCS on the first suspend/resume), ate-api cannot copy or collect them, and
+nodes cannot pull images. `bootstrap` and `create iam` apply them for you; the
+table below is the reference for auditing them, or for applying them by hand in
+projects where you cannot run the tool with project-level IAM permissions.
+
+atelet and ate-api authenticate via [GKE Workload Identity
+Federation](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity):
+their Kubernetes ServiceAccounts (`ate-system/atelet` and
+`ate-system/ate-api-server`, created by `install-ate.sh`) are addressed
+directly as IAM principals — no Google service account is created or
+impersonated. This only works on a cluster with Workload Identity enabled
+(`create cluster` enables the `PROJECT_ID.svc.id.goog` pool; a pre-existing
+cluster must have it enabled too, or their GCS calls fail with `401`).
+
+| Member | Role | Resource | Why |
+| :--- | :--- | :--- | :--- |
+| atelet WI principal¹ | `roles/storage.objectAdmin` | project² | Read/write actor snapshots in GCS |
+| atelet WI principal¹ | `roles/artifactregistry.reader` | project² | Pull sandbox runtime assets |
+| atelet WI principal¹ | `roles/storage.objectAdmin` | snapshot bucket | Read/write snapshot objects |
+| atelet WI principal¹ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
+| ate-api-server WI principal¹ | `roles/storage.objectAdmin` | snapshot bucket | Copy external snapshots for tags, delete the ones nothing refers to |
+| ate-api-server WI principal¹ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
+| default compute SA³ | `roles/storage.objectViewer` | project² | Nodes pull images from GCS-backed registries |
+| default compute SA³ | `roles/artifactregistry.reader` | project² | Nodes pull images from Artifact Registry |
+
+¹ `principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/ate-system/sa/SERVICE_ACCOUNT` — note it is keyed to the **project number**, not the ID.
+² Project-level today; scoping these down is tracked in the TODOs in `cmd/iam.go`.
+³ `PROJECT_NUMBER-compute@developer.gserviceaccount.com` (least-privileged node SA is #76).
+
+Manual equivalent:
+
+```bash
+WI="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/ate-system/sa"
+ATELET="${WI}/atelet"
+ATE_API="${WI}/ate-api-server"
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="${ATELET}" --role=roles/storage.objectAdmin
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="${ATELET}" --role=roles/artifactregistry.reader
+for MEMBER in "${ATELET}" "${ATE_API}"; do
+  gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+    --member="${MEMBER}" --role=roles/storage.objectAdmin
+  gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+    --member="${MEMBER}" --role=roles/storage.bucketViewer
+done
+```
+
+### 5. Create Dashboards
+
+Creates or updates Cloud Monitoring dashboards.
+
+```bash
+go -C tools/setup-gcp run . create dashboards [flags]
+```
+
+**Flags:**
+| Flag | Description | Default Env Var | Fallback Default |
+| :--- | :--- | :--- | :--- |
+| `--dir` | Directory containing dashboard JSON files. Empty uses the copies of `tools/setup-gcp/dashboards` built into the binary. | `DASHBOARD_DIR` | (empty) |
+
+### 6. Bootstrap (All Steps)
+
+Runs all the setup steps in the correct order to fully bootstrap the environment.
+
+```bash
+go -C tools/setup-gcp run . bootstrap [flags]
+```
+
+**Flags:**
+| Flag | Description | Default Env Var | Fallback Default |
+| :--- | :--- | :--- | :--- |
+| `--cluster-name` | Name of the GKE cluster. | `CLUSTER_NAME` | `substrate-poc` |
+| `--cluster-location`| Zone or region for the cluster (must be compatible with `--region`). | `CLUSTER_LOCATION` | `us-west1-c` |
+| `--cluster-version` | Kubernetes version. | `CLUSTER_VERSION` | None |
+| `--network` | VPC network name. | `NETWORK` | `default` |
+| `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
+| `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
+| `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for micro-VM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
+| `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
+| `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default). | `BOOT_DISK_TYPE` | None |
+| `--bucket-name` | Name of the GCS bucket for snapshots. | `BUCKET_NAME` | None (Required*) |
+| `--dashboard-dir` | Directory containing dashboard JSON files. Empty uses the copies of `tools/setup-gcp/dashboards` built into the binary. | `DASHBOARD_DIR` | (empty) |
+
+*\*Note: Required unless the `BUCKET_NAME` environment variable is set.*
+
+`--enable-nested-virtualization` is on by default and needs a `--machine-type`
+that supports the feature; pass `--enable-nested-virtualization=false` to turn
+it off. It applies only to a cluster this command creates.
+
+## Teardown
+
+[`teardown.sh`](teardown.sh) deletes what `bootstrap` creates, in reverse
+order: dashboards, bucket IAM bindings, project IAM bindings, the snapshot
+bucket and its contents, and the cluster. It reads the same environment
+variables (`PROJECT_ID`, `PROJECT_NUMBER`, `CLUSTER_NAME`, `CLUSTER_LOCATION`,
+`BUCKET_NAME`) and shells out to `gcloud`. Each step can run alone; see
+`tools/setup-gcp/teardown.sh` with no arguments for the list. It sources
+`.ate-dev-env.sh` from the working directory unless `NO_DEV_ENV=1` is set.
+
+Change it whenever `bootstrap` gains or changes a resource. Most users should
+run [`tools/cleanup-gcp`](../cleanup-gcp) instead, which takes flags, looks up
+the project number, asks for confirmation, and runs `teardown.sh --all`.
+
+## Examples
+
+Run the commands from the **repository root**; the paths below are relative to it.
+
+### Bootstrap everything using environment variables
+
+If you have sourced your `.ate-dev-env.sh`:
+
+```bash
+go -C tools/setup-gcp run . bootstrap
+```
+
+### Bootstrap everything overriding some values
+
+```bash
+go -C tools/setup-gcp run . bootstrap \
+  --cluster-name="custom-cluster" \
+  --machine-type="n2-standard-8"
+```
+
+### Bootstrap a cluster whose nodes cannot run micro-VM workers
+
+Nested virtualization is on by default, so turning it off is the case that
+needs a flag:
+
+```bash
+go -C tools/setup-gcp run . bootstrap \
+  --enable-nested-virtualization=false
+```
+
+### Only create the cluster (using env vars for defaults)
+
+```bash
+go -C tools/setup-gcp run . create cluster
+```

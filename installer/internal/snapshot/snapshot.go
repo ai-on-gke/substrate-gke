@@ -411,6 +411,9 @@ type Builder struct {
 	// Version stamps the images ko builds (the checkout is detached at an
 	// exact commit, so `git describe` has no tag to report).
 	Version string
+	// SetupGCP is the absolute path of this repository's setup-gcp module,
+	// which Bootstrap runs. See FindSetupGCP.
+	SetupGCP string
 	// repo and commit are the tree to fetch. They start at the pin and move
 	// only when the wizard's images step picks something else.
 	repo, commit string
@@ -691,14 +694,16 @@ func (b *Builder) fetchSimLines() []string {
 }
 
 // Bootstrap provisions GCP resources (APIs, cluster, bucket, IAM,
-// dashboards) via the upstream tools/setup-gcp. All seven steps are
-// idempotent, so it is safe to run against an existing cluster. This is the
-// first step to touch the checkout, so it usually pays the fetch.
+// dashboards) via this repository's tools/setup-gcp, whatever revision the
+// Substrate checkout is at. All seven steps are idempotent, so it is safe to
+// run against an existing cluster. It still runs inside the checkout, because
+// it is the first step and the install checklist expects the fetch to happen
+// here; `go -C` then switches to the setup-gcp module.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "setup-gcp bootstrap",
-		Display: "go run ./tools/setup-gcp bootstrap",
-		Argv:    b.inTree("go run ./tools/setup-gcp bootstrap"),
+		Display: "go -C " + SetupGCPPath + " run . bootstrap",
+		Argv:    b.inTree("go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"),
 		Env:     b.env(st),
 		SimLines: append(b.fetchSimLines(),
 			"Step 1/7: Enabling required APIs...",

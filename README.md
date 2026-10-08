@@ -220,6 +220,8 @@ cd installer && go run . --substrate-root=/path/to/substrate
 
 A checkout you supply this way is used as-is and never modified or deleted.
 
+GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repository's [`tools/setup-gcp`](tools/setup-gcp/README.md), not a copy from the Substrate tree, whatever revision you chose. The tool moved here from upstream ([agent-substrate/substrate#2304](https://github.com/agent-substrate/substrate/issues/2304)). The installer finds it above its working directory or its executable; pass `--setup-gcp=/path/to/tools/setup-gcp` if you run the installer from somewhere else.
+
 <details>
 <summary><strong>Failure and retry behavior</strong> (click to expand)</summary>
 
@@ -254,7 +256,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then delegates deletion to upstream's `hack/teardown.sh` at the same pinned commit the installer built from. It's safe to re-run after a partial failure.
+The script asks for confirmation, then delegates deletion to [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh), the reverse of `setup-gcp bootstrap`, which moved here from upstream's `hack/teardown.sh` with setup-gcp. It needs only `gcloud`, ignores any `.ate-dev-env.sh` in the working directory, and is safe to re-run after a partial failure.
 
 To remove **only** the Substrate control plane and keep the cluster:
 
@@ -267,8 +269,8 @@ APIs enabled by the install are left enabled — they cost nothing while unused.
 ## Development
 
 ```bash
-make test         # unit tests, including a scripted dry-run walk of the wizard
-make verify       # gofmt + go vet
+make test         # unit tests for installer/ and tools/setup-gcp/, including a scripted dry-run walk of the wizard
+make verify       # gofmt + go vet for both modules
 make screenshots  # regenerate the README screenshots from the dry-run wizard
 ```
 

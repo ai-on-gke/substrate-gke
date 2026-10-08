@@ -210,28 +210,71 @@ func TestCleanupGcpScriptIsRunnable(t *testing.T) {
 	}
 }
 
-// cleanup-gcp delegates its deletions to the pinned tree's hack/teardown.sh,
-// and it reads the pin from the installer source rather than carrying a
-// copy. This pins both halves of that contract: the parse must yield the
-// exact Commit const, and the delegation must run the full teardown.
-func TestCleanupGcpDelegatesAtThePin(t *testing.T) {
-	out, err := exec.Command("bash", "../tools/cleanup-gcp", "--print-pin").Output()
-	if err != nil {
-		t.Fatalf("--print-pin failed: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != snapshot.Commit {
-		t.Errorf("script parsed pin %q, want snapshot.Commit %q", got, snapshot.Commit)
-	}
-
-	script, err := os.ReadFile("../tools/cleanup-gcp")
+// cleanup-gcp delegates its deletions to this repository's
+// tools/setup-gcp/teardown.sh, without fetching a Substrate tree. It runs the
+// script against fake gcloud and git binaries, from a directory holding a
+// .ate-dev-env.sh that names another project: the deletions must target the
+// flags' project and cluster, never the dev-env file's.
+func TestCleanupGcpRunsTheLocalTeardown(t *testing.T) {
+	script, err := filepath.Abs("../tools/cleanup-gcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(script), "./hack/teardown.sh --all") {
-		t.Errorf("cleanup-gcp no longer delegates to hack/teardown.sh --all")
+	if raw, err := os.ReadFile(script); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(raw), "remove-iam-policy-binding") {
+		t.Errorf("cleanup-gcp carries its own IAM deletions; they belong in tools/setup-gcp/teardown.sh")
 	}
-	if strings.Contains(string(script), "remove-iam-policy-binding") {
-		t.Errorf("cleanup-gcp still carries its own IAM deletions; that knowledge belongs upstream")
+
+	bin := t.TempDir()
+	calls := filepath.Join(t.TempDir(), "calls")
+	fakes := map[string]string{
+		// projects describe answers the project-number lookup; everything
+		// else is a deletion, recorded and reported as successful.
+		"gcloud": `echo "gcloud $*" >> "$CALLS"
+if [ "$1 $2" = "projects describe" ]; then echo 42; fi`,
+		"git": `echo "git $*" >> "$CALLS"; exit 1`,
+	}
+	for name, body := range fakes {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env bash\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cwd := t.TempDir()
+	devEnv := "export PROJECT_ID=wrong-project CLUSTER_NAME=wrong-cluster BUCKET_NAME=wrong-bucket\n"
+	if err := os.WriteFile(filepath.Join(cwd, ".ate-dev-env.sh"), []byte(devEnv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", script, "--project", "acme", "--cluster", "substrate-test",
+		"--location", "us-west1-c", "--bucket", "acme-snapshots", "--yes")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "CALLS="+calls)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cleanup-gcp failed: %v\n%s", err, out)
+	}
+
+	raw, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(raw)
+	for _, want := range []string{
+		"gcloud container clusters delete substrate-test --location=us-west1-c --project=acme",
+		"gcloud storage buckets delete gs://acme-snapshots --project=acme",
+		"serviceAccount:42-compute@developer.gserviceaccount.com",
+		"gcloud monitoring dashboards list --project=acme",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("teardown did not run %q; calls:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "wrong-") {
+		t.Errorf("teardown used values from the working directory's .ate-dev-env.sh:\n%s", log)
+	}
+	if strings.Contains(log, "git ") {
+		t.Errorf("cleanup-gcp fetched a Substrate tree; the teardown is local now:\n%s", log)
 	}
 }
 
