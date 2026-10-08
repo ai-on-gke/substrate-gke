@@ -199,12 +199,13 @@ func lsRemote(ctx context.Context, repo string, refs ...string) (string, error) 
 	return sha, nil
 }
 
-// imageFlagsPath is where ate-setup declares --image-repo, and imageFlagsName
-// is the declaration to look for. A tree from before those flags existed takes
-// an install that passes them all the way through bootstrap — cluster, bucket,
-// IAM — and then dies at the deploy with "flag provided but not defined".
+// imageFlagsDir is ate-setup's source, and imageFlagsName the flag that has to
+// appear somewhere in it. A tree from before the flag existed takes an install
+// that passes it all the way through bootstrap — cluster, bucket, IAM — and
+// then dies at the deploy with "flag provided but not defined". The whole
+// directory is searched because upstream has moved the declaration before.
 const (
-	imageFlagsPath = "cmd/ate-setup/internal/cmd/root.go"
+	imageFlagsDir  = "cmd/ate-setup"
 	imageFlagsName = "image-repo"
 )
 
@@ -248,11 +249,17 @@ func verifyCommit(ctx context.Context, repo, sha string, needImageFlags bool) (e
 	if !needImageFlags {
 		return envoy, nil
 	}
-	// A tree that has moved the file elsewhere is left alone: that is upstream
-	// restructuring, and refusing the install over it would be a guess. Only a
-	// file that is there and does not declare the flag is an answer.
-	out, err = git(ctx, "--git-dir", dir, "cat-file", "-p", "FETCH_HEAD:"+imageFlagsPath)
-	if err == nil && !strings.Contains(out, imageFlagsName) {
+	// A tree without imageFlagsDir is left alone: that is upstream
+	// restructuring, and refusing the install over it would be a guess. So is
+	// a grep that fails for any reason other than finding nothing. grep fetches
+	// the blobs the filter left out in one batch.
+	out, err = git(ctx, "--git-dir", dir, "ls-tree", "-d", "--name-only", "FETCH_HEAD", "--", imageFlagsDir)
+	if err != nil || strings.TrimSpace(out) != imageFlagsDir {
+		return envoy, nil
+	}
+	_, err = git(ctx, "--git-dir", dir, "grep", "-q", "-e", imageFlagsName, "FETCH_HEAD", "--", imageFlagsDir+"/*.go")
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
 		return false, fmt.Errorf(
 			"substrate %s predates ate-setup's --%s, so it cannot install pre-built images; name a newer commit, or build from source instead",
 			shorten(sha), imageFlagsName)
@@ -273,13 +280,22 @@ func git(ctx context.Context, args ...string) (string, error) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			if detail := lastLine(string(ee.Stderr)); detail != "" {
-				return "", errors.New(detail)
+				return "", &gitError{detail, err}
 			}
 		}
 		return "", fmt.Errorf("git %s failed: %w", args[0], err)
 	}
 	return string(out), nil
 }
+
+// gitError reports what git said, and keeps its exit status for errors.As.
+type gitError struct {
+	msg string
+	err error
+}
+
+func (e *gitError) Error() string { return e.msg }
+func (e *gitError) Unwrap() error { return e.err }
 
 // lastLine picks the final non-empty line of git's stderr, which is the part
 // that says what actually went wrong.

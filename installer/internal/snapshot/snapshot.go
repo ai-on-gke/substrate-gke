@@ -55,14 +55,13 @@ const (
 	// only falls back here for --dry-run, which resolves nothing.
 	//
 	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the head of upstream's
-	// release-0.2 branch, ReleaseVersion being the GKE build of it. That is
-	// the v0.2.0 tag plus the envoy-dataplane pin pre-built installs need
-	// (agent-substrate/substrate#1990), which is why it is not the tag itself.
+	// what the released images are built from: the commit upstream's v0.4.0
+	// tag names, which is also the head of its release-0.4 branch,
+	// ReleaseVersion being the GKE build of it.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
+	Commit = "756c2a53741121e728f4cc3066c8a19e575b4919"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -85,7 +84,7 @@ const (
 	// never has to fall back to building from source. It asks such a team for
 	// a manifest revision as well, since only this registry is published
 	// alongside a tree known to match.
-	ReleaseVersion = "v0.2.0-gke.0"
+	ReleaseVersion = "v0.4.0-gke.0"
 )
 
 // ShortCommit is Commit abbreviated for display.
@@ -743,13 +742,38 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
-		Env:     b.env(st),
+		Env:     append(b.env(st), credentialProviderEnv()...),
 		SimLines: append(sim,
+			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
 			`deployment "ate-api-server" successfully rolled out`,
 			`daemon set "atelet" successfully rolled out`,
 		),
 	}
+}
+
+// defaultCredentialProvider is the egress credential provider the control
+// plane is deployed with: the bundled Kubernetes Secrets provider, as in
+// upstream's quickstart. `ate-setup deploy ate-system` requires one from
+// v0.4.0 on; older trees ignore the variable.
+const defaultCredentialProvider = `{"name":"k8s.io"}`
+
+// CredentialProvider is the provider the control plane is deployed with: the
+// caller's ATE_CREDENTIAL_PROVIDER, else defaultCredentialProvider.
+func CredentialProvider() string {
+	if v := os.Getenv("ATE_CREDENTIAL_PROVIDER"); v != "" {
+		return v
+	}
+	return defaultCredentialProvider
+}
+
+// credentialProviderEnv passes defaultCredentialProvider, unless the caller
+// already exports ATE_CREDENTIAL_PROVIDER.
+func credentialProviderEnv() []string {
+	if os.Getenv("ATE_CREDENTIAL_PROVIDER") != "" {
+		return nil
+	}
+	return []string{"ATE_CREDENTIAL_PROVIDER=" + defaultCredentialProvider}
 }
 
 // craneDigest prints an image reference's registry digest. It must stay in
@@ -799,13 +823,13 @@ var restoreDemoTemplates = []string{
 // the counter demo). When the Micro-VM sandbox runtime is selected and staged,
 // it runs `ate-setup deploy demo counter-microvm` if the checkout has it (see
 // counterMicroVMDemoDir), exactly as the gVisor demo runs ate-setup. Older
-// trees, the pinned Commit among them, fall back to hack/install-ate.sh
+// trees, such as v0.1.0, fall back to hack/install-ate.sh
 // --deploy-demo-counter-microvm (the demo step from hack/run-microvm-demo.sh),
 // which those trees keep for good.
 //
-// TODO: When v0.2.0 release images are published, bump Commit past v0.2.0
-// and drop the install-ate.sh fallback (deprecated upstream), the template
-// rewrite, and the jq/make entries in doctor.MicroVMTools.
+// TODO: Drop the install-ate.sh fallback (deprecated upstream), the template
+// rewrite, and the jq/make entries in doctor.MicroVMTools. Commit is past
+// v0.2.0, so they only serve older commits typed into the images step.
 func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	display, argv := imageArgs(st)
 	if st.MicroVMActive() {

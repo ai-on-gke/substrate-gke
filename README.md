@@ -67,7 +67,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`. A build from source that needs Docker re-checks it here against your registry |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, and monitoring dashboards. Idempotent |
-| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet |
+| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
@@ -181,7 +181,7 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** *(default)* | **Build from source** |
 |---|---|---|
 | **You provide** | Registry, tag, and commit — all pre-filled, all overridable | A revision: branch, tag, or full commit SHA |
-| **Default value** | `v0.2.0-gke.0` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to the head of upstream's [`release-0.2`](https://github.com/agent-substrate/substrate/tree/release-0.2) branch | Repo's current HEAD, resolved live via `git ls-remote` |
+| **Default value** | `v0.4.0-gke.0` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to upstream's [`v0.4.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.4.0) tag | Repo's current HEAD, resolved live via `git ls-remote` |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Just getting Substrate running | A branch or commit with no published images |
 
