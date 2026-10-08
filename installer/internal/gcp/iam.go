@@ -195,6 +195,19 @@ func (c *Client) ResetToken() {
 	c.cachedToken = ""
 }
 
+// WarmToken fetches the access token into the cache ahead of the REST calls
+// that need it, so the fetch (a cold gcloud spawn) can overlap other work.
+// The token does not depend on the project, so it can start before the
+// project is even resolved. REST calls made while it runs wait for it
+// rather than fetching again. A failed fetch is not cached: those calls try
+// again and report the real error. No-op under DryRun.
+func (c *Client) WarmToken(ctx context.Context) {
+	if c.DryRun {
+		return
+	}
+	c.accessToken(ctx) //nolint:errcheck // the REST calls report it
+}
+
 // invalidateToken forgets token if it is still the cached one. A concurrent
 // caller may already have replaced it with a fresh token, which must stay.
 func (c *Client) invalidateToken(token string) {

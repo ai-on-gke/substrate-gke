@@ -305,6 +305,38 @@ func TestResetTokenForcesAFreshFetch(t *testing.T) {
 	}
 }
 
+// WarmToken overlaps the token fetch with other work: a probe that starts
+// while the warm-up is still fetching waits for it instead of fetching
+// again. Under DryRun it does nothing.
+func TestWarmTokenIsSharedWithTheProbes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"billingEnabled": true}`))
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	started := make(chan struct{})
+	c := &Client{billingBase: srv.URL, token: func(context.Context) (string, error) {
+		if fetches.Add(1) == 1 {
+			close(started)
+		}
+		time.Sleep(50 * time.Millisecond) // a cold gcloud
+		return "test-token", nil
+	}}
+	go c.WarmToken(context.Background())
+	<-started // the warm-up is mid-fetch
+	if on, err := c.BillingEnabled(context.Background(), "acme"); err != nil || !on {
+		t.Fatalf("BillingEnabled = (%v, %v)", on, err)
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("a probe during the warm-up fetched again: %d fetches, want 1", n)
+	}
+
+	dry := &Client{DryRun: true, token: func(context.Context) (string, error) {
+		panic("dry-run warmed a token")
+	}}
+	dry.WarmToken(context.Background())
+}
+
 // invalidateToken only drops the token it was told about: a concurrent
 // caller's fresher token must survive another caller's stale 401.
 func TestInvalidateTokenKeepsAFresherToken(t *testing.T) {

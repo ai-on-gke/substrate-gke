@@ -201,6 +201,10 @@ func (s *projectScreen) submit() tea.Cmd {
 	s.deps.GCP.ResetToken()
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
+		// The token does not depend on the project: fetch it while
+		// `projects describe` runs, so the probes below find it cached
+		// instead of paying a second cold gcloud spawn after it.
+		go s.deps.GCP.WarmToken(context.Background())
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
 		// The cluster step lists clusters next, and that fails outright on
 		// a project without billing or without the GKE API. Catch both
