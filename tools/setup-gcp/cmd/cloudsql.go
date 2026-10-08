@@ -324,14 +324,14 @@ func setGSAPolicy(ctx context.Context, svc *iam.Service, resource string, policy
 // connector tunnels (cloudsql.client) and to log in with IAM database
 // authentication (cloudsql.instanceUser).
 func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
-	client, err := resourcemanager.NewProjectsClient(ctx)
+	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	resource := fmt.Sprintf("projects/%s", cfg.ProjectID)
-	policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resource})
+	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest(resource))
 	if err != nil {
 		return fmt.Errorf("get project iam policy: %w", err)
 	}
@@ -348,6 +348,7 @@ func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
 			return nil
 		}
 		slog.Info("Setting IAM policy (grant Cloud SQL permissions)...", slog.String("member", member))
+		policy.Version = conditionalPolicyVersion
 		_, err = client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{Resource: resource, Policy: policy})
 		if err == nil {
 			return nil
@@ -361,7 +362,7 @@ func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
 			return ctx.Err()
 		case <-time.After(10 * time.Second):
 		}
-		policy, err = client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resource})
+		policy, err = client.GetIamPolicy(ctx, projectPolicyRequest(resource))
 		if err != nil {
 			return fmt.Errorf("get project iam policy: %w", err)
 		}

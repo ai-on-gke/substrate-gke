@@ -21,7 +21,12 @@ import (
 	"sync"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/api/option"
 )
+
+// clientOptions are passed to the GKE and Resource Manager clients. Empty in
+// production; tests point it at an in-process fake server.
+var clientOptions []option.ClientOption
 
 type Config struct {
 	ProjectID     string

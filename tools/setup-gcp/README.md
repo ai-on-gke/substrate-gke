@@ -75,6 +75,12 @@ Creates a GKE cluster configured for Agent Substrate (with Workload Identity,
 required Kubernetes beta APIs, and Managed OpenTelemetry enabled, and the
 Filestore CSI driver disabled).
 
+If the cluster already exists, settings that can be changed in place
+(Workload Identity, beta APIs, Managed OpenTelemetry, Filestore CSI) are
+updated. Settings fixed at creation (network, subnetwork, Dataplane V2, nested
+virtualization) are only reported as warnings when they differ; the tool never
+deletes or recreates an existing cluster.
+
 > [!WARNING]
 > Agent Substrate requires PodCertificateRequest and ClusterTrustBundle APIs.
 > ClusterTrustBundle discovery prefers `certificates.k8s.io/v1`, falling back
@@ -297,6 +303,15 @@ variables (`PROJECT_ID`, `PROJECT_NUMBER`, `CLUSTER_NAME`, `CLUSTER_LOCATION`,
 `BUCKET_NAME`) and shells out to `gcloud`. Each step can run alone; see
 `tools/setup-gcp/teardown.sh` with no arguments for the list. It sources
 `.ate-dev-env.sh` from the working directory unless `NO_DEV_ENV=1` is set.
+`--all` checks all five variables before deleting anything.
+
+A resource or binding that is already gone counts as deleted, so re-running
+after a partial teardown is safe. Any other failure (a denied permission, a
+failed list) does not stop the run: the remaining steps still run, and the
+script exits 1 with a `FAILED:` line per step. A cluster that is not found in
+`CLUSTER_LOCATION` but exists in another location is reported as a failure,
+since GKE answers a wrong location with the same NOT_FOUND as a deleted
+cluster.
 
 Change it whenever `bootstrap` gains or changes a resource. Most users should
 run [`tools/cleanup-gcp`](../cleanup-gcp) instead, which takes flags, looks up

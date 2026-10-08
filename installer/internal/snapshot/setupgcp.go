@@ -36,7 +36,7 @@ const SetupGCPPath = "tools/setup-gcp"
 func FindSetupGCP(explicit string, starts ...string) (string, error) {
 	if explicit != "" {
 		if !isSetupGCP(explicit) {
-			return "", fmt.Errorf("%s is not the setup-gcp module (no go.mod or main.go)", explicit)
+			return "", fmt.Errorf("%s is not the setup-gcp module (needs main.go and a go.mod whose module path ends in /%s)", explicit, SetupGCPPath)
 		}
 		return filepath.Abs(explicit)
 	}
@@ -64,11 +64,22 @@ func FindSetupGCP(explicit string, starts ...string) (string, error) {
 		SetupGCPPath, strings.Join(starts, " or "))
 }
 
+// isSetupGCP reports whether dir holds the setup-gcp main module. A go.mod
+// and main.go alone are not enough: installer/ has both, and running it as
+// setup-gcp would relaunch the installer. The module path must end in
+// /tools/setup-gcp, which holds for this repository and any fork of it.
 func isSetupGCP(dir string) bool {
-	for _, f := range []string{"go.mod", "main.go"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			return false
+	if _, err := os.Stat(filepath.Join(dir, "main.go")); err != nil {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if module, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+			return strings.HasSuffix(strings.Trim(strings.TrimSpace(module), `"`), "/"+SetupGCPPath)
 		}
 	}
-	return true
+	return false
 }

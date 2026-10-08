@@ -256,7 +256,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then delegates deletion to [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh), the reverse of `setup-gcp bootstrap`, which moved here from upstream's `hack/teardown.sh` with setup-gcp. It needs only `gcloud`, ignores any `.ate-dev-env.sh` in the working directory, and is safe to re-run after a partial failure.
+The script asks for confirmation, then delegates deletion to [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh), the reverse of `setup-gcp bootstrap`, which moved here from upstream's `hack/teardown.sh` with setup-gcp. It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Resources that are already gone count as deleted, so it is safe to re-run after a partial failure. Any other failed step makes it exit non-zero and is listed at the end, so a run that ends without that list deleted everything.
 
 To remove **only** the Substrate control plane and keep the cluster:
 
