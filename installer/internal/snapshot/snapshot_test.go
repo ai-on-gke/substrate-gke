@@ -1015,6 +1015,25 @@ func TestPrebuiltVersionDropsADigestQualifiedTag(t *testing.T) {
 	}
 }
 
+// ate-setup refuses to deploy the control plane without a credential provider,
+// so the deploy passes the bundled one unless the caller chose another.
+func TestDeployAteSystemCredentialProvider(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+
+	t.Setenv("ATE_CREDENTIAL_PROVIDER", "")
+	env := b.DeployAteSystem(prebuiltSetup(t)).Env
+	if want := `ATE_CREDENTIAL_PROVIDER={"name":"k8s.io"}`; !slices.Contains(env, want) {
+		t.Errorf("deploy env missing %q: %v", want, env)
+	}
+
+	t.Setenv("ATE_CREDENTIAL_PROVIDER", `{"enabled":false}`)
+	for _, e := range b.DeployAteSystem(prebuiltSetup(t)).Env {
+		if strings.HasPrefix(e, "ATE_CREDENTIAL_PROVIDER=") {
+			t.Errorf("deploy env overrides the caller's ATE_CREDENTIAL_PROVIDER with %q", e)
+		}
+	}
+}
+
 // The tag becomes the node label and the atelet DaemonSet suffix, so ate-setup
 // refuses one that is not a valid label value. Catching it at the prompt beats
 // finding out once the cluster is half installed.

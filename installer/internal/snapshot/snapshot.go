@@ -743,13 +743,28 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
-		Env:     b.env(st),
+		Env:     append(b.env(st), credentialProviderEnv()...),
 		SimLines: append(sim,
 			"[step]: Waiting for ATE system components to be ready...",
 			`deployment "ate-api-server" successfully rolled out`,
 			`daemon set "atelet" successfully rolled out`,
 		),
 	}
+}
+
+// defaultCredentialProvider is the egress credential provider the control
+// plane is deployed with: the bundled Kubernetes Secrets provider, as in
+// upstream's quickstart. `ate-setup deploy ate-system` requires one from
+// v0.4.0 on; older trees ignore the variable.
+const defaultCredentialProvider = `{"name":"k8s.io"}`
+
+// credentialProviderEnv passes defaultCredentialProvider, unless the caller
+// already exports ATE_CREDENTIAL_PROVIDER.
+func credentialProviderEnv() []string {
+	if os.Getenv("ATE_CREDENTIAL_PROVIDER") != "" {
+		return nil
+	}
+	return []string{"ATE_CREDENTIAL_PROVIDER=" + defaultCredentialProvider}
 }
 
 // craneDigest prints an image reference's registry digest. It must stay in
