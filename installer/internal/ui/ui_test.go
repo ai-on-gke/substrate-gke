@@ -703,42 +703,76 @@ func TestProjectScreenEnableFailureOffersRetry(t *testing.T) {
 	}
 }
 
-// The failure panel's hint follows the cause: a billing precondition gets
-// the billing fix, not an IAM role, and an unrecognized failure gets
-// neither.
+// A failed enable asks the billing API why before picking a panel:
+//   - billing provably off: the billing panel, [e] withdrawn
+//   - billing provably on: gcloud's text decides permission vs. other, and
+//     a "billing" in it is not believed
+//   - billing probe cannot answer: gcloud's text is the fallback, billing
+//     included
+//
+// Status names count, never bare codes: an id containing 403 is "other".
 func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
+	const (
+		billingLine = "ERROR: (gcloud.services.enable) FAILED_PRECONDITION: Billing must be enabled for activation of service(s) 'container.googleapis.com' to proceed."
+		permLine    = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
+		otherLine   = "ERROR: (gcloud.services.enable) UNAVAILABLE: The service is currently unavailable."
+		id403Line   = "ERROR: (gcloud.services.enable) INTERNAL: Operation operations/acf.p2-403712345678-5d1e failed."
+	)
+	type probe struct {
+		on  bool
+		err error
+	}
+	var (
+		billingOn  = probe{on: true}
+		billingOff = probe{on: false}
+		cannotTell = probe{err: errors.New("403 Forbidden: PERMISSION_DENIED on billingInfo")}
+	)
+	// Panels, recognized by what only they say.
+	const (
+		billingPanel = "Billing is not enabled on acme"
+		enableBill   = "Billing must be enabled on acme"
+		permPanel    = "roles/serviceusage.serviceUsageAdmin"
+		retry        = "[e] to try again"
+	)
 	for _, tc := range []struct {
-		name, line string
+		name       string
+		probe      probe
+		line       string
 		want, not  []string
+		keepsOffer bool
 	}{
-		{
-			name: "billing",
-			line: "ERROR: (gcloud.services.enable) FAILED_PRECONDITION: Billing must be enabled for activation of service(s) 'container.googleapis.com' to proceed.",
-			want: []string{"FAILED_PRECONDITION", "gcloud billing projects link acme", "billing/linkedaccount?project=acme"},
-			not:  []string{"serviceUsageAdmin", "serviceusage.services.enable"},
-		},
-		{
-			name: "other",
-			line: "ERROR: (gcloud.services.enable) UNAVAILABLE: The service is currently unavailable.",
-			want: []string{"UNAVAILABLE", gcp.EnableServiceCommand("acme", gcp.GKEService), "[e] to try again"},
-			not:  []string{"serviceUsageAdmin", "billing projects link"},
-		},
-		{
-			// Ids on the line can contain 403; only the status name counts.
-			name: "other with 403 in an id",
-			line: "ERROR: (gcloud.services.enable) INTERNAL: Operation operations/acf.p2-403712345678-5d1e failed.",
-			want: []string{"INTERNAL", "[e] to try again"},
-			not:  []string{"serviceUsageAdmin", "billing projects link"},
-		},
+		{"off/billing text", billingOff, billingLine, []string{billingPanel, "gcloud billing projects link acme"}, []string{permPanel, retry}, false},
+		{"off/permission text", billingOff, permLine, []string{billingPanel}, []string{permPanel, retry}, false},
+		{"off/other text", billingOff, otherLine, []string{billingPanel}, []string{permPanel, retry}, false},
+
+		{"on/billing text", billingOn, billingLine, []string{"FAILED_PRECONDITION", retry}, []string{billingPanel, enableBill, permPanel}, true},
+		{"on/permission text", billingOn, permLine, []string{"PERMISSION_DENIED", permPanel, retry}, []string{billingPanel, enableBill}, true},
+		{"on/other text", billingOn, otherLine, []string{"UNAVAILABLE", gcp.EnableServiceCommand("acme", gcp.GKEService), retry}, []string{permPanel, enableBill}, true},
+		{"on/403 in an id", billingOn, id403Line, []string{"INTERNAL", retry}, []string{permPanel, enableBill}, true},
+
+		{"unknown/billing text", cannotTell, billingLine, []string{"FAILED_PRECONDITION", enableBill, "billing/linkedaccount?project=acme"}, []string{permPanel, retry}, false},
+		{"unknown/permission text", cannotTell, permLine, []string{permPanel, retry}, []string{enableBill}, true},
+		{"unknown/other text", cannotTell, otherLine, []string{"UNAVAILABLE", retry}, []string{permPanel, enableBill}, true},
 	} {
 		app := testApp(t)
 		var argv [][]string
 		app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, fail: true, failLine: tc.line, argv: &argv}
 		scr := newProjectScreen(app.deps)
+		var asked []string
+		scr.billingCheck = func(_ context.Context, pid string) (bool, error) {
+			asked = append(asked, pid)
+			return tc.probe.on, tc.probe.err
+		}
 		scr.fields[0].input.SetValue("acme")
 		scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
 		if driveProject(t, scr, scr.Update(key("e"))) {
 			t.Fatalf("%s: a failed enable must not advance the wizard", tc.name)
+		}
+		if len(asked) != 1 || asked[0] != "acme" {
+			t.Errorf("%s: billing should be asked once about acme, asked %v", tc.name, asked)
+		}
+		if scr.validating || scr.checkingEnable {
+			t.Errorf("%s: the check should be over", tc.name)
 		}
 		for _, w := range tc.want {
 			if !strings.Contains(scr.errText, w) {
@@ -752,18 +786,17 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 		}
 		// A billing failure cannot be retried away, so it withdraws [e]:
 		// the hints drop it and e types again. Anything else keeps it.
-		billing := tc.name == "billing"
-		if offered := scr.enableFor != ""; offered == billing {
-			t.Errorf("%s: enableFor = %q, want the offer kept only for non-billing failures", tc.name, scr.enableFor)
+		if offered := scr.enableFor != ""; offered != tc.keepsOffer {
+			t.Errorf("%s: enableFor = %q, want offer kept = %v", tc.name, scr.enableFor, tc.keepsOffer)
 		}
-		if hints := scr.Hints(); (hints[0].Key == "e") == billing {
+		if hints := scr.Hints(); (hints[0].Key == "e") != tc.keepsOffer {
 			t.Errorf("%s: hints = %v", tc.name, hints)
 		}
-		if billing {
+		if !tc.keepsOffer {
 			before := len(argv)
 			scr.Update(key("e"))
 			if scr.enabling != nil || len(argv) != before || scr.fields[0].input.Value() != "acmee" {
-				t.Errorf("billing: e should type, not re-run the enable; field=%q", scr.fields[0].input.Value())
+				t.Errorf("%s: e should type, not re-run the enable; field=%q", tc.name, scr.fields[0].input.Value())
 			}
 		}
 	}

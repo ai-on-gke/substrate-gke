@@ -96,6 +96,22 @@ type projectScreen struct {
 	enableFor string
 	// enabling is the running `gcloud services enable`, nil otherwise.
 	enabling *execComp
+	// checkingEnable is set while a failed enable's cause is looked into;
+	// see enableChecked.
+	checkingEnable bool
+	// billingCheck asks whether a project has billing. It is the gcp
+	// client's BillingEnabled; tests swap in fixed answers.
+	billingCheck func(ctx context.Context, projectID string) (bool, error)
+}
+
+// enableCheckedMsg carries a failed enable and what a fresh billing probe
+// then said about the project.
+type enableCheckedMsg struct {
+	owner     *projectScreen
+	projectID string
+	cause     string
+	billingOn bool
+	err       error
 }
 
 func newField(label, value, placeholder string, set func(*state.Setup, string)) field {
@@ -128,7 +144,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			)
 		}
 	}
-	scr := &projectScreen{deps: deps, fields: fields}
+	scr := &projectScreen{deps: deps, fields: fields, billingCheck: deps.GCP.BillingEnabled}
 	scr.fields[0].input.Focus()
 	return scr
 }
@@ -339,18 +355,17 @@ func probeProblem(projectID string, err error) string {
 		"Press [enter] again to continue anyway; the cluster step may fail.", projectID, err)
 }
 
-// enableProblem renders a failed `gcloud services enable`, with the fix that
-// matches why it failed. Blaming IAM for everything misleads: when the
-// billing probe could not run, [e] is still offered, and on a project
-// without billing the enable fails on that, not on a missing role.
-func enableProblem(projectID, cause string) string {
+// enableProblem renders a failed `gcloud services enable`, with the fix for
+// kind. A project provably without billing never gets here: it takes the
+// billingProblem panel instead (see enableChecked).
+func enableProblem(projectID, cause string, kind enableFailure) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Could not enable %s on %s", gcp.GKEService, projectID)
 	if cause != "" {
 		b.WriteString(":\n" + cause)
 	}
 	b.WriteString("\n")
-	switch enableFailureKind(cause) {
+	switch kind {
 	case enableFailedBilling:
 		fmt.Fprintf(&b, "Billing must be enabled on %s before any API can be.\n", projectID)
 		b.WriteString(billingFix(projectID))
@@ -378,6 +393,9 @@ const (
 // Permission denied to enable service". It matches status names, never
 // bare codes like 403: the line often carries operation names and project
 // numbers that contain those digits.
+//
+// Whether billing is the cause is asked of the billing API first; the
+// text is consulted for billing only when that probe cannot answer.
 func enableFailureKind(cause string) enableFailure {
 	lower := strings.ToLower(cause)
 	switch {
@@ -397,24 +415,62 @@ func (s *projectScreen) enable() tea.Cmd {
 }
 
 // enableDone routes the finished enable: on success every check runs again,
-// so the screen advances only once the whole project validates.
+// so the screen advances only once the whole project validates. On failure
+// it asks the billing API whether billing is why, rather than guessing from
+// gcloud's text; enableChecked then picks the panel.
 func (s *projectScreen) enableDone() tea.Cmd {
 	comp := s.enabling
 	s.enabling = nil
-	if comp.failed != nil {
-		cause := comp.cause
-		if cause == "" {
-			cause = comp.failed.Error()
+	if comp.failed == nil {
+		return s.submit()
+	}
+	cause := comp.cause
+	if cause == "" {
+		cause = comp.failed.Error()
+	}
+	pid := s.enableFor
+	s.validating, s.checkingEnable = true, true
+	check := s.billingCheck
+	return func() tea.Msg {
+		on, err := check(context.Background(), pid)
+		return enableCheckedMsg{owner: s, projectID: pid, cause: cause, billingOn: on, err: err}
+	}
+}
+
+// enableChecked shows a failed enable once the billing probe has answered.
+//
+//   - Billing provably off: the billing panel, as on submit. [e] is
+//     withdrawn: no enable can work until an account is linked.
+//   - Billing provably on: gcloud's text is read for the permission case
+//     only; anything else gets the cause and the manual command.
+//   - The probe could not answer: gcloud's text is the only evidence left,
+//     so a billing precondition in it still gets the billing fix. This is
+//     the case [e] is offered in without a billing answer (probeErr on
+//     submit), so it is where a billing failure is most likely, and
+//     dropping the fallback would show a generic panel for it.
+func (s *projectScreen) enableChecked(m enableCheckedMsg) {
+	s.validating, s.checkingEnable = false, false
+	switch {
+	case m.err == nil && !m.billingOn:
+		s.enableFor = ""
+		s.errText = billingProblem(m.projectID, true)
+		return
+	case m.err == nil:
+		kind := enableFailureKind(m.cause)
+		if kind == enableFailedBilling {
+			// The API says billing is on; the text is wrong or stale.
+			kind = enableFailedOther
 		}
-		s.errText = enableProblem(s.enableFor, cause)
-		// The billing panel says to link an account and press enter:
-		// another enable would fail the same way, so [e] is withdrawn.
-		if enableFailureKind(cause) == enableFailedBilling {
+		s.errText = enableProblem(m.projectID, m.cause, kind)
+	default:
+		kind := enableFailureKind(m.cause)
+		s.errText = enableProblem(m.projectID, m.cause, kind)
+		if kind == enableFailedBilling {
+			// The billing panel says to link an account and press
+			// enter: another enable would fail the same way.
 			s.enableFor = ""
 		}
-		return nil
 	}
-	return s.submit()
 }
 
 // Stop cancels an enable still running when the wizard leaves the screen.
@@ -440,6 +496,12 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 	case prefillMsg:
 		if m.owner == s && s.fields[0].input.Value() == "" {
 			s.fields[0].input.SetValue(m.project)
+		}
+		return nil
+
+	case enableCheckedMsg:
+		if m.owner == s {
+			s.enableChecked(m)
 		}
 		return nil
 
@@ -555,6 +617,8 @@ func (s *projectScreen) View(w int) string {
 	case s.enabling != nil:
 		b.WriteString(theme.Accent.Render(fmt.Sprintf("Enabling %s on %s… (this can take a minute or two)", gcp.GKEService, s.enableFor)) + "\n\n")
 		b.WriteString(s.enabling.view(w))
+	case s.checkingEnable:
+		b.WriteString(theme.Accent.Render(fmt.Sprintf("Enabling %s failed; checking billing on %s…", gcp.GKEService, s.enableFor)))
 	case s.validating && s.checkingDocker:
 		b.WriteString(theme.Accent.Render("Validating project, billing and APIs with gcloud and checking Docker…"))
 	case s.validating:
