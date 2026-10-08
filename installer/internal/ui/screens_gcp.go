@@ -305,14 +305,23 @@ func projectServing(ctx context.Context, gc *gcp.Client, projectID string) (bill
 func billingProblem(projectID string, apiOff bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Billing is not enabled on %s; GKE refuses every request without it.\n", projectID)
-	fmt.Fprintf(&b, "  fix: gcloud billing projects link %s --billing-account=ACCOUNT_ID\n", projectID)
-	fmt.Fprintf(&b, "   or: https://console.cloud.google.com/billing/linkedaccount?project=%s\n", projectID)
+	b.WriteString(billingFix(projectID))
 	if apiOff {
 		fmt.Fprintf(&b, "%s is disabled too; once billing is linked, this screen can enable it for you.\n", gcp.GKEService)
 	}
-	b.WriteString("Link an account, then press [enter] to check again.")
+	b.WriteString(billingNext)
 	return b.String()
 }
+
+// billingFix is the fix for a project without billing, shared by every
+// panel that reports one so they cannot drift apart.
+func billingFix(projectID string) string {
+	return fmt.Sprintf("  fix: gcloud billing projects link %s --billing-account=ACCOUNT_ID\n"+
+		"   or: https://console.cloud.google.com/billing/linkedaccount?project=%s\n", projectID, projectID)
+}
+
+// billingNext closes a billing panel: nothing here can link an account.
+const billingNext = "Link an account, then press [enter] to check again."
 
 // apiProblem renders a project with billing but without the GKE API, and
 // offers to enable it.
@@ -344,9 +353,8 @@ func enableProblem(projectID, cause string) string {
 	switch enableFailureKind(cause) {
 	case enableFailedBilling:
 		fmt.Fprintf(&b, "Billing must be enabled on %s before any API can be.\n", projectID)
-		fmt.Fprintf(&b, "  fix: gcloud billing projects link %s --billing-account=ACCOUNT_ID\n", projectID)
-		fmt.Fprintf(&b, "   or: https://console.cloud.google.com/billing/linkedaccount?project=%s\n", projectID)
-		b.WriteString("Link an account, then press [enter] to check again.")
+		b.WriteString(billingFix(projectID))
+		b.WriteString(billingNext)
 		return b.String()
 	case enableFailedPermission:
 		b.WriteString("Enabling it needs serviceusage.services.enable (roles/serviceusage.serviceUsageAdmin).\n")
