@@ -250,7 +250,7 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 		{"invalid", "{", Warn},
 		{"empty entries", `{"credHelpers":{"host":""},"auths":{"host":{}}}`, Warn},
 		{"helper", `{"credHelpers":{"us-west1-docker.pkg.dev":"gcloud"}}`, Pass},
-		{"store", `{"credsStore":"desktop"}`, Pass},
+		{"store", `{"credsStore":"desktop"}`, Warn},
 		{"login", `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`, Pass},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,6 +268,12 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 				res := check.Run(t.Context())
 				if res.Status != tc.want {
 					t.Fatalf("status = %v, want %v (%s)", res.Status, tc.want, res.Detail)
+				}
+				if tc.name == "missing" && !strings.Contains(res.Detail, "no Docker credentials configured") {
+					t.Errorf("missing config: %s", res.Detail)
+				}
+				if tc.name == "store" && !strings.Contains(res.Detail, "before a registry is chosen") {
+					t.Errorf("credential store: %s", res.Detail)
 				}
 				if res.Status == Pass && !strings.Contains(res.Detail, "after selection") {
 					t.Error("configuration check must not imply registry credentials were verified")

@@ -17,7 +17,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -64,10 +63,11 @@ type failedCheck struct {
 }
 
 type projectScreen struct {
-	deps       *Deps
-	fields     []field
-	focus      int
-	validating bool
+	deps            *Deps
+	fields          []field
+	repositoryField int
+	focus           int
+	validating      bool
 	// checkingDocker is set while validation also runs the docker checks,
 	// so a slow docker is not taken for a slow gcloud.
 	checkingDocker bool
@@ -86,10 +86,6 @@ func newField(label, value, placeholder string, set func(*state.Setup, string)) 
 	in.Prompt = "  "
 	return field{label: label, input: in, set: set}
 }
-
-var repositoryNameRE = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
-
-const repositoryFieldLabel = "Artifact Registry repository (leave empty for default)"
 
 func newProjectScreen(deps *Deps) *projectScreen {
 	st := deps.Setup
@@ -116,10 +112,12 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			)
 		}
 	}
+	repositoryField := -1
 	if st.Track == state.TrackAdvanced && deps.Builder.SupportsArtifactRegistry() && !st.Prebuilt() {
-		fields = append(fields, newField(repositoryFieldLabel, st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
+		repositoryField = len(fields)
+		fields = append(fields, newField("Artifact Registry repository (leave empty for default)", st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
 	}
-	scr := &projectScreen{deps: deps, fields: fields}
+	scr := &projectScreen{deps: deps, fields: fields, repositoryField: repositoryField}
 	scr.fields[0].input.Focus()
 	return scr
 }
@@ -152,13 +150,11 @@ func (s *projectScreen) submit() tea.Cmd {
 		s.errText = "A project ID is required."
 		return s.setFocus(0)
 	}
-	for i, f := range s.fields {
-		if f.label == repositoryFieldLabel {
-			name := strings.TrimSpace(f.input.Value())
-			if name != "" && !repositoryNameRE.MatchString(name) {
-				s.errText = "Repository names must be 1–63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit."
-				return s.setFocus(i)
-			}
+	if s.repositoryField >= 0 {
+		name := strings.TrimSpace(s.fields[s.repositoryField].input.Value())
+		if err := state.ValidateRepositoryName(name); err != nil {
+			s.errText = err.Error()
+			return s.setFocus(s.repositoryField)
 		}
 	}
 	s.errText = ""

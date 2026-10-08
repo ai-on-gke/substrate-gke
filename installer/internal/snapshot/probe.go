@@ -258,12 +258,12 @@ func clusterExports(st *state.Setup) []string {
 // Exports renders the environment for running upstream's ate-setup against
 // the cluster st names, at the given running version.
 func (p Probe) Exports(st *state.Setup, version string) string {
-	return strings.Join(append(clusterExports(st), p.versionExports(st, version)...), "\n")
+	return strings.Join(append(clusterExports(st), p.versionExports(version)...), "\n")
 }
 
 // versionExports is the part of the environment that names a version: the
 // version itself and where its images come from.
-func (p Probe) versionExports(st *state.Setup, version string) []string {
+func (p Probe) versionExports(version string) []string {
 	// ate-setup installs pre-built images whenever ATE_IMAGE_REPO is set, so
 	// each block unsets the other family: the two are pasted into one shell
 	// when an upgrade rolls back, and a leftover would silently deploy the
@@ -273,13 +273,8 @@ func (p Probe) versionExports(st *state.Setup, version string) []string {
 		lines = append(lines, "unset KO_DOCKER_REPO KO_DEFAULTPLATFORMS",
 			"export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
 	} else {
-		// If the installed registry is unknown, retain the legacy default.
-		repo := p.KoDockerRepo
-		if repo == "" {
-			repo = "gcr.io/" + st.ProjectID + "/ate-images"
-		}
 		lines = append(lines, "unset ATE_IMAGE_REPO ATE_IMAGE_TAG",
-			"export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
+			"export KO_DOCKER_REPO="+ShellQuote(p.KoDockerRepo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
 	}
 	return lines
 }
@@ -305,8 +300,6 @@ func (p Probe) Apply(st *state.Setup, version string) {
 		// carries none; the tag is the version either way.
 		st.InstalledImageTag = version
 	}
-	// Empty for pre-built images: the exports fall back to the project's
-	// default, and a registry probed off an earlier cluster must not leak.
 	st.KoDockerRepo = p.KoDockerRepo
 }
 
@@ -314,5 +307,5 @@ func (p Probe) Apply(st *state.Setup, version string) {
 // installed version and where its images come from. The cluster stays.
 func InstalledExports(st *state.Setup) string {
 	installed := Probe{KoDockerRepo: st.KoDockerRepo, ImageRepo: st.InstalledImageRepo, ImageTag: st.InstalledImageTag}
-	return strings.Join(installed.versionExports(st, st.InstalledVersion), "\n")
+	return strings.Join(installed.versionExports(st.InstalledVersion), "\n")
 }

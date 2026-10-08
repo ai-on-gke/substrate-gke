@@ -41,6 +41,7 @@ func TestCleanupGcpDelegatesToInstallationSource(t *testing.T) {
 		{name: "keep repository", support: "current", args: "--keep-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images", commit: snapshot.Commit},
 		{name: "legacy keep", support: "legacy", args: "--keep-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images", commit: snapshot.Commit},
 		{name: "unsupported keep", support: "delete-only", location: "us-west1-c", wantErr: "cannot keep the repository"},
+		{name: "unsupported deletion", support: "legacy", args: "--delete-repository", location: "us-west1-c", wantErr: "does not support repository deletion; pass --commit"},
 		{name: "local checkout", support: "current", local: true, location: "us-west1-c", region: "us-west1", repository: "ate-images"},
 		{name: "declined", support: "current", local: true, decline: true, location: "us-west1-c", wantErr: "aborted"},
 		{name: "deletion failure", support: "failure", local: true, location: "us-west1-c", wantErr: "deletion failed"},

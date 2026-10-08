@@ -220,18 +220,14 @@ func TestApplyPairsTheImageTagWithTheChosenVersion(t *testing.T) {
 	}
 }
 
-// A build from source needs a registry to push to. A cluster that ran
-// pre-built images never had one, and a cluster described by hand names
-// none; the block then carries the project's default rather than an empty
-// value that fails the first ko push.
-func TestExportsDefaultTheRegistryForABuildFromSource(t *testing.T) {
+func TestExportsPreserveTheInstalledSourceRegistry(t *testing.T) {
 	st := testSetup(t)
-	st.KoDockerRepo = ""
+	st.KoDockerRepo = "europe-west4-docker.pkg.dev/acme/shared-images"
 	for name, exports := range map[string]string{
-		"probe":     Probe{}.Exports(st, "substrate-0123456789ab"),
+		"probe":     Probe{KoDockerRepo: st.KoDockerRepo}.Exports(st, "substrate-0123456789ab"),
 		"installed": InstalledExports(st),
 	} {
-		if !strings.Contains(exports, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(exports, "KO_DOCKER_REPO=''") {
+		if !strings.Contains(exports, "export KO_DOCKER_REPO="+ShellQuote(st.KoDockerRepo)) {
 			t.Errorf("%s exports:\n%s", name, exports)
 		}
 	}

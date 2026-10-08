@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -330,8 +331,21 @@ func defaultBucketName(projectID, clusterName, zone string) string {
 // name, and cluster location unless the user already overrode them. It runs
 // once the cluster is chosen, so the cluster name is always set by then.
 func (s *Setup) ApplyProjectDefaults() error {
+	if err := ValidateRepositoryName(s.ArtifactRegistryRepository); err != nil {
+		return err
+	}
 	if s.BucketName == "" {
 		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName, s.Zone)
+	}
+	return nil
+}
+
+var repositoryNameRE = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ValidateRepositoryName accepts an empty name to use the default repository.
+func ValidateRepositoryName(name string) error {
+	if name != "" && !repositoryNameRE.MatchString(name) {
+		return fmt.Errorf("repository names must be 1–63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit")
 	}
 	return nil
 }

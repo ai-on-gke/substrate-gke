@@ -169,21 +169,35 @@ type dockerConfig struct {
 	Auths       map[string]json.RawMessage `json:"auths"`
 }
 
+func loadDockerConfig(path string) (dockerConfig, error) {
+	var cfg dockerConfig
+	if path == "" {
+		return cfg, fmt.Errorf("cannot find your home directory, so cannot read docker's config.json; set DOCKER_CONFIG to the directory that holds it")
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return cfg, fmt.Errorf("no Docker credentials configured (no %s)", path)
+	}
+	if err != nil {
+		return cfg, fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("%s is not valid JSON: %w", path, err)
+	}
+	return cfg, nil
+}
+
 // dockerAuthConfigured checks for credential configuration before a registry is chosen.
 func dockerAuthConfigured(_ context.Context) Result {
 	if res, ok := notChecked(); ok {
 		return res
 	}
 	const fix = "gcloud auth configure-docker <region>-docker.pkg.dev   # or docker login <registry>"
-	data, err := os.ReadFile(dockerConfigPath())
+	cfg, err := loadDockerConfig(dockerConfigPath())
 	if err != nil {
-		return Result{Fail, "cannot read Docker credential configuration: " + err.Error(), fix}
+		return Result{Fail, err.Error(), fix}
 	}
-	var cfg dockerConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Result{Fail, "invalid Docker credential configuration: " + err.Error(), fix}
-	}
-	configured := cfg.CredsStore != ""
+	configured := false
 	for _, helper := range cfg.CredHelpers {
 		configured = configured || helper != ""
 	}
@@ -191,6 +205,9 @@ func dockerAuthConfigured(_ context.Context) Result {
 		configured = configured || hasToken(entry)
 	}
 	if !configured {
+		if cfg.CredsStore != "" {
+			return Result{Warn, "credential store configured; cannot verify credentials before a registry is chosen", ""}
+		}
 		return Result{Fail, "no Docker credential helper or saved credentials configured", fix}
 	}
 	return Result{Pass, "credential configuration found; registry credentials are checked after selection", ""}
@@ -209,19 +226,9 @@ func dockerAuthConfigured(_ context.Context) Result {
 // the `gcloud auth login` account, not application-default credentials.
 func dockerAuth(ctx context.Context, path, host string) Result {
 	fix := dockerLoginFix(host)
-	if path == "" {
-		return Result{Fail, "cannot find your home directory, so cannot read docker's config.json; set DOCKER_CONFIG to the directory that holds it", fix}
-	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return Result{Fail, fmt.Sprintf("docker has no credentials for %s (no %s); ko pushes with gcloud's, but the envoy-dataplane push would be refused", host, path), fix}
-	}
+	cfg, err := loadDockerConfig(path)
 	if err != nil {
-		return Result{Fail, fmt.Sprintf("cannot read %s: %v", path, err), fix}
-	}
-	var cfg dockerConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Result{Fail, fmt.Sprintf("%s is not valid JSON: %v", path, err), fix}
+		return Result{Fail, err.Error(), fix}
 	}
 	if helper, ok := cfg.CredHelpers[host]; ok {
 		return askHelper(ctx, helper, []string{host}, path, host, fix)

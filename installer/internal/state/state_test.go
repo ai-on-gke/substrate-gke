@@ -135,6 +135,25 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	}
 }
 
+func TestApplyProjectDefaultsValidatesRepositoryName(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		valid bool
+	}{
+		{"", true},
+		{"ate-images", true},
+		{"My_Images", false},
+		{"../images", false},
+		{strings.Repeat("a", 64), false},
+	} {
+		s := NewSetup()
+		s.ArtifactRegistryRepository = tc.name
+		if err := s.ApplyProjectDefaults(); (err == nil) != tc.valid {
+			t.Errorf("repository %q: %v; valid=%t", tc.name, err, tc.valid)
+		}
+	}
+}
+
 func TestDefaultBucketName(t *testing.T) {
 	for _, tc := range []struct {
 		project, cluster, zone, want string

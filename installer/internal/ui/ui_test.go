@@ -804,7 +804,13 @@ func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
 	typeText(t, app, installed)
 	press("enter")
 	typeText(t, app, "substrate-0123456789ab")
-	press("enter", "enter") // registry blank: a build from source
+	press("enter", "enter", "enter")
+	if app.mach.Current() != state.UpgradeSource || scr.errText == "" {
+		t.Fatal("a source install without its registry was accepted")
+	}
+	const registry = "europe-west4-docker.pkg.dev/acme/shared-images"
+	typeText(t, app, registry)
+	press("enter")
 	if app.mach.Current() != state.Images {
 		t.Fatalf("after describing the cluster: %v (%s)", app.mach.Current(), scr.errText)
 	}
@@ -812,8 +818,8 @@ func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
 	if st.InstalledCommit != installed || st.InstalledVersion != "substrate-0123456789ab" || st.InstalledImageRepo != "" {
 		t.Fatalf("described cluster not recorded: %+v", st)
 	}
-	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") {
-		t.Errorf("a build from source described by hand rolls back through the project's registry:\n%s", exports)
+	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export KO_DOCKER_REPO="+snapshot.ShellQuote(registry)) {
+		t.Errorf("rollback must use the installed source registry:\n%s", exports)
 	}
 }
 
@@ -841,11 +847,19 @@ func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T
 	press("enter")
 	typeText(t, app, "gcr.io/acme/mirror")
 	press("enter")
+	scr := app.cur.(*upgradeSourceScreen)
+	typeText(t, app, "gcr.io/acme/old-source")
+	press("enter")
+	if app.mach.Current() != state.UpgradeSource || scr.errText == "" {
+		t.Fatal("two installed registries were accepted")
+	}
+	scr.fields[3].SetValue("")
+	press("enter")
 	if app.mach.Current() != state.Images {
 		t.Fatalf("after describing the cluster: %v", app.mach.Current())
 	}
 	st := app.deps.Setup
-	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != snapshot.ReleaseVersion {
+	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != snapshot.ReleaseVersion || st.KoDockerRepo != "" {
 		t.Fatalf("pre-built install not recorded: %+v", st)
 	}
 	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(snapshot.ReleaseVersion)) || strings.Contains(exports, "export KO_DOCKER_REPO") {
@@ -1058,7 +1072,7 @@ func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
 		t.Fatalf("second read should fail: mode=%s failed=%v", scr.mode, scr.comp.failed)
 	}
 	press("m")
-	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" || st.KoDockerRepo != "" {
+	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" || scr.value(3) != "" || st.KoDockerRepo != "" {
 		t.Errorf("manual form offers the first cluster's facts: %q %q %q ko=%q", scr.value(0), scr.value(1), scr.value(2), st.KoDockerRepo)
 	}
 }
@@ -2006,27 +2020,26 @@ func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 }
 
 func TestProjectValidatesRepositoryBeforeCloudChecks(t *testing.T) {
-	for _, name := range []string{"", "ate-images", "My_Images", "../images", strings.Repeat("a", 64)} {
-		t.Run(name, func(t *testing.T) {
-			app := testApp(t)
-			app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-			app.deps.Builder.UseSource(snapshot.Revision{ArtifactRegistry: true})
-			app.deps.Setup.Track, app.deps.Setup.ProjectID = state.TrackAdvanced, "acme"
-			scr := newProjectScreen(app.deps)
-			for i, f := range scr.fields {
-				if strings.HasPrefix(f.label, "Artifact Registry repository") {
-					scr.fields[i].input.SetValue(name)
-				}
-				if strings.HasPrefix(f.label, "Image registry") && f.input.Placeholder != "<region>-docker.pkg.dev/<project>/ate-images" {
-					t.Errorf("registry placeholder = %q", f.input.Placeholder)
-				}
-			}
-			scr.submit()
-			valid := name == "" || name == "ate-images"
-			if scr.validating != valid || (scr.errText == "") != valid {
-				t.Fatalf("validating=%t, error=%q", scr.validating, scr.errText)
-			}
-		})
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.Builder.UseSource(snapshot.Revision{ArtifactRegistry: true})
+	app.deps.Setup.Track, app.deps.Setup.ProjectID = state.TrackAdvanced, "acme"
+	scr := newProjectScreen(app.deps)
+	for _, f := range scr.fields {
+		if strings.HasPrefix(f.label, "Image registry") && f.input.Placeholder != "<region>-docker.pkg.dev/<project>/ate-images" {
+			t.Errorf("registry placeholder = %q", f.input.Placeholder)
+		}
+	}
+	scr.fields[scr.repositoryField].label = "Repository"
+	scr.fields[scr.repositoryField].input.SetValue("My_Images")
+	scr.submit()
+	if scr.validating || scr.errText == "" || scr.focus != scr.repositoryField {
+		t.Fatalf("invalid name: validating=%t, error=%q, focus=%d", scr.validating, scr.errText, scr.focus)
+	}
+	scr.fields[scr.repositoryField].input.SetValue("ate-images")
+	scr.submit()
+	if !scr.validating || scr.errText != "" {
+		t.Fatalf("valid name: validating=%t, error=%q", scr.validating, scr.errText)
 	}
 }
 
