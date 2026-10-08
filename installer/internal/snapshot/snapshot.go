@@ -527,7 +527,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		"CLUSTER_NAME=" + st.ClusterName,
 		"NETWORK=" + st.Network,
 		"SUBNETWORK=" + st.Subnetwork,
-		"GVISOR_NODE_MACHINE_TYPE=" + st.MachineType,
+		"NODE_MACHINE_TYPE=" + st.MachineType,
 		"BUCKET_NAME=" + st.BucketName,
 		"KUBECTL_CONTEXT=",
 		"NO_DEV_ENV=1",
@@ -700,10 +700,14 @@ func (b *Builder) fetchSimLines() []string {
 // it is the first step and the install checklist expects the fetch to happen
 // here; `go -C` then switches to the setup-gcp module.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
+	run := "go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"
 	return execx.Spec{
-		Label:   "setup-gcp bootstrap",
-		Display: "go -C " + SetupGCPPath + " run . bootstrap",
-		Argv:    b.inTree("go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"),
+		Label: "setup-gcp bootstrap",
+		// The step runs inside the Substrate checkout, so Display names the
+		// resolved directory: a path relative to this repository would point
+		// at the checkout's own copy if replayed where the step ran.
+		Display: run,
+		Argv:    b.inTree(run),
 		Env:     b.env(st),
 		SimLines: append(b.fetchSimLines(),
 			"Step 1/7: Enabling required APIs...",

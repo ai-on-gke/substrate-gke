@@ -210,30 +210,23 @@ func TestCleanupGcpScriptIsRunnable(t *testing.T) {
 	}
 }
 
-// cleanup-gcp delegates its deletions to this repository's
-// tools/setup-gcp/teardown.sh, without fetching a Substrate tree. It runs the
-// script against fake gcloud and git binaries, from a directory holding a
-// .ate-dev-env.sh that names another project: the deletions must target the
-// flags' project and cluster, never the dev-env file's.
-func TestCleanupGcpRunsTheLocalTeardown(t *testing.T) {
+// runCleanupGcp runs tools/cleanup-gcp against fake gcloud and git binaries
+// and returns its combined output, the calls log, and its exit error.
+// gcloudBody is the fake gcloud's script after the line that logs the call;
+// the fake git logs its call and fails. It runs from a directory holding a
+// .ate-dev-env.sh that names another project, cluster, and bucket, so a test
+// can check those values never reach a deletion.
+func runCleanupGcp(t *testing.T, gcloudBody string) (out, calls string, err error) {
+	t.Helper()
 	script, err := filepath.Abs("../tools/cleanup-gcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw, err := os.ReadFile(script); err != nil {
-		t.Fatal(err)
-	} else if strings.Contains(string(raw), "remove-iam-policy-binding") {
-		t.Errorf("cleanup-gcp carries its own IAM deletions; they belong in tools/setup-gcp/teardown.sh")
-	}
-
 	bin := t.TempDir()
-	calls := filepath.Join(t.TempDir(), "calls")
+	callsFile := filepath.Join(t.TempDir(), "calls")
 	fakes := map[string]string{
-		// projects describe answers the project-number lookup; everything
-		// else is a deletion, recorded and reported as successful.
-		"gcloud": `echo "gcloud $*" >> "$CALLS"
-if [ "$1 $2" = "projects describe" ]; then echo 42; fi`,
-		"git": `echo "git $*" >> "$CALLS"; exit 1`,
+		"gcloud": `echo "gcloud $*" >> "$CALLS"` + "\n" + gcloudBody,
+		"git":    `echo "git $*" >> "$CALLS"; exit 1`,
 	}
 	for name, body := range fakes {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env bash\n"+body+"\n"), 0o755); err != nil {
@@ -250,21 +243,43 @@ if [ "$1 $2" = "projects describe" ]; then echo 42; fi`,
 	cmd := exec.Command("bash", script, "--project", "acme", "--cluster", "substrate-test",
 		"--location", "us-west1-c", "--bucket", "acme-snapshots", "--yes")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "CALLS="+calls)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("cleanup-gcp failed: %v\n%s", err, out)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "CALLS="+callsFile)
+	raw, runErr := cmd.CombinedOutput()
+	if log, err := os.ReadFile(callsFile); err == nil {
+		calls = string(log)
+	}
+	return string(raw), calls, runErr
+}
+
+// projectNumberLookup answers cleanup-gcp's project-number lookup; every
+// other fake gcloud call succeeds silently.
+const projectNumberLookup = `if [ "$1 $2" = "projects describe" ]; then echo 42; exit 0; fi`
+
+// cleanup-gcp delegates its deletions to this repository's
+// tools/setup-gcp/teardown.sh, without fetching a Substrate tree. The
+// deletions must target the flags' project and cluster, never the values in
+// the working directory's .ate-dev-env.sh.
+func TestCleanupGcpRunsTheLocalTeardown(t *testing.T) {
+	if raw, err := os.ReadFile("../tools/cleanup-gcp"); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(raw), "remove-iam-policy-binding") {
+		t.Errorf("cleanup-gcp carries its own IAM deletions; they belong in tools/setup-gcp/teardown.sh")
 	}
 
-	raw, err := os.ReadFile(calls)
+	out, log, err := runCleanupGcp(t, projectNumberLookup)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("cleanup-gcp failed: %v\n%s", err, out)
 	}
-	log := string(raw)
 	for _, want := range []string{
 		"gcloud container clusters delete substrate-test --location=us-west1-c --project=acme",
 		"gcloud storage buckets delete gs://acme-snapshots --project=acme",
 		"serviceAccount:42-compute@developer.gserviceaccount.com",
 		"gcloud monitoring dashboards list --project=acme",
+		// The two workload-identity steps, the only ones that combine
+		// PROJECT_ID, PROJECT_NUMBER, and BUCKET_NAME. Without these, --all
+		// could drop either step and this test would still pass.
+		"gcloud storage buckets remove-iam-policy-binding gs://acme-snapshots --member=principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet",
+		"gcloud projects remove-iam-policy-binding acme --member=principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("teardown did not run %q; calls:\n%s", want, log)
@@ -275,6 +290,22 @@ if [ "$1 $2" = "projects describe" ]; then echo 42; fi`,
 	}
 	if strings.Contains(log, "git ") {
 		t.Errorf("cleanup-gcp fetched a Substrate tree; the teardown is local now:\n%s", log)
+	}
+}
+
+// A failed deletion must fail cleanup-gcp (and so `make teardown`) instead of
+// ending in "Done.", or the user walks away from a cluster that still bills.
+func TestCleanupGcpFailsWhenADeleteFails(t *testing.T) {
+	out, _, err := runCleanupGcp(t, projectNumberLookup+`
+if [ "$1 $2 $3" = "container clusters delete" ]; then
+  echo "ERROR: (gcloud.container.clusters.delete) PERMISSION_DENIED: Required \"container.clusters.delete\" permission" >&2
+  exit 1
+fi`)
+	if err == nil {
+		t.Errorf("cleanup-gcp exited 0 after a denied cluster delete:\n%s", out)
+	}
+	if strings.Contains(out, "Done.") {
+		t.Errorf("cleanup-gcp reported Done. after a denied cluster delete:\n%s", out)
 	}
 }
 

@@ -19,11 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 
-	"cloud.google.com/go/iam"
 	"cloud.google.com/go/storage"
 	"github.com/spf13/cobra"
 )
@@ -33,7 +31,7 @@ func createSnapshotBucket(ctx context.Context, cfg *Config) error {
 		return err
 	}
 
-	client, err := storage.NewClient(ctx)
+	client, err := storage.NewClient(ctx, restClientOptions...)
 	if err != nil {
 		return err
 	}
@@ -103,14 +101,16 @@ var snapshotBucketRoles = []string{"roles/storage.objectAdmin", "roles/storage.b
 var snapshotBucketSubjects = []string{"atelet", "ate-api-server"}
 
 func createIamPolicyBindings(ctx context.Context, cfg *Config) error {
-	client, err := storage.NewClient(ctx)
+	client, err := storage.NewClient(ctx, restClientOptions...)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
+	// Version 3, so conditional bindings come back intact and are written
+	// back unchanged (see conditionalPolicyVersion).
 	bucket := client.Bucket(cfg.BucketName)
-	policy, err := bucket.IAM().Policy(ctx)
+	policy, err := bucket.IAM().V3().Policy(ctx)
 	if err != nil {
 		return fmt.Errorf("get bucket iam policy: %w", err)
 	}
@@ -119,11 +119,10 @@ func createIamPolicyBindings(ctx context.Context, cfg *Config) error {
 	for _, subject := range snapshotBucketSubjects {
 		member := fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/ate-system/sa/%s", cfg.ProjectNumber, cfg.ProjectID, subject)
 		for _, role := range snapshotBucketRoles {
-			if hasUnconditionalBinding(policy, role, member) {
+			if !addBinding(&policy.Bindings, role, member) {
 				continue
 			}
 			slog.Info("Adding role to member", slog.String("bucket", cfg.BucketName), slog.String("role", role), slog.String("member", member))
-			policy.Add(member, iam.RoleName(role))
 			changed = true
 		}
 	}
@@ -133,24 +132,12 @@ func createIamPolicyBindings(ctx context.Context, cfg *Config) error {
 	}
 
 	slog.Info("Setting IAM policy for bucket", slog.String("bucket", cfg.BucketName))
-	err = bucket.IAM().SetPolicy(ctx, policy)
+	err = bucket.IAM().V3().SetPolicy(ctx, policy)
 	if err != nil {
 		return fmt.Errorf("set bucket iam policy: %w", err)
 	}
 
 	return nil
-}
-
-// hasUnconditionalBinding reports whether the policy already grants role to
-// member without a condition. Conditional bindings are ignored: they may not
-// apply to the objects Substrate touches.
-func hasUnconditionalBinding(policy *iam.Policy, role, member string) bool {
-	for _, b := range policy.InternalProto.Bindings {
-		if b.Condition == nil && b.Role == role && slices.Contains(b.Members, member) {
-			return true
-		}
-	}
-	return false
 }
 
 func validateBucketFlags(ctx context.Context, cfg *Config) error {

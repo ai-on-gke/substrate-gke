@@ -33,6 +33,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Go | Version checked automatically — run `make substrate-pin-check` if unsure |
 | `git` | — |
 | `kubectl` | — |
+| `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin`, or the `google-cloud-cli-gke-gcloud-auth-plugin` package when gcloud came from apt or dnf |
 | Docker with buildx | Only to build Substrate 0.2 or later from source, which builds its envoy-dataplane image with `docker buildx`. Docker also needs credentials for your registry: `gcloud auth configure-docker gcr.io` |
 
 ```bash
@@ -62,7 +63,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 
 | # | Step | What happens |
 |---|---|---|
-| 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
+| 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`. A build from source that needs Docker re-checks it here against your registry |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
@@ -256,7 +257,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then delegates deletion to [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh), the reverse of `setup-gcp bootstrap`, which moved here from upstream's `hack/teardown.sh` with setup-gcp. It needs only `gcloud`, ignores any `.ate-dev-env.sh` in the working directory, and is safe to re-run after a partial failure.
+The script asks for confirmation, then delegates deletion to [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh), the reverse of `setup-gcp bootstrap`, which moved here from upstream's `hack/teardown.sh` with setup-gcp. It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Resources that are already gone count as deleted, so it is safe to re-run after a partial failure. Any other failed step makes it exit non-zero and is listed at the end, so a run that ends without that list deleted everything.
 
 To remove **only** the Substrate control plane and keep the cluster:
 

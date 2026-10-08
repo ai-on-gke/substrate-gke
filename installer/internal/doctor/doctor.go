@@ -157,6 +157,20 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 		{
+			// get-credentials writes a kubeconfig that execs this plugin, and
+			// only warns when it is missing. Without it every kubectl call
+			// and ate-setup's client-go fail to authenticate to the cluster.
+			Key: "gke-auth-plugin", Name: "GKE auth plugin", Fatal: true,
+			Run: func(ctx context.Context) Result {
+				path, sdkRoot := findGKEAuthPlugin(ctx)
+				if path == "" {
+					return Result{Fail, gkeAuthPlugin + " not found; kubectl and ate-setup need it to authenticate to GKE",
+						gkeAuthPluginFix(sdkRoot)}
+				}
+				return Result{Pass, path, ""}
+			},
+		},
+		{
 			Key: "git", Name: "git", Fatal: needsGit,
 			Run: func(ctx context.Context) Result {
 				if _, err := exec.LookPath("git"); err != nil {
@@ -224,6 +238,39 @@ func Checks(snapshotRoot string, managed bool) []Check {
 		}
 	}
 	return checks
+}
+
+// gkeAuthPlugin is the credential plugin GKE kubeconfigs exec.
+const gkeAuthPlugin = "gke-gcloud-auth-plugin"
+
+// findGKEAuthPlugin returns the plugin gcloud would put in a kubeconfig, or
+// "" when there is none, along with the SDK root when it had to ask gcloud
+// for it. Like gcloud, it looks on PATH first and then in the SDK's bin
+// directory; gcloud writes the latter as an absolute path, so kubectl finds
+// it there even when it is not on PATH.
+func findGKEAuthPlugin(ctx context.Context) (path, sdkRoot string) {
+	if p, err := exec.LookPath(gkeAuthPlugin); err == nil {
+		return p, ""
+	}
+	root, err := output(ctx, "gcloud", "info", "--format=value(installation.sdk_root)")
+	if err != nil || root == "" {
+		return "", ""
+	}
+	candidate := filepath.Join(root, "bin", gkeAuthPlugin)
+	if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+		return candidate, root
+	}
+	return "", root
+}
+
+// gkeAuthPluginFix returns the install command for the plugin. An SDK
+// installed by apt or dnf lives under /usr/lib or /usr/lib64 and has the
+// component manager disabled, so it needs the distribution package.
+func gkeAuthPluginFix(sdkRoot string) string {
+	if strings.HasPrefix(sdkRoot, "/usr/lib") {
+		return "sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin   # or: sudo dnf install google-cloud-cli-gke-gcloud-auth-plugin"
+	}
+	return "gcloud components install " + gkeAuthPlugin
 }
 
 // MicroVMTools are the host utilities the micro-VM path needs beyond the
