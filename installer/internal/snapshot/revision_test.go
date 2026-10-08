@@ -205,37 +205,55 @@ func TestVerifyCommitReportsTheEnvoyDockerfile(t *testing.T) {
 	}
 }
 
-// ate-setup declared --image-repo in root.go until v0.4.0 moved it to the
-// config package, where root.go still exists but no longer names it. Both
-// trees install pre-built images; one where neither file declares it does not.
+// ate-setup declared --image-repo in cmd/root.go until v0.4.0 moved it to
+// config/setting.go, and root.go may go away entirely. Any of those trees
+// installs pre-built images. One whose ate-setup never names the flag does
+// not, and one without ate-setup at all is not judged.
 func TestVerifyCommitFindsTheImageFlags(t *testing.T) {
+	const (
+		root    = "cmd/ate-setup/internal/cmd/root.go"
+		setting = "cmd/ate-setup/internal/config/setting.go"
+		flag    = `Flag: "image-repo",` + "\n"
+	)
 	remote, run := testRemote(t)
-	write := func(path, content string) string {
+	// commit makes the tree hold exactly files, and returns its SHA.
+	commit := func(files map[string]string) string {
 		t.Helper()
-		full := filepath.Join(remote, path)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
+		run("rm", "-r", "--quiet", "--ignore-unmatch", "cmd")
+		for path, content := range files {
+			full := filepath.Join(remote, path)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run("add", path)
 		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		run("add", path)
-		run("commit", "--quiet", "-m", path)
+		run("commit", "--quiet", "--allow-empty", "-m", "tree")
 		return run("rev-parse", "HEAD")
 	}
-	root, setting := imageFlagsPaths[0], imageFlagsPaths[1]
-	predates := write(root, "package cmd\n")
-	inRoot := write(root, `f.StringVar(&opts.ImageRepo, "image-repo", "", "")`+"\n")
-	write(root, "package cmd\n")
-	inConfig := write(setting, `Flag: "image-repo",`+"\n")
 
-	for _, sha := range []string{inRoot, inConfig} {
-		if _, err := verifyCommit(context.Background(), remote, sha, true); err != nil {
-			t.Errorf("verifyCommit(%s) = %v, want nil", shorten(sha), err)
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		ok    bool
+	}{
+		{"declared in root.go", map[string]string{root: flag}, true},
+		{"declared in setting.go", map[string]string{root: "package cmd\n", setting: flag}, true},
+		{"setting.go only", map[string]string{setting: flag}, true},
+		{"no ate-setup", map[string]string{}, true},
+		{"root.go without it", map[string]string{root: "package cmd\n"}, false},
+		{"setting.go without it", map[string]string{setting: "package config\n"}, false},
+	} {
+		sha := commit(tc.files)
+		_, err := verifyCommit(context.Background(), remote, sha, true)
+		if tc.ok && err != nil {
+			t.Errorf("%s: verifyCommit = %v, want nil", tc.name, err)
 		}
-	}
-	if _, err := verifyCommit(context.Background(), remote, predates, true); err == nil {
-		t.Errorf("verifyCommit(%s) accepted a tree without --%s", shorten(predates), imageFlagsName)
+		if !tc.ok && err == nil {
+			t.Errorf("%s: verifyCommit accepted a tree without --%s", tc.name, imageFlagsName)
+		}
 	}
 }
 
