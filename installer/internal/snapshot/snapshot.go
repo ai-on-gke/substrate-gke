@@ -744,6 +744,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
 		Env:     append(b.env(st), credentialProviderEnv()...),
 		SimLines: append(sim,
+			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
 			`deployment "ate-api-server" successfully rolled out`,
 			`daemon set "atelet" successfully rolled out`,
@@ -756,6 +757,15 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 // upstream's quickstart. `ate-setup deploy ate-system` requires one from
 // v0.4.0 on; older trees ignore the variable.
 const defaultCredentialProvider = `{"name":"k8s.io"}`
+
+// CredentialProvider is the provider the control plane is deployed with: the
+// caller's ATE_CREDENTIAL_PROVIDER, else defaultCredentialProvider.
+func CredentialProvider() string {
+	if v := os.Getenv("ATE_CREDENTIAL_PROVIDER"); v != "" {
+		return v
+	}
+	return defaultCredentialProvider
+}
 
 // credentialProviderEnv passes defaultCredentialProvider, unless the caller
 // already exports ATE_CREDENTIAL_PROVIDER.
