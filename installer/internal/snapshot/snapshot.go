@@ -55,14 +55,13 @@ const (
 	// only falls back here for --dry-run, which resolves nothing.
 	//
 	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the head of upstream's
-	// release-0.2 branch, ReleaseVersion being the GKE build of it. That is
-	// the v0.2.0 tag plus the envoy-dataplane pin pre-built installs need
-	// (agent-substrate/substrate#1990), which is why it is not the tag itself.
+	// what the released images are built from: the commit upstream's v0.4.0
+	// tag names, which is also the head of its release-0.4 branch,
+	// ReleaseVersion being the GKE build of it.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
+	Commit = "756c2a53741121e728f4cc3066c8a19e575b4919"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -85,7 +84,7 @@ const (
 	// never has to fall back to building from source. It asks such a team for
 	// a manifest revision as well, since only this registry is published
 	// alongside a tree known to match.
-	ReleaseVersion = "v0.2.0-gke.0"
+	ReleaseVersion = "v0.4.0-gke.0"
 )
 
 // ShortCommit is Commit abbreviated for display.
