@@ -195,6 +195,10 @@ func (s *projectScreen) submit() tea.Cmd {
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
 	s.checkingDocker = registry != ""
+	// Each submit re-reads ADC: after a PERMISSION_DENIED panel the user
+	// may have run `gcloud auth application-default login` as someone
+	// else. The probes in this submit still share one fetch.
+	s.deps.GCP.ResetToken()
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)

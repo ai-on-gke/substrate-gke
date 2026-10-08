@@ -17,6 +17,7 @@ package gcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,6 +239,83 @@ func TestAccessTokenFailureIsNotCached(t *testing.T) {
 	}
 	if tok, err := c.accessToken(context.Background()); err != nil || tok != "test-token" {
 		t.Errorf("after a failed fetch the next call should retry, got (%q, %v)", tok, err)
+	}
+}
+
+// A 401 means the cached token is no good (gcloud can hand back its own
+// token near expiry): the call drops it, fetches a fresh one and retries
+// once. A second 401 is reported, not retried forever.
+func TestCallAPIRefetchesTheTokenOn401(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("Authorization") != "Bearer new" {
+			http.Error(w, `{"error": {"status": "UNAUTHENTICATED", "message": "Request had invalid authentication credentials."}}`, http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte(`{"billingEnabled": true}`))
+	}))
+	defer srv.Close()
+
+	tokens := []string{"old", "new"}
+	var fetches int
+	c := &Client{billingBase: srv.URL, token: func(context.Context) (string, error) {
+		tok := tokens[min(fetches, len(tokens)-1)]
+		fetches++
+		return tok, nil
+	}}
+	on, err := c.BillingEnabled(context.Background(), "acme")
+	if err != nil || !on {
+		t.Fatalf("BillingEnabled = (%v, %v), want a retry with the fresh token to succeed", on, err)
+	}
+	if fetches != 2 || requests.Load() != 2 {
+		t.Errorf("fetches = %d, requests = %d; want 2 and 2", fetches, requests.Load())
+	}
+	// The fresh token is the one cached now.
+	c.BillingEnabled(context.Background(), "acme")
+	if fetches != 2 {
+		t.Errorf("the refetched token should be cached, fetches = %d", fetches)
+	}
+
+	// A token that stays bad: one retry, then the 401 is the answer.
+	requests.Store(0)
+	bad := &Client{billingBase: srv.URL, token: func(context.Context) (string, error) { return "bad", nil }}
+	if _, err := bad.BillingEnabled(context.Background(), "acme"); err == nil || !strings.Contains(err.Error(), "UNAUTHENTICATED") {
+		t.Errorf("a persistent 401 should be reported, got %v", err)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Errorf("a persistent 401 made %d requests, want 2 (one retry)", n)
+	}
+}
+
+// ResetToken scopes the cache to one user action: the next call asks gcloud
+// again, so a re-run `gcloud auth application-default login` takes effect.
+func TestResetTokenForcesAFreshFetch(t *testing.T) {
+	var fetches int
+	c := &Client{token: func(context.Context) (string, error) {
+		fetches++
+		return fmt.Sprintf("token-%d", fetches), nil
+	}}
+	first, _ := c.accessToken(context.Background())
+	again, _ := c.accessToken(context.Background())
+	c.ResetToken()
+	fresh, _ := c.accessToken(context.Background())
+	if first != "token-1" || again != "token-1" || fresh != "token-2" {
+		t.Errorf("got %q, %q, %q; want token-1, token-1, token-2", first, again, fresh)
+	}
+}
+
+// invalidateToken only drops the token it was told about: a concurrent
+// caller's fresher token must survive another caller's stale 401.
+func TestInvalidateTokenKeepsAFresherToken(t *testing.T) {
+	c := &Client{token: func(context.Context) (string, error) { return "fresh", nil }}
+	c.accessToken(context.Background())
+	c.invalidateToken("stale")
+	c.tokenMu.Lock()
+	got := c.cachedToken
+	c.tokenMu.Unlock()
+	if got != "fresh" {
+		t.Errorf("cachedToken = %q, want the fresher token kept", got)
 	}
 }
 

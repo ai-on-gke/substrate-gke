@@ -90,38 +90,28 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 // credentials identity and returns the response body. A non-200 status is an
 // error carrying the status and the body, which is where Google APIs put the
 // reason ("API has not been used in project…", "permission denied").
+//
+// A 401 means the token is no good (gcloud can hand back its own cached
+// token close to expiry), so callAPI drops it, fetches a fresh one and
+// retries once.
 func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) ([]byte, error) {
 	token, err := c.accessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
-	defer cancel()
-	var reqBody io.Reader
-	if body != nil {
-		reqBody = bytes.NewReader(body)
+	status, respBody, err := c.send(ctx, method, url, body, token)
+	if err == nil && status == http.StatusUnauthorized {
+		c.invalidateToken(token)
+		if token, err = c.accessToken(ctx); err != nil {
+			return nil, err
+		}
+		status, respBody, err = c.send(ctx, method, url, body, token)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponse+1))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: %s", resp.Status, apiErrorText(respBody))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("%d %s: %s", status, http.StatusText(status), apiErrorText(respBody))
 	}
 	// A cut-off body would only fail later as unparseable JSON, which
 	// reads like a broken API rather than an oversized answer.
@@ -131,13 +121,43 @@ func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) (
 	return respBody, nil
 }
 
+// send makes one HTTP request with token and returns the status and up to
+// maxAPIResponse+1 bytes of the body.
+func (c *Client) send(ctx context.Context, method, url string, body []byte, token string) (int, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
+	defer cancel()
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponse+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, respBody, nil
+}
+
 // maxAPIResponse caps what callAPI reads. The probes ask for single fields,
 // so anything near it means a request forgot to.
 const maxAPIResponse = 1 << 20
 
-// tokenTTL is how long accessToken reuses a token. ADC access tokens live
-// about an hour; reusing one for a few minutes saves a gcloud spawn (~1s
-// cold) per REST call without ever handing out one near expiry.
+// tokenTTL caps how long accessToken reuses a token. Callers scope the cache
+// to one user action with ResetToken, and a 401 evicts it, so this is only a
+// backstop.
 const tokenTTL = 5 * time.Minute
 
 // accessToken returns the application-default access token, asking gcloud
@@ -163,6 +183,26 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 	c.cachedToken = strings.TrimSpace(token)
 	c.tokenExpiry = time.Now().Add(tokenTTL)
 	return c.cachedToken, nil
+}
+
+// ResetToken forgets the cached access token, so the next REST call asks
+// gcloud again. Call it at the start of each user action (a submit): the
+// calls within that action still share one fetch, but a new action sees a
+// re-run `gcloud auth application-default login` right away.
+func (c *Client) ResetToken() {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.cachedToken = ""
+}
+
+// invalidateToken forgets token if it is still the cached one. A concurrent
+// caller may already have replaced it with a fresh token, which must stay.
+func (c *Client) invalidateToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.cachedToken == strings.TrimSpace(token) {
+		c.cachedToken = ""
+	}
 }
 
 // maxErrorQuote caps how much of a non-JSON error body an error quotes.
