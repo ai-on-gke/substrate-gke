@@ -367,14 +367,15 @@ const (
 // enableFailureKind sorts a `gcloud services enable` error by its cause.
 // gcloud prints the API's status, e.g. "FAILED_PRECONDITION: Billing must
 // be enabled for activation of service(s)" or "PERMISSION_DENIED:
-// Permission denied to enable service".
+// Permission denied to enable service". It matches status names, never
+// bare codes like 403: the line often carries operation names and project
+// numbers that contain those digits.
 func enableFailureKind(cause string) enableFailure {
 	lower := strings.ToLower(cause)
 	switch {
 	case strings.Contains(lower, "billing"):
 		return enableFailedBilling
-	case strings.Contains(cause, "PERMISSION_DENIED"), strings.Contains(lower, "permission denied"),
-		strings.Contains(cause, "403"):
+	case strings.Contains(cause, "PERMISSION_DENIED"), strings.Contains(lower, "permission denied"):
 		return enableFailedPermission
 	}
 	return enableFailedOther

@@ -723,6 +723,13 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 			want: []string{"UNAVAILABLE", gcp.EnableServiceCommand("acme", gcp.GKEService), "[e] to try again"},
 			not:  []string{"serviceUsageAdmin", "billing projects link"},
 		},
+		{
+			// Ids on the line can contain 403; only the status name counts.
+			name: "other with 403 in an id",
+			line: "ERROR: (gcloud.services.enable) INTERNAL: Operation operations/acf.p2-403712345678-5d1e failed.",
+			want: []string{"INTERNAL", "[e] to try again"},
+			not:  []string{"serviceUsageAdmin", "billing projects link"},
+		},
 	} {
 		app := testApp(t)
 		var argv [][]string
