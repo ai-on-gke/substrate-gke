@@ -1170,6 +1170,82 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	}
 }
 
+// networkScreen is a cluster screen showing one hand-written cluster, driven
+// directly so a test controls its network configuration.
+func networkScreen(t *testing.T, c gcp.Cluster) (*clusterScreen, func(tea.Msg)) {
+	t.Helper()
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  execx.DryRun{Delay: time.Millisecond},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	deps.Setup.ProjectID = "acme"
+	s := newClusterScreen(deps)
+	drive := func(msg tea.Msg) {
+		t.Helper()
+		for queue := []tea.Msg{msg}; len(queue) > 0; {
+			m := queue[0]
+			queue = queue[1:]
+			queue = append(queue, runCmd(s.Update(m))...)
+		}
+	}
+	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{c}})
+	s.cursor = 0
+	return s, drive
+}
+
+// Bootstrap deletes and recreates an existing cluster whose network differs
+// from the one it expects, and for a Shared VPC cluster nothing the installer
+// can pass will match: bootstrap builds the expected path from this project.
+// Handing it such a cluster costs the user the cluster, so there must be no
+// way through — not even the 'y' every other warning on this screen accepts.
+func TestAClusterBootstrapWouldRecreateIsRefused(t *testing.T) {
+	s, drive := networkScreen(t, gcp.Cluster{
+		Name: "shared", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, DataplaneV2: true,
+		Network:    "projects/host/global/networks/shared-vpc",
+		Subnetwork: "projects/host/regions/us-central1/subnetworks/shared-sub",
+	})
+	drive(key("enter"))
+	if s.mode != "recreate" {
+		t.Fatalf("mode = %q, want the recreate refusal", s.mode)
+	}
+	if view := s.View(120); !strings.Contains(view, "would delete and recreate shared") || !strings.Contains(view, "another project") {
+		t.Errorf("the refusal should say what bootstrap would do and why:\n%s", view)
+	}
+	drive(key("y"))
+	if s.mode != "recreate" || s.deps.Setup.ClusterName == "shared" {
+		t.Errorf("'y' got through: mode=%q cluster=%q", s.mode, s.deps.Setup.ClusterName)
+	}
+	drive(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.mode != "list" {
+		t.Errorf("after esc: mode = %q, want list", s.mode)
+	}
+}
+
+// The ordinary existing cluster — this project's network, a subnet GKE named
+// for it, Dataplane V2 on — must go through, carrying its own network into
+// Setup for bootstrap. Refusing it, or carrying the defaults, is what this
+// guard exists to prevent from opposite directions.
+func TestChoosingAnExistingClusterRecordsItsOwnNetwork(t *testing.T) {
+	s, drive := networkScreen(t, gcp.Cluster{
+		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, DataplaneV2: true,
+		Network:    "projects/acme/global/networks/default",
+		Subnetwork: "projects/acme/regions/us-central1/subnetworks/gke-prod-subnet-55edbf1e",
+	})
+	drive(key("enter"))
+	st := s.deps.Setup
+	if st.ClusterName != "prod" || st.ClusterIsNew {
+		t.Fatalf("prod was not chosen: cluster=%q new=%v mode=%q", st.ClusterName, st.ClusterIsNew, s.mode)
+	}
+	if st.ClusterNetwork != "default" || st.ClusterSubnetwork != "gke-prod-subnet-55edbf1e" || !st.ClusterDataplaneV2 {
+		t.Errorf("recorded network=%q subnetwork=%q dpv2=%v, want the cluster's own",
+			st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2)
+	}
+}
+
 // Outside --dry-run the teardown must re-probe for real: the runner flips to
 // clean only after the delete spec has run, and the screen has to see that
 // rather than assume it.

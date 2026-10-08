@@ -96,8 +96,11 @@ func newProjectScreen(deps *Deps) *projectScreen {
 	if st.Track == state.TrackAdvanced {
 		fields = append(fields,
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
-			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
-			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
+			// New clusters only: an existing cluster is always given its own
+			// network, because bootstrap recreates one whose network differs
+			// from what it is handed (see Setup.BootstrapNetwork).
+			newField("VPC network (new clusters)", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
+			newField("VPC subnetwork (new clusters)", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
 		)
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
@@ -438,6 +441,10 @@ func (s *clusterScreen) Hints() []Hint {
 		return []Hint{{"esc", "cancel"}}
 	case "confirm":
 		return []Hint{{"y", "use it anyway"}, {"esc", "choose another"}}
+	case "recreate":
+		// No way through: there is nothing the user could say yes to that
+		// would not cost them the cluster.
+		return []Hint{{"esc", "choose another"}}
 	}
 	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
 }
@@ -452,11 +459,21 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.Zone = c.Location
 	st.ClusterIsNew = false
 	st.ClusterKVMReady = c.KVMReady
+	st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2 = c.NetworkName(), c.SubnetworkName(), c.DataplaneV2
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
 	}
 	return goNext
+}
+
+// recreateReason is why setup-gcp's bootstrap would delete and recreate c no
+// matter what the installer sends it, or "" when it would not (see
+// gcp.Cluster.BootstrapRecreates). The region is the one bootstrap is given,
+// derived from the cluster's location the same way Setup derives GCE_REGION.
+func (s *clusterScreen) recreateReason(c gcp.Cluster) string {
+	region := (&state.Setup{Zone: c.Location}).Region()
+	return c.BootstrapRecreates(s.deps.Setup.ProjectID, region)
 }
 
 // probe checks the selection for an existing install, from cache when the
@@ -476,6 +493,12 @@ func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
 // pre-existing beta-API check.
 func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.Cmd {
 	switch {
+	case s.recreateReason(c) != "":
+		// First, ahead of the install guard: bootstrap would delete this
+		// cluster whatever else is true of it, so a teardown offered here
+		// would be work thrown away along with the cluster.
+		s.mode = "recreate"
+		return nil
 	case res.Partial():
 		s.mode = "partial"
 		return nil
@@ -586,6 +609,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st.ClusterName = name
 				st.ClusterIsNew = true
 				st.ClusterKVMReady = false
+				st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2 = "", "", false
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
@@ -667,6 +691,12 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				// verdict is the safe answer until the user re-probes.
 				s.mode = "list"
 				return nil
+			}
+			return nil
+
+		case "recreate":
+			if key == "b" || key == "esc" {
+				s.mode = "list"
 			}
 			return nil
 
@@ -814,6 +844,15 @@ func (s *clusterScreen) View(w int) string {
 				"running Substrate. Re-running the install over it is safe: upstream's\n"+
 				"deploy steps are idempotent.\n\n"+
 				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
+	case "recreate":
+		sel := s.clusters[s.cursor]
+		// Written as paragraphs for the panel to wrap, so it reads at 80
+		// columns beside the sidebar.
+		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 74)).Render(
+			theme.Bad.Render("setup-gcp would delete and recreate "+sel.Name+".")+"\n\n"+
+				"Its bootstrap rebuilds an existing cluster whose network differs from what it expects, without asking, and "+
+				s.recreateReason(sel)+".\n\n"+
+				"The installer will not run it against this cluster. Choose a cluster on a network in this project, or create a new one."))
 	case "confirm":
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 74)).Render(
 			theme.Warning.Render("This cluster cannot run Substrate as-is.")+"\n\n"+

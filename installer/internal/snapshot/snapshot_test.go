@@ -1009,6 +1009,40 @@ func TestFindSetupGCP(t *testing.T) {
 	}
 }
 
+// Bootstrap deletes and recreates an existing cluster whose network,
+// subnetwork or Dataplane V2 setting differs from the ones it is handed
+// (agent-substrate/substrate#2341), and the defaults match few real clusters:
+// GKE now gives many their own gke-<name>-subnet-<hash> subnet. So an
+// existing cluster has to be handed its own values, and ENABLE_DATAPLANE_V2
+// has to be explicit either way, since bootstrap registers no flag for it and
+// otherwise expects true.
+func TestBootstrapIsHandedAnExistingClustersOwnNetwork(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+
+	existing := testSetup(t)
+	existing.ClusterIsNew = false
+	existing.ClusterNetwork = "default"
+	existing.ClusterSubnetwork = "gke-prod-subnet-55edbf1e"
+	existing.ClusterDataplaneV2 = false
+	env := b.Bootstrap(existing).Env
+	for _, want := range []string{"NETWORK=default", "SUBNETWORK=gke-prod-subnet-55edbf1e", "ENABLE_DATAPLANE_V2=false"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("existing cluster: bootstrap env missing %q", want)
+		}
+	}
+
+	created := testSetup(t)
+	created.ClusterIsNew = true
+	created.Subnetwork = "my-subnet"
+	created.ClusterSubnetwork = "left-over-from-an-abandoned-selection"
+	env = b.Bootstrap(created).Env
+	for _, want := range []string{"SUBNETWORK=my-subnet", "ENABLE_DATAPLANE_V2=true"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("new cluster: bootstrap env missing %q", want)
+		}
+	}
+}
+
 func TestDeploySpecs(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
 	st := testSetup(t)

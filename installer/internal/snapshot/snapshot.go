@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
@@ -518,15 +519,23 @@ func HasEnvoyDockerfile(root string) bool {
 // context the throwaway KUBECONFIG from credentialLines does not have.
 // Empty means "use the current context" to both. exec.Cmd keeps the last
 // duplicate, so this overrides the inherited value.
+//
+// NETWORK, SUBNETWORK and ENABLE_DATAPLANE_V2 are sent for every run, and for
+// an existing cluster they are its own (see Setup.BootstrapNetwork): bootstrap
+// deletes and recreates an existing cluster whose settings differ from them.
+// ENABLE_DATAPLANE_V2 in particular has to be explicit, because bootstrap
+// registers no flag for it and inherits create cluster's default of true.
 func (b *Builder) env(st *state.Setup) []string {
+	network, subnetwork, dataplaneV2 := st.BootstrapNetwork()
 	env := []string{
 		"PROJECT_ID=" + st.ProjectID,
 		"PROJECT_NUMBER=" + st.ProjectNumber,
 		"GCE_REGION=" + st.Region(),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
-		"NETWORK=" + st.Network,
-		"SUBNETWORK=" + st.Subnetwork,
+		"NETWORK=" + network,
+		"SUBNETWORK=" + subnetwork,
+		"ENABLE_DATAPLANE_V2=" + strconv.FormatBool(dataplaneV2),
 		"GVISOR_NODE_MACHINE_TYPE=" + st.MachineType,
 		"BUCKET_NAME=" + st.BucketName,
 		"KUBECTL_CONTEXT=",

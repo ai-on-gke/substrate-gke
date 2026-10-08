@@ -240,6 +240,18 @@ type Setup struct {
 	ClusterIsNew    bool
 	ClusterKVMReady bool
 
+	// ClusterNetwork, ClusterSubnetwork and ClusterDataplaneV2 describe the
+	// existing cluster the run connects to, as gcloud listed it. Bootstrap is
+	// given these rather than Network and Subnetwork, which are the user's
+	// choices for a cluster the run creates: its reconcile path deletes and
+	// recreates an existing cluster whose network, subnetwork or datapath
+	// differ from what it was given (agent-substrate/substrate#2341), and the
+	// defaults match few real clusters. Kept apart so backing out of an
+	// existing cluster cannot leak its network into the create path.
+	ClusterNetwork     string
+	ClusterSubnetwork  string
+	ClusterDataplaneV2 bool
+
 	BucketName   string
 	KoDockerRepo string
 
@@ -290,6 +302,27 @@ func (s *Setup) MicroVM() bool { return s.SandboxClass == SandboxMicroVM }
 // gVisor.
 func (s *Setup) MicroVMActive() bool {
 	return s != nil && s.MicroVM() && s.MicroVMDeployed
+}
+
+// BootstrapNetwork returns the network, subnetwork and Dataplane V2 setting to
+// hand setup-gcp's bootstrap. For a cluster the run creates, the user's
+// choices, with Dataplane V2 on as upstream has always defaulted it. For an
+// existing cluster, the cluster's own, so bootstrap's comparison finds nothing
+// to recreate; a network gcloud did not list falls back to the user's, which
+// bootstrap then does not compare, since it skips the check when the cluster
+// reports none.
+func (s *Setup) BootstrapNetwork() (network, subnetwork string, dataplaneV2 bool) {
+	if s.ClusterIsNew {
+		return s.Network, s.Subnetwork, true
+	}
+	network, subnetwork = s.Network, s.Subnetwork
+	if s.ClusterNetwork != "" {
+		network = s.ClusterNetwork
+	}
+	if s.ClusterSubnetwork != "" {
+		subnetwork = s.ClusterSubnetwork
+	}
+	return network, subnetwork, s.ClusterDataplaneV2
 }
 
 // Prebuilt reports whether the install pulls published images rather than
