@@ -407,6 +407,11 @@ func (s *projectScreen) enableDone() tea.Cmd {
 			cause = comp.failed.Error()
 		}
 		s.errText = enableProblem(s.enableFor, cause)
+		// The billing panel says to link an account and press enter:
+		// another enable would fail the same way, so [e] is withdrawn.
+		if enableFailureKind(cause) == enableFailedBilling {
+			s.enableFor = ""
+		}
 		return nil
 	}
 	return s.submit()

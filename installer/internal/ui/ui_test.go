@@ -750,6 +750,22 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 				t.Errorf("%s: error should not mention %q, got %q", tc.name, n, scr.errText)
 			}
 		}
+		// A billing failure cannot be retried away, so it withdraws [e]:
+		// the hints drop it and e types again. Anything else keeps it.
+		billing := tc.name == "billing"
+		if offered := scr.enableFor != ""; offered == billing {
+			t.Errorf("%s: enableFor = %q, want the offer kept only for non-billing failures", tc.name, scr.enableFor)
+		}
+		if hints := scr.Hints(); (hints[0].Key == "e") == billing {
+			t.Errorf("%s: hints = %v", tc.name, hints)
+		}
+		if billing {
+			before := len(argv)
+			scr.Update(key("e"))
+			if scr.enabling != nil || len(argv) != before || scr.fields[0].input.Value() != "acmee" {
+				t.Errorf("billing: e should type, not re-run the enable; field=%q", scr.fields[0].input.Value())
+			}
+		}
 	}
 }
 
