@@ -14,7 +14,10 @@
 
 package gcp
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 const clusterListJSON = `[
   {
@@ -32,6 +35,7 @@ const clusterListJSON = `[
     "nodePools": [
       {
         "name": "kvm-pool",
+        "version": "1.36.4-gke.1247000",
         "config": {
           "machineType": "n2-standard-8",
           "advancedMachineFeatures": {
@@ -289,5 +293,69 @@ func TestReleaseTextMatchesItsComparison(t *testing.T) {
 		if tc.check(Cluster{MasterVersion: below.String() + ".0-gke.1"}) {
 			t.Errorf("a cluster at %s passes the check drawn at %s", below, tc.r)
 		}
+	}
+}
+
+// Pool versions come from the same gcloud listing as everything else, so a
+// cluster screen never shells out a second time to decide which remedy to
+// show. If the field stopped being read, every cluster would fall back to the
+// control plane's version and a 1.37 control plane with 1.36 pools would be
+// told its nodes need nothing.
+func TestParseClustersReadsPoolVersions(t *testing.T) {
+	clusters, err := ParseClusters([]byte(clusterListJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PoolVersion{{"kvm-pool", "1.36.4-gke.1247000"}}
+	if got := clusters[0].PoolVersions; !slices.Equal(got, want) {
+		t.Errorf("substrate-poc pools = %v, want %v", got, want)
+	}
+}
+
+// The kubelet implements pod certificate projection, so it is the pools'
+// versions that decide whether a late enablement leaves nodes unable to mount
+// — and GKE lets pools trail their control plane. Reading the control plane
+// instead tells a 1.37 cluster with 1.36 pools that nothing is needed, and its
+// first Substrate pod on an old node hangs on "unimplemented".
+func TestPoolsWithoutProjectionReadsThePoolsNotTheControlPlane(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		c         Cluster
+		wantPools []string
+		wantAny   bool
+	}{
+		{"1.37 control plane, 1.36 pool",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"old", "1.36.4-gke.1"}, {"new", "1.37.1-gke.1"}}},
+			[]string{"old"}, true},
+		{"every pool on 1.37",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"a", "1.37.1-gke.1"}}},
+			nil, false},
+		{"unreadable pool version counts as needing it",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"odd", ""}}},
+			[]string{"odd"}, true},
+		{"no pools listed falls back to the control plane",
+			Cluster{MasterVersion: "1.36.4-gke.1"}, nil, true},
+		{"no pools listed on 1.37",
+			Cluster{MasterVersion: "1.37.1-gke.1"}, nil, false},
+	} {
+		pools, any := tc.c.PoolsWithoutProjection()
+		if !slices.Equal(pools, tc.wantPools) || any != tc.wantAny {
+			t.Errorf("%s: got %v, %v; want %v, %v", tc.name, pools, any, tc.wantPools, tc.wantAny)
+		}
+	}
+}
+
+// MissingBetaAPIs is what decides whether provision is announced as a
+// ten-minute control-plane update, so it must track what bootstrap will do,
+// not readiness: a cluster below the floor that already serves both APIs is
+// not ready, and bootstrap has nothing to enable on it.
+func TestMissingBetaAPIsIsNotTheInverseOfReadiness(t *testing.T) {
+	old := Cluster{MasterVersion: "1.35.5-gke.1", BetaAPIs: RequiredBetaAPIs}
+	if old.SubstrateReady() || old.MissingBetaAPIs() {
+		t.Errorf("1.35 with both APIs: ready=%v missing=%v, want false/false", old.SubstrateReady(), old.MissingBetaAPIs())
+	}
+	half := Cluster{MasterVersion: "1.36.4-gke.1", BetaAPIs: RequiredBetaAPIs[:1]}
+	if !half.MissingBetaAPIs() {
+		t.Error("a cluster with only one of the two APIs must count as missing them")
 	}
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
@@ -52,6 +53,8 @@ func (s *provisionScreen) logComp() *execComp { return s.comp }
 
 func (s *provisionScreen) Hints() []Hint {
 	switch {
+	case s.comp.ok() && (len(s.deps.Setup.NodePoolsToReplace) > 0 || s.deps.Setup.ReplaceUnnamedPools):
+		return []Hint{{"enter", "pools replaced, turn on Substrate"}}
 	case s.comp.ok():
 		return []Hint{{"enter", "continue"}}
 	case s.comp.failed != nil:
@@ -88,24 +91,77 @@ func (s *provisionScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Provision GCP resources") + "\n")
+	if s.comp.ok() && (len(st.NodePoolsToReplace) > 0 || st.ReplaceUnnamedPools) {
+		// In place of the header and the log rather than under them: the
+		// checklist and its tail fill the window, and the clamp would cut
+		// exactly this. The log is still one [v] away.
+		b.WriteString("\n" + s.replacePoolsView(w))
+		return b.String()
+	}
+	// Wrapped to the content width: an unwrapped line is not folded by the
+	// terminal but cut by Bubble Tea's renderer, so at 80 columns most of a
+	// long header was simply not shown.
+	sub := theme.Subtle.Width(max(w-2, 20))
 	switch {
 	case st.ClusterIsNew:
-		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
+		b.WriteString(sub.Render(fmt.Sprintf(
 			"Creating cluster %s in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.Zone)) + "\n\n")
 	case st.EnableBetaAPIs:
-		// The cluster screen has just told the user this update is coming;
-		// the "only fills in the bucket" line below would contradict it
-		// while a ten-minute control-plane update runs underneath.
-		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
-			"Turning on the beta PodCertificate APIs for cluster %s — expect a control-plane update of roughly ten minutes, then the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
+		// The cluster screen has just told the user this update is coming,
+		// and it is rarely the only one. Bootstrap reconciles Workload
+		// Identity, managed OpenTelemetry and the Filestore CSI driver too,
+		// each its own control-plane update of about the same length; on a
+		// cluster it did not create, a run of forty minutes was measured.
+		b.WriteString(sub.Render(fmt.Sprintf(
+			"Turning on the beta PodCertificate APIs for %s: about ten minutes, and bootstrap may make other control-plane updates of the same length. Then the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
 	default:
-		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
-			"Cluster %s already exists; bootstrap is idempotent and only fills in the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
+		b.WriteString(sub.Render(fmt.Sprintf(
+			"Cluster %s already exists. Bootstrap fills in the bucket, IAM, and dashboards, and updates the cluster only where it differs from what Substrate needs.", st.ClusterName)) + "\n\n")
 	}
 	b.WriteString(s.comp.view(w))
 	if s.comp.ok() {
 		b.WriteString("\n" + theme.Good.Render("GCP resources are ready. Press [enter] to turn on Substrate."))
 	}
+	return b.String()
+}
+
+// replacePoolsView tells the user which node pools to replace before
+// Substrate is turned on, at the one point where it is both possible and not
+// yet too late: the beta APIs are on now, so a new pool's kubelets serve pod
+// certificate projection, and nothing of Substrate's has been scheduled yet.
+// Its own control plane mounts pod certificates, so the next step would hang
+// on any node left over from before.
+//
+// The pool is replaced rather than upgraded in place: an upgrade to the
+// version a pool already runs is the obvious command, and GKE skips it
+// without replacing a single node (measured; see agent-substrate/substrate#1819).
+// The installer does not do it itself because moving the cluster's
+// workloads between pools is the user's call to make.
+//
+// Plain text rather than a bordered panel, one pool name per line, and
+// commands broken at flags: it has to fit beside the sidebar at 80×24, about
+// 45 columns by 17 rows, without the wrapper splitting a name or a flag.
+func (s *provisionScreen) replacePoolsView(w int) string {
+	st := s.deps.Setup
+	cluster, location := snapshot.ShellQuote(st.ClusterName), snapshot.ShellQuote(st.Zone)
+	var b strings.Builder
+	b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("Replace these pools before Substrate starts:") + "\n")
+	if len(st.NodePoolsToReplace) == 0 {
+		b.WriteString("  • every pool below " + gcp.PodCertificateGARelease.String() + "\n")
+	}
+	for _, p := range st.NodePoolsToReplace {
+		b.WriteString("  • " + p + "\n")
+	}
+	b.WriteString("\n" + lipgloss.NewStyle().Width(max(w-2, 20)).Render(
+		"Their nodes predate the beta APIs, so Substrate's pods cannot mount pod certificates on them. For each, add a pool of the same machine type and size, then delete the old one:") + "\n\n")
+	b.WriteString(theme.Fainted.Render(
+		"gcloud container node-pools create \\\n" +
+			"  NEW --cluster " + cluster + " \\\n" +
+			"  --location " + location + " \\\n" +
+			"  --machine-type … --num-nodes …\n" +
+			"gcloud container node-pools delete \\\n" +
+			"  OLD --cluster " + cluster + " \\\n" +
+			"  --location " + location))
 	return b.String()
 }
 

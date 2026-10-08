@@ -261,6 +261,16 @@ type Setup struct {
 	// itself from this, having just told the user to expect it.
 	EnableBetaAPIs bool
 
+	// NodePoolsToReplace names the chosen cluster's pools whose nodes will
+	// not mount pod certificates once provision turns the beta APIs on (see
+	// gcp.Cluster.PoolsWithoutProjection). They have to be replaced before
+	// Substrate is turned on, not after: its own control plane mounts pod
+	// certificates, so step 6 would hang on them. Provision lists them, with
+	// the commands, when it finishes. ReplaceUnnamedPools is the same verdict
+	// for a cluster whose pools gcloud did not list by version.
+	NodePoolsToReplace  []string
+	ReplaceUnnamedPools bool
+
 	// ClusterVersion shapes a cluster the install creates and is ignored for
 	// one it connects to: upstream's bootstrap reads it only on the creation
 	// path. A bare minor is fine — GKE resolves it to the newest patch it

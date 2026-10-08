@@ -1171,14 +1171,20 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	}
 }
 
+// flat collapses a rendered view to single-spaced words, dropping panel
+// borders, so assertions about copy survive the panel re-wrapping it at a
+// different width.
+func flat(view string) string {
+	return strings.Join(strings.Fields(strings.NewReplacer("│", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ", "─", " ").Replace(view)), " ")
+}
+
 // A cluster missing the beta APIs is stopped at the confirmation whatever its
-// release: upstream's controllers are built against the beta types, so serving
-// the same APIs as GA exempts nobody. What the release changes is the remedy,
-// and all three are materially different — below 1.36 nothing that can be
-// enabled makes the cluster supported, at 1.36 the repair works but costs
-// replacing every node pool, from 1.37 it costs nothing. Offering the wrong one
-// sends someone to rebuild a cluster that needed ten minutes, or leaves them
-// watching pods that will never mount.
+// release. What the release changes is the remedy, and all three are
+// materially different — below 1.36 nothing that can be enabled makes the
+// cluster supported, on pools below 1.37 the repair works but costs replacing
+// them, from 1.37 it costs nothing. Offering the wrong one sends someone to
+// rebuild a cluster that needed ten minutes, or leaves them watching pods
+// that will never mount.
 func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
@@ -1189,21 +1195,21 @@ func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 		t.Fatalf("1.37 cluster with no beta APIs: step=%v mode=%q, want the confirmation",
 			app.mach.Current(), scr.mode)
 	}
-	if view := app.View(); !strings.Contains(view, "keep working as they are") || strings.Contains(view, "node-pools") {
+	if view := flat(scr.View(120)); !strings.Contains(view, "need nothing else") || strings.Contains(view, "must be replaced") {
 		t.Errorf("a 1.37 confirmation should promise no node pool replacement:\n%s", view)
 	}
 
 	press("n")          // back to the list
-	press("3", "enter") // ml-staging: 1.36, no beta APIs enabled
+	press("3", "enter") // ml-staging: 1.36 pools, no beta APIs enabled
 	if scr.mode != "confirm" {
 		t.Fatalf("1.36 cluster: mode=%q, want the confirmation", scr.mode)
 	}
-	// The remedy is a replacement pool, never an upgrade to the version the
-	// pool already runs: that is the command anyone would reach for, and GKE
-	// skips it without replacing a node, so the pods keep failing to mount.
-	view := app.View()
-	if !strings.Contains(view, "node-pools create") || !strings.Contains(view, "--cluster 'ml-staging'") {
-		t.Errorf("a 1.36 confirmation should spell out the node pool replacement:\n%s", view)
+	// Never an upgrade to the version the pool already runs: that is the
+	// command anyone would reach for, and GKE skips it without replacing a
+	// node, so the pods keep failing to mount.
+	view := flat(scr.View(120))
+	if !strings.Contains(view, "2 node pools run below "+gcp.PodCertificateGARelease.String()+" and must be replaced before Substrate starts") {
+		t.Errorf("a 1.36 confirmation should say the pools must be replaced before Substrate starts:\n%s", view)
 	}
 	if strings.Contains(view, "clusters upgrade") {
 		t.Errorf("a 1.36 confirmation must not offer a same-version upgrade, which GKE skips:\n%s", view)
@@ -1214,19 +1220,51 @@ func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 	if scr.mode != "confirm" {
 		t.Fatalf("1.33 cluster: mode=%q, want the confirmation", scr.mode)
 	}
-	view = app.View()
-	if !strings.Contains(view, "Upgrade this cluster's control plane to "+gcp.MinSupportedRelease.String()) {
-		t.Errorf("a pre-%s confirmation should ask for a control-plane upgrade:\n%s", gcp.MinSupportedRelease.String(), view)
+	view = flat(scr.View(120))
+	if !strings.Contains(view, "Upgrade its control plane to "+gcp.MinSupportedRelease.String()) {
+		t.Errorf("a pre-%s confirmation should ask for a control-plane upgrade:\n%s", gcp.MinSupportedRelease, view)
 	}
 	// Enabling the beta APIs is not the fix below the floor: on 1.33 GKE
 	// rejects the request outright, and even where it would be accepted the
 	// release is not one Substrate runs on. 'y' still works, but must not be
 	// sold as the way through.
-	if strings.Contains(view, "the provision step turns them on") {
-		t.Errorf("a pre-%s confirmation must not offer enablement as the fix:\n%s", gcp.MinSupportedRelease.String(), view)
+	if strings.Contains(view, "has provision turn them on") {
+		t.Errorf("a pre-%s confirmation must not offer enablement as the fix:\n%s", gcp.MinSupportedRelease, view)
 	}
-	if !strings.Contains(view, "unsupported") {
-		t.Errorf("a pre-%s confirmation should mark 'y' as unsupported:\n%s", gcp.MinSupportedRelease.String(), view)
+	if !strings.Contains(flat(app.View()), "use it anyway (unsupported)") {
+		t.Errorf("a pre-%s confirmation should mark 'y' as unsupported:\n%s", gcp.MinSupportedRelease, app.View())
+	}
+}
+
+// The panels a cluster without the beta APIs leads to have to be readable in
+// a small terminal, beside the sidebar. At 80×24 the first version was clamped
+// after its first lines, hiding every remedy and the commands, and wrapped API
+// names mid-word. The confirmation's last line and the replacement block's
+// last command line are what get cut first, so those are what is checked,
+// and a split pool name is checked for directly.
+func TestConfirmAndReplacementPanelsFitSmallTerminals(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {120, 40}} {
+		for _, row := range []string{"2", "3", "4"} {
+			app := testApp(t)
+			press := pressToCluster(t, app)
+			pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+			press(row, "enter")
+			if view := app.View(); !strings.Contains(view, "╰") {
+				t.Errorf("%dx%d, row %s: the confirmation is clamped before its end:\n%s", size[0], size[1], row, view)
+			}
+		}
+
+		app := testApp(t)
+		press := pressToCluster(t, app)
+		pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		press("3", "enter", "y") // ml-staging, through provision
+		view := app.View()
+		if strings.Count(view, "--location 'us-central1'") < 2 {
+			t.Errorf("%dx%d: the replacement commands are clamped:\n%s", size[0], size[1], view)
+		}
+		if !strings.Contains(view, "• default-pool") || !strings.Contains(view, "• gpu-pool") {
+			t.Errorf("%dx%d: a pool name is split or missing:\n%s", size[0], size[1], view)
+		}
 	}
 }
 
@@ -1338,9 +1376,7 @@ func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
 	press := pressToCluster(t, app)
 
 	press("3", "enter") // ml-staging: 1.36, no beta APIs
-	// The screen's own view, not the frame: the panel is tall enough that the
-	// app clamps it to the test window and the last lines are cut.
-	view := app.cur.(*clusterScreen).View(120)
+	view := flat(app.View())
 	if !strings.Contains(view, "made at 1.38 with the APIs on") {
 		t.Errorf("the confirmation should quote the chosen version 1.38:\n%s", view)
 	}
@@ -1350,35 +1386,45 @@ func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
 }
 
 // After 'y' on a cluster without the beta APIs, provision is about to run a
-// control-plane update of roughly ten minutes — the confirmation just said so.
+// control-plane update of about ten minutes — the confirmation just said so.
 // A provision screen that then promises to "only fill in the bucket" and a
 // checklist that says it is creating the cluster leave the user thinking the
-// install has hung.
+// install has hung. Where the pools predate the APIs, provision is also where
+// the user learns which to replace: after it, Substrate's own control plane
+// is scheduled, and it mounts pod certificates.
 func TestProvisionSaysWhenItTurnsOnTheBetaAPIs(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
+	press("4", "enter", "y") // substrate-ga: 1.37 pools, no beta APIs
+	if app.mach.Current() != state.Provision || !app.deps.Setup.EnableBetaAPIs {
+		t.Fatalf("step=%v EnableBetaAPIs=%v, want Provision/true", app.mach.Current(), app.deps.Setup.EnableBetaAPIs)
+	}
+	view := flat(app.cur.View(120))
+	if !strings.Contains(view, "Turning on the beta PodCertificate APIs for substrate-ga") ||
+		!strings.Contains(view, "Turn on the beta PodCertificate APIs (control-plane update)") {
+		t.Errorf("provision should say it is turning the APIs on, in its header and its checklist:\n%s", view)
+	}
+	if strings.Contains(view, "only fills in the bucket") || strings.Contains(view, "Replace these pools") {
+		t.Errorf("provision on 1.37 pools: wrong header or a replacement nobody needs:\n%s", view)
+	}
 
-	press("3", "enter", "y") // ml-staging: 1.36, no beta APIs; enable and continue
-	if app.mach.Current() != state.Provision {
-		t.Fatalf("step = %v, want Provision", app.mach.Current())
+	old := testApp(t)
+	press = pressToCluster(t, old)
+	press("3", "enter", "y") // ml-staging: 1.36 pools
+	if got := strings.Join(old.deps.Setup.NodePoolsToReplace, ","); got != "default-pool,gpu-pool" {
+		t.Errorf("pools to replace = %q, want default-pool,gpu-pool", got)
 	}
-	if !app.deps.Setup.EnableBetaAPIs {
-		t.Fatal("choosing a cluster without the beta APIs did not record that provision enables them")
-	}
-	view := app.View()
-	if !strings.Contains(view, "Turning on the beta PodCertificate APIs") {
-		t.Errorf("provision should say it is turning the APIs on:\n%s", view)
-	}
-	if strings.Contains(view, "only fills in the bucket") {
-		t.Errorf("provision promises a quick top-up while a control-plane update runs:\n%s", view)
+	if view := flat(old.View()); !strings.Contains(view, "Replace these pools before Substrate starts") ||
+		!strings.Contains(view, "pools replaced, turn on Substrate") {
+		t.Errorf("provision on 1.36 pools should end on the replacement, not 'turn on Substrate':\n%s", view)
 	}
 
 	ready := testApp(t)
 	press = pressToCluster(t, ready)
 	press("1", "enter") // substrate-poc: ready
-	if ready.mach.Current() != state.Provision || ready.deps.Setup.EnableBetaAPIs {
-		t.Errorf("a ready cluster: step=%v EnableBetaAPIs=%v, want Provision/false",
-			ready.mach.Current(), ready.deps.Setup.EnableBetaAPIs)
+	if ready.mach.Current() != state.Provision || ready.deps.Setup.EnableBetaAPIs || len(ready.deps.Setup.NodePoolsToReplace) > 0 {
+		t.Errorf("a ready cluster: step=%v EnableBetaAPIs=%v pools=%v, want Provision/false/none",
+			ready.mach.Current(), ready.deps.Setup.EnableBetaAPIs, ready.deps.Setup.NodePoolsToReplace)
 	}
 }
 
@@ -1427,6 +1473,97 @@ func TestAReloadDuringTheConfirmationKeepsTheSelection(t *testing.T) {
 	}
 	_ = s.View(120)
 	_ = s.Hints()
+}
+
+// drivenClusterScreen is a cluster screen on the dry-run fixtures, driven
+// directly so a test can deliver a clustersMsg at any moment it likes.
+func drivenClusterScreen(t *testing.T) (*clusterScreen, func(tea.Msg), []gcp.Cluster) {
+	t.Helper()
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  execx.DryRun{Delay: time.Millisecond},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	deps.Setup.ProjectID = "acme"
+	s := newClusterScreen(deps)
+	drive := func(msg tea.Msg) {
+		t.Helper()
+		for queue := []tea.Msg{msg}; len(queue) > 0; {
+			m := queue[0]
+			queue = queue[1:]
+			queue = append(queue, runCmd(s.Update(m))...)
+		}
+	}
+	clusters, err := deps.GCP.ListClusters(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive(clustersMsg{owner: s, clusters: clusters})
+	return s, drive, clusters
+}
+
+// A reload that lands mid-confirmation after the APIs were turned on out of
+// band must not leave the panel saying they are missing: 'y' through it
+// would record nothing to enable, and provision would then contradict the
+// screen the user just read.
+func TestAReloadAfterTheAPIsWereTurnedOnLeavesTheConfirmation(t *testing.T) {
+	s, drive, clusters := drivenClusterScreen(t)
+	s.cursor = 2 // ml-staging
+	drive(key("enter"))
+	if s.mode != "confirm" {
+		t.Fatalf("mode = %q, want confirm", s.mode)
+	}
+	fixed := slices.Clone(clusters)
+	fixed[2].BetaAPIs = gcp.RequiredBetaAPIs
+	drive(clustersMsg{owner: s, clusters: fixed})
+	if s.mode != "list" || s.clusters[s.cursor].Name != "ml-staging" {
+		t.Errorf("mode=%q cursor=%d, want the list with ml-staging still selected", s.mode, s.cursor)
+	}
+}
+
+// A reload is no reason to disturb work in progress on the selected cluster.
+// A failed one would otherwise empty the list under an open confirmation, and
+// one that lands during a teardown would swap the list the teardown's
+// completion reads its cluster from — or, as an earlier version did, stop the
+// ate-setup delete partway through.
+func TestAReloadDoesNotDisturbWorkInProgress(t *testing.T) {
+	s, drive, clusters := drivenClusterScreen(t)
+	s.cursor = 2 // ml-staging
+	drive(key("enter"))
+	drive(clustersMsg{owner: s, err: errors.New("transient gcloud failure")})
+	if s.mode != "confirm" || s.err != nil || len(s.clusters) != len(clusters) {
+		t.Errorf("failed reload during confirm: mode=%q err=%v clusters=%d, want it ignored", s.mode, s.err, len(s.clusters))
+	}
+
+	s.mode = "teardown"
+	drive(clustersMsg{owner: s, clusters: clusters[:1]})
+	drive(clustersMsg{owner: s, err: errors.New("transient gcloud failure")})
+	if s.mode != "teardown" || len(s.clusters) != len(clusters) || s.clusters[s.cursor].Name != "ml-staging" {
+		t.Errorf("reload during teardown: mode=%q clusters=%d, want the teardown and its list untouched", s.mode, len(s.clusters))
+	}
+}
+
+// A cluster below the floor that already serves both APIs is not ready, but
+// bootstrap has nothing to enable on it. Recording an enablement would have
+// provision announce a ten-minute update while setup-gcp logs that the APIs
+// "match perfectly" and does nothing.
+func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
+	s, drive, _ := drivenClusterScreen(t)
+	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
+		Name: "old-with-apis", Location: "us-west1-c", Status: "RUNNING",
+		MasterVersion: "1.35.5-gke.1163012", NodeCount: 1, BetaAPIs: gcp.RequiredBetaAPIs,
+	}}})
+	s.cursor = 0
+	drive(key("enter"))
+	if s.mode != "confirm" {
+		t.Fatalf("mode = %q, want the below-the-floor confirmation", s.mode)
+	}
+	drive(key("y"))
+	if st := s.deps.Setup; st.ClusterName != "old-with-apis" || st.EnableBetaAPIs || len(st.NodePoolsToReplace) > 0 || st.ReplaceUnnamedPools {
+		t.Errorf("chose %q with EnableBetaAPIs=%v pools=%v unnamed=%v, want nothing to enable or replace",
+			st.ClusterName, st.EnableBetaAPIs, st.NodePoolsToReplace, st.ReplaceUnnamedPools)
+	}
 }
 
 // Outside --dry-run the teardown must re-probe for real: the runner flips to

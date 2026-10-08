@@ -123,6 +123,38 @@ type Cluster struct {
 	// KVMReady reports whether any node pool in the cluster has /dev/kvm
 	// available (nested virtualization enabled or a bare-metal machine type).
 	KVMReady bool
+	// PoolVersions is each node pool's name and Kubernetes version, in
+	// gcloud's order. Empty when gcloud listed no pools (Autopilot) or for a
+	// fixture that did not bother.
+	PoolVersions []PoolVersion
+}
+
+// PoolVersion is one node pool's name and the version its kubelets run.
+type PoolVersion struct{ Name, Version string }
+
+// PoolsWithoutProjection returns the node pools whose kubelets will not serve
+// pod certificate projection to a pod scheduled on them after the beta APIs
+// are turned on in place, which is to say every pool below
+// PodCertificateGARelease: the feature is gated through 1.36 and a kubelet
+// that was already running never picks it up.
+//
+// It reads the pools' versions, not the control plane's, because the kubelet
+// is what implements the projection and GKE lets node pools run a minor or
+// two behind their control plane: a 1.37 cluster can still have 1.36 nodes.
+// A pool whose version cannot be read is included, on the same reasoning as
+// PodCertificateGA: a spurious "replace this pool" costs minutes, a missing
+// one costs an install that hangs on a mount. With no pools listed it falls
+// back to the control plane's version and names no pools.
+func (c Cluster) PoolsWithoutProjection() (pools []string, any bool) {
+	if len(c.PoolVersions) == 0 {
+		return nil, !c.PodCertificateGA()
+	}
+	for _, p := range c.PoolVersions {
+		if !(Cluster{MasterVersion: p.Version}).PodCertificateGA() {
+			pools = append(pools, p.Name)
+		}
+	}
+	return pools, len(pools) > 0
 }
 
 // SupportedRelease reports whether this cluster's release is one Substrate is
@@ -162,22 +194,29 @@ func (c Cluster) PodCertificateGA() bool {
 	return ok && atLeast
 }
 
+// MissingBetaAPIs reports whether any of RequiredBetaAPIs is not enabled on
+// the cluster, which is exactly when setup-gcp's bootstrap will run its
+// control-plane update to turn them on. It is deliberately not the inverse of
+// SubstrateReady: a cluster below the floor that already serves both APIs is
+// not ready, yet bootstrap has nothing to enable on it, and anything that
+// promises the user a ten-minute update has to ask this question instead.
+func (c Cluster) MissingBetaAPIs() bool {
+	for _, want := range RequiredBetaAPIs {
+		if !slices.Contains(c.BetaAPIs, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // SubstrateReady reports whether the cluster can run Substrate: a supported
 // release, with the beta APIs enabled on it. Both halves are load-bearing and
 // neither substitutes for the other — a 1.37 cluster without the beta APIs is
 // not ready, because the pinned upstream still reads ClusterTrustBundle only
-// through v1beta1 (see RequiredBetaAPIs); and a 1.35 cluster with them is not ready either,
-// because the release itself is outside the supported set.
+// through v1beta1 (see RequiredBetaAPIs); and a 1.35 cluster with them is not
+// ready either, because the release itself is outside the supported set.
 func (c Cluster) SubstrateReady() bool {
-	if !c.SupportedRelease() {
-		return false
-	}
-	for _, want := range RequiredBetaAPIs {
-		if !slices.Contains(c.BetaAPIs, want) {
-			return false
-		}
-	}
-	return true
+	return c.SupportedRelease() && !c.MissingBetaAPIs()
 }
 
 // atLeastMinor reports whether a GKE version names a Kubernetes release at or
@@ -299,12 +338,14 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 			// Supported, but too old for the projection to be GA: the repair
 			// works and costs replacing the pool behind all 6 nodes.
 			{Name: "ml-staging", Location: "us-central1", Status: "RUNNING",
-				MasterVersion: "1.36.4-gke.1247000", NodeCount: 6},
+				MasterVersion: "1.36.4-gke.1247000", NodeCount: 6,
+				PoolVersions: []PoolVersion{{"default-pool", "1.36.4-gke.1247000"}, {"gpu-pool", "1.36.4-gke.1247000"}}},
 			// Missing the beta APIs on a release that also serves them as GA:
 			// not ready either, but repaired by enabling them on the running
 			// cluster, with none of the pool replacement ml-staging needs.
 			{Name: "substrate-ga", Location: "us-west1-c", Status: "RUNNING",
-				MasterVersion: "1.37.1-gke.1000000", NodeCount: 2},
+				MasterVersion: "1.37.1-gke.1000000", NodeCount: 2,
+				PoolVersions: []PoolVersion{{"default-pool", "1.37.1-gke.1000000"}}},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
 			{Name: "substrate-partial", Location: "us-west1-c", Status: "RUNNING",
@@ -319,7 +360,9 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 }
 
 type rawNodePool struct {
-	Config struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Config  struct {
 		MachineType             string `json:"machineType"`
 		AdvancedMachineFeatures struct {
 			EnableNestedVirtualization bool `json:"enableNestedVirtualization"`
@@ -338,6 +381,14 @@ func kvmReady(pools []rawNodePool) bool {
 		}
 	}
 	return false
+}
+
+func poolVersions(pools []rawNodePool) []PoolVersion {
+	var out []PoolVersion
+	for _, p := range pools {
+		out = append(out, PoolVersion{p.Name, p.Version})
+	}
+	return out
 }
 
 // ClusterKVMReady queries gcloud to check whether the named cluster currently
@@ -402,6 +453,7 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			NodeCount:     r.CurrentNodeCount,
 			BetaAPIs:      r.EnableK8sBetaApis.EnabledApis,
 			KVMReady:      kvmReady(r.NodePools),
+			PoolVersions:  poolVersions(r.NodePools),
 		})
 	}
 	return clusters, nil

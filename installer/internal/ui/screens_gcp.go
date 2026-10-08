@@ -513,7 +513,12 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.Zone = c.Location
 	st.ClusterIsNew = false
 	st.ClusterKVMReady = c.KVMReady
-	st.EnableBetaAPIs = !c.SubstrateReady()
+	st.EnableBetaAPIs = c.MissingBetaAPIs()
+	st.NodePoolsToReplace, st.ReplaceUnnamedPools = nil, false
+	if st.EnableBetaAPIs {
+		pools, any := c.PoolsWithoutProjection()
+		st.NodePoolsToReplace, st.ReplaceUnnamedPools = pools, any && len(pools) == 0
+	}
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -606,15 +611,23 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		s.loading = false
-		prev, hadSelection := s.selected()
-		s.clusters, s.err = m.clusters, m.err
-		s.cursor = len(s.clusters) // default to "create new"
 		// Every mode but the list and the name prompt is about one cluster,
-		// read through s.cursor. A reload landing mid-way (two [r]s in
-		// flight) must not leave such a mode pointing past the new list, so
-		// keep the selection if the cluster is still there and drop back to
-		// the list if it is not.
+		// read through s.cursor, and a reload can land in any of them (two
+		// [r]s in flight). Which reloads are allowed to change the screen
+		// depends on what it is doing with that cluster.
 		if s.mode != "list" && s.mode != "name" {
+			// A probe or teardown is running against the selection, and its
+			// completion reads s.clusters[s.cursor]. Swapping the list under
+			// it would act on the wrong cluster, or index past the end; and
+			// a failed reload is no reason to stop an ate-setup delete
+			// mid-flight. The list stays as it was; [r] after it finishes
+			// picks up anything new.
+			if s.mode == "probing" || s.mode == "teardown" || m.err != nil {
+				return nil
+			}
+			prev, hadSelection := s.selected()
+			s.clusters = m.clusters
+			s.cursor = len(s.clusters)
 			kept := false
 			if hadSelection {
 				for i, c := range s.clusters {
@@ -624,13 +637,20 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 					}
 				}
 			}
-			if !kept {
-				if s.comp != nil {
-					s.comp.stop()
-				}
+			switch {
+			case !kept:
+				s.mode = "list"
+			case s.mode == "confirm" && s.clusters[s.cursor].SubstrateReady():
+				// The APIs were turned on out of band between the reloads.
+				// The confirmation is about a problem the cluster no longer
+				// has, and 'y' through it would record nothing to enable.
+				// Back to the list, where the row now badges ready.
 				s.mode = "list"
 			}
+			return s.bgProbes()
 		}
+		s.clusters, s.err = m.clusters, m.err
+		s.cursor = len(s.clusters) // default to "create new"
 		return s.bgProbes()
 
 	case bgProbeMsg:
@@ -672,6 +692,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st.ClusterIsNew = true
 				st.ClusterKVMReady = false
 				st.EnableBetaAPIs = false
+				st.NodePoolsToReplace, st.ReplaceUnnamedPools = nil, false
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
@@ -799,16 +820,6 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-// newClusterVersion is the release a cluster created on this run comes up at:
-// the advanced track's choice, or the default. The copy quotes it, so a user
-// who asked for 1.38 is not told new clusters come at 1.36.
-func (s *clusterScreen) newClusterVersion() string {
-	if v := s.deps.Setup.ClusterVersion; v != "" {
-		return v
-	}
-	return state.DefaultClusterVersion
-}
-
 func (s *clusterScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
@@ -849,6 +860,12 @@ func (s *clusterScreen) View(w int) string {
 		} else if s.bgPending[c.Name+"/"+c.Location] {
 			badge += theme.Fainted.Render(" · checking…")
 		}
+		// The confirmation needs every row the terminal has: at 80×24 the
+		// full list leaves it a handful, and the remedy was being clamped
+		// away. While it is open the list shrinks to the row it is about.
+		if s.mode == "confirm" && i != s.cursor {
+			continue
+		}
 		row := fmt.Sprintf("[%d] %-24s %-14s %-18s %2d nodes  %s", i+1, c.Name, c.Location, c.MasterVersion, c.NodeCount, badge)
 		if i == s.cursor {
 			b.WriteString(theme.Selected.Render(" "+row+" ") + "\n")
@@ -857,9 +874,11 @@ func (s *clusterScreen) View(w int) string {
 		}
 	}
 	createRow := fmt.Sprintf("[%d] ＋ Create a new cluster (recommended)", len(s.clusters)+1)
-	if s.cursor == len(s.clusters) {
+	switch {
+	case s.mode == "confirm":
+	case s.cursor == len(s.clusters):
 		b.WriteString(theme.Selected.Render(" "+createRow+" ") + "\n")
-	} else {
+	default:
 		b.WriteString(theme.Subtle.Render("  "+createRow) + "\n")
 	}
 
@@ -920,68 +939,65 @@ func (s *clusterScreen) View(w int) string {
 				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
 	case "confirm":
 		sel := s.clusters[s.cursor]
-		// Three outcomes, and the release picks which. Below the floor there is
-		// nothing to enable that would help; above it the request always
-		// works, but below the GA release the kubelet honors pod certificate
-		// projection only on nodes created after it, so the existing ones
-		// mount "unimplemented" until their pool is replaced. Say which case
-		// this is rather than making the user find out at deploy time.
-		var lede, fix, keys string
+		// Three outcomes, and the release picks which: below the floor nothing
+		// that can be enabled helps; above it provision turns the APIs on in
+		// place, and the only question left is whether the existing node
+		// pools have to be replaced too.
+		//
+		// Written as paragraphs for the panel to wrap, with no token longer
+		// than the narrowest panel (about 40 columns at 80×24, beside the
+		// sidebar): hard-wrapped lines and full API names broke mid-word
+		// there, and the panel was taller than the window. The keys are not
+		// repeated here; the bottom bar always shows them, outside the clamp.
+		// The replacement commands are not here either — they are needed
+		// after provision, so that is where provision shows them.
+		version := s.deps.Setup.ClusterVersion
+		var title string
+		var paras []string
 		switch {
 		case !sel.SupportedRelease():
-			lede = "Its release is below " + gcp.MinSupportedRelease.String() + ", the oldest Substrate is supported on.\n"
+			title = sel.Name + " is below " + gcp.MinSupportedRelease.String() + ", the oldest release Substrate supports."
+			lede := "Its control plane runs " + sel.MasterVersion + "."
 			// Only worth saying where it is true. From 1.35 GKE accepts the
 			// enablement happily; such a cluster is unsupported, not broken,
 			// and quoting an error it would never return sends the user
 			// looking for a problem that is not there.
 			if !sel.BetaAPIsAvailable() {
-				lede += "GKE will not even enable them there: \"Beta API … is not available\n" +
-					"in version " + sel.MasterVersion + "\".\n"
+				lede += " GKE will not even enable the beta PodCertificate APIs there."
 			}
-			fix = "  • Upgrade this cluster's control plane to " + gcp.MinSupportedRelease.String() + " or newer first,\n" +
-				"    then come back — from there it is enabled in place.\n" +
-				"  • Or create a new cluster instead: the installer makes them at\n" +
-				"    " + s.newClusterVersion() + " with the APIs already on.\n"
-			keys = theme.Key.Render("[y]") + " use it anyway (unsupported)   " + theme.Key.Render("[esc]") + " choose another"
+			paras = []string{
+				lede,
+				"Upgrade its control plane to " + gcp.MinSupportedRelease.String() + " or newer and come back, or [esc] and create a new cluster, made at " + version + " with the APIs on.",
+			}
 		default:
-			lede = "GKE serves them only for clusters that opted in, and this one did not.\n" +
-				"It is fixable without recreating the cluster.\n"
-			fix = "  • Continue here: the provision step turns them on for this cluster.\n" +
-				"    Expect a control-plane update of roughly ten minutes.\n"
-			if sel.PodCertificateGA() {
-				fix += "    Its nodes keep working as they are — pod certificate projection\n" +
-					"    is GA on " + sel.MasterVersion + ".\n" +
-					"  • Or create a new cluster instead, which is made with them on.\n"
-			} else {
-				// Replacing the pool, not upgrading it in place. An upgrade to
-				// the version a pool already runs is the obvious command, and
-				// GKE skips it without replacing a single node (measured; see
-				// agent-substrate/substrate#1819). Kept as short as it is
-				// because the panel already fills a 40-row terminal, and the
-				// key line at the bottom is the part that must stay visible.
-				fix += "    One catch on " + sel.MasterVersion + ": the kubelet serves pod certificate\n" +
-					"    projection only on nodes created after that update, so each\n" +
-					"    existing node pool must be replaced or pods fail to mount with\n" +
-					"    \"unimplemented\". After provision, add a pool, move workloads:\n" +
-					"    gcloud container node-pools create <new-pool> \\\n" +
-					"      --cluster " + snapshot.ShellQuote(sel.Name) + " --location " + snapshot.ShellQuote(sel.Location) + " ...\n" +
-					"    then delete the old pool with `gcloud container node-pools delete`.\n" +
-					"  • Or create a new cluster instead, made at " + s.newClusterVersion() + " with the APIs on.\n"
+			title = sel.Name + ": the beta PodCertificate APIs are off."
+			paras = []string{
+				"[y] has provision turn them on in place, a control-plane update of about ten minutes.",
 			}
-			keys = theme.Key.Render("[y]") + " enable them and continue   " + theme.Key.Render("[esc]") + " choose another"
+			switch pools, any := sel.PoolsWithoutProjection(); {
+			case !any:
+				paras = append(paras, "Its nodes need nothing else: pod certificate projection is GA in their kubelets.")
+			case len(pools) > 0:
+				noun := "pool"
+				if len(pools) > 1 {
+					noun = "pools"
+				}
+				paras = append(paras, fmt.Sprintf("%d node %s run below %s and must be replaced before Substrate starts; provision shows how.", len(pools), noun, gcp.PodCertificateGARelease))
+			default:
+				paras = append(paras, "Its nodes run below "+gcp.PodCertificateGARelease.String()+", so its node pools must be replaced before Substrate starts; provision shows how.")
+			}
+			paras = append(paras, "Or [esc] and create a new cluster, made at "+version+" with the APIs on.")
 		}
-		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 78)).Render(
-			theme.Warning.Render("This cluster cannot run Substrate as-is.")+"\n\n"+
-				"Substrate's controllers speak the beta PodCertificate APIs\n"+
-				"("+strings.Join(gcp.RequiredBetaAPIs, ",\n ")+").\n"+
-				lede+"\n"+
-				theme.Title.Render("Ways forward:")+"\n"+fix+"\n"+keys))
+		// No spacer line above it: at 80×24 that line is the panel's bottom
+		// border.
+		b.WriteString(theme.ErrorPanel.Width(min(w-4, 78)).Render(
+			theme.Warning.Render(title) + "\n\n" + strings.Join(paras, "\n\n")))
 	default:
 		b.WriteString("\n" + theme.Subtle.Render(
 			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer, plus the beta PodCertificate APIs,\n"+
 				"which GKE serves only for clusters that opted in. A cluster without them\n"+
 				"is fixed in place by the provision step — though below "+gcp.PodCertificateGARelease.String()+" its node\n"+
-				"pools must be replaced afterward. New clusters are created at "+s.newClusterVersion()+"."))
+				"pools must be replaced afterward. New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
 	}
 	return b.String()
 }
