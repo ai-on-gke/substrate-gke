@@ -205,6 +205,40 @@ func TestVerifyCommitReportsTheEnvoyDockerfile(t *testing.T) {
 	}
 }
 
+// ate-setup declared --image-repo in root.go until v0.4.0 moved it to the
+// config package, where root.go still exists but no longer names it. Both
+// trees install pre-built images; one where neither file declares it does not.
+func TestVerifyCommitFindsTheImageFlags(t *testing.T) {
+	remote, run := testRemote(t)
+	write := func(path, content string) string {
+		t.Helper()
+		full := filepath.Join(remote, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", path)
+		run("commit", "--quiet", "-m", path)
+		return run("rev-parse", "HEAD")
+	}
+	root, setting := imageFlagsPaths[0], imageFlagsPaths[1]
+	predates := write(root, "package cmd\n")
+	inRoot := write(root, `f.StringVar(&opts.ImageRepo, "image-repo", "", "")`+"\n")
+	write(root, "package cmd\n")
+	inConfig := write(setting, `Flag: "image-repo",`+"\n")
+
+	for _, sha := range []string{inRoot, inConfig} {
+		if _, err := verifyCommit(context.Background(), remote, sha, true); err != nil {
+			t.Errorf("verifyCommit(%s) = %v, want nil", shorten(sha), err)
+		}
+	}
+	if _, err := verifyCommit(context.Background(), remote, predates, true); err == nil {
+		t.Errorf("verifyCommit(%s) accepted a tree without --%s", shorten(predates), imageFlagsName)
+	}
+}
+
 func TestLastLineReportsWhatGitActuallySaid(t *testing.T) {
 	stderr := "Cloning into 'x'...\nremote: Enumerating\nfatal: repository not found\n\n"
 	if got := lastLine(stderr); got != "repository not found" {

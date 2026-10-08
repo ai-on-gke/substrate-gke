@@ -199,14 +199,17 @@ func lsRemote(ctx context.Context, repo string, refs ...string) (string, error) 
 	return sha, nil
 }
 
-// imageFlagsPath is where ate-setup declares --image-repo, and imageFlagsName
-// is the declaration to look for. A tree from before those flags existed takes
-// an install that passes them all the way through bootstrap — cluster, bucket,
+// imageFlagsPaths are where ate-setup has declared --image-repo: root.go, until
+// v0.4.0 moved every setting into the config package. imageFlagsName is the
+// declaration to look for. A tree from before those flags existed takes an
+// install that passes them all the way through bootstrap — cluster, bucket,
 // IAM — and then dies at the deploy with "flag provided but not defined".
-const (
-	imageFlagsPath = "cmd/ate-setup/internal/cmd/root.go"
-	imageFlagsName = "image-repo"
-)
+var imageFlagsPaths = []string{
+	"cmd/ate-setup/internal/cmd/root.go",
+	"cmd/ate-setup/internal/config/setting.go",
+}
+
+const imageFlagsName = "image-repo"
 
 // EnvoyDockerfile is the envoy-dataplane image's Dockerfile, which ate-setup
 // builds with `docker buildx build --push` whenever the atenet router is
@@ -248,11 +251,21 @@ func verifyCommit(ctx context.Context, repo, sha string, needImageFlags bool) (e
 	if !needImageFlags {
 		return envoy, nil
 	}
-	// A tree that has moved the file elsewhere is left alone: that is upstream
-	// restructuring, and refusing the install over it would be a guess. Only a
-	// file that is there and does not declare the flag is an answer.
-	out, err = git(ctx, "--git-dir", dir, "cat-file", "-p", "FETCH_HEAD:"+imageFlagsPath)
-	if err == nil && !strings.Contains(out, imageFlagsName) {
+	// A tree that has none of the files is left alone: that is upstream
+	// restructuring, and refusing the install over it would be a guess. Only
+	// files that are there and do not declare the flag are an answer.
+	seen := false
+	for _, p := range imageFlagsPaths {
+		out, err = git(ctx, "--git-dir", dir, "cat-file", "-p", "FETCH_HEAD:"+p)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(out, imageFlagsName) {
+			return envoy, nil
+		}
+		seen = true
+	}
+	if seen {
 		return false, fmt.Errorf(
 			"substrate %s predates ate-setup's --%s, so it cannot install pre-built images; name a newer commit, or build from source instead",
 			shorten(sha), imageFlagsName)
