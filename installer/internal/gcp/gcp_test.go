@@ -121,12 +121,11 @@ func TestParseClusters(t *testing.T) {
 	if clusters[3].KVMReady {
 		t.Error("autopilot (no nodePools key) must not be KVMReady")
 	}
-	// A release that also serves these APIs as GA buys the cluster nothing:
-	// upstream's controllers are built against the beta types, so the beta
-	// group still has to be served. Calling this one ready would walk the user
-	// into an install that hangs waiting on a group nobody serves.
-	if clusters[4].SubstrateReady() {
-		t.Error("a 1.37 cluster with no beta APIs must not be substrate-ready")
+	// From v0.4.0 Substrate discovers v1 and uses it, so a 1.37 cluster with
+	// no pool listed below 1.37 needs no beta APIs. Refusing it would send
+	// the user through a confirmation, and a ten-minute update, for nothing.
+	if !clusters[4].SubstrateReady() {
+		t.Error("a 1.37 cluster with no beta APIs should be substrate-ready")
 	}
 }
 
@@ -211,25 +210,36 @@ func TestPodCertificateGA(t *testing.T) {
 	}
 }
 
-// Readiness needs both halves, and the tempting simplification in either
-// direction breaks a real cluster. Drop the beta-API half and a 1.37 cluster is
-// waved through to an install that hangs on an API group nobody serves, since
-// upstream's controllers watch the v1beta1 types no matter what else the
-// release offers. Drop the release half and a 1.35 cluster that happens to
-// carry the beta APIs is called ready, which is a support promise this repo
-// cannot keep.
-func TestSubstrateReadyNeedsBothTheReleaseAndTheAPIs(t *testing.T) {
-	for _, version := range []string{"1.36.4-gke.1247000", "1.37.1-gke.1000000", "1.40.0-gke.1", "???"} {
-		if (Cluster{MasterVersion: version}).SubstrateReady() {
-			t.Errorf("%s with no beta APIs must not be substrate-ready", version)
-		}
-		if !(Cluster{MasterVersion: version, BetaAPIs: RequiredBetaAPIs}).SubstrateReady() {
-			t.Errorf("%s with the beta APIs enabled should be substrate-ready", version)
-		}
-	}
-	for _, version := range []string{"1.33.2-gke.100", "1.35.5-gke.1163012"} {
-		if (Cluster{MasterVersion: version, BetaAPIs: RequiredBetaAPIs}).SubstrateReady() {
-			t.Errorf("%s is below the supported floor and must not be substrate-ready", version)
+// Readiness is a supported release plus a way to serve the PodCertificate
+// APIs, and each simplification breaks a real cluster. Require the beta APIs
+// everywhere and a 1.37 cluster, which Substrate runs on through v1, is sent
+// through a needless repair. Require them nowhere at 1.37 and a 1.37 control
+// plane with 1.36 pools is waved through, and Substrate's pods hang on those
+// nodes, whose kubelet serves projection only behind the beta gate. Drop the
+// release half and a 1.35 cluster carrying the beta APIs is called ready,
+// which is a support promise this repo cannot keep.
+func TestSubstrateReadyNeedsAReleaseAndAWayToServeTheAPIs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    Cluster
+		want bool
+	}{
+		{"1.36, no beta APIs", Cluster{MasterVersion: "1.36.4-gke.1"}, false},
+		{"1.36, beta APIs", Cluster{MasterVersion: "1.36.4-gke.1", BetaAPIs: RequiredBetaAPIs}, true},
+		{"1.37 everywhere, no beta APIs",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"p", "1.37.1-gke.1"}}}, true},
+		{"1.40, no pools listed, no beta APIs", Cluster{MasterVersion: "1.40.0-gke.1"}, true},
+		{"1.37 control plane, 1.36 pool, no beta APIs",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"old", "1.36.4-gke.1"}}}, false},
+		{"1.37 control plane, 1.36 pool, beta APIs",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"old", "1.36.4-gke.1"}}, BetaAPIs: RequiredBetaAPIs}, true},
+		{"unreadable version, no beta APIs", Cluster{MasterVersion: "???"}, false},
+		{"unreadable version, beta APIs", Cluster{MasterVersion: "???", BetaAPIs: RequiredBetaAPIs}, true},
+		{"1.35, beta APIs", Cluster{MasterVersion: "1.35.5-gke.1163012", BetaAPIs: RequiredBetaAPIs}, false},
+		{"1.33, beta APIs", Cluster{MasterVersion: "1.33.2-gke.100", BetaAPIs: RequiredBetaAPIs}, false},
+	} {
+		if got := tc.c.SubstrateReady(); got != tc.want {
+			t.Errorf("%s: SubstrateReady() = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

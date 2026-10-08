@@ -939,10 +939,11 @@ func (s *clusterScreen) View(w int) string {
 				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
 	case "confirm":
 		sel := s.clusters[s.cursor]
-		// Three outcomes, and the release picks which: below the floor nothing
+		// Two outcomes, and the release picks which: below the floor nothing
 		// that can be enabled helps; above it provision turns the APIs on in
-		// place, and the only question left is whether the existing node
-		// pools have to be replaced too.
+		// place, and the pools below 1.37 that made them necessary have to be
+		// replaced afterward. (A cluster with no such pool serves the APIs as
+		// GA and never reaches this panel.)
 		//
 		// Written as paragraphs for the panel to wrap, with no token longer
 		// than the narrowest panel (about 40 columns at 80×24, beside the
@@ -974,15 +975,15 @@ func (s *clusterScreen) View(w int) string {
 			paras = []string{
 				"[y] has provision turn them on in place, a control-plane update of about ten minutes.",
 			}
-			switch pools, any := sel.PoolsWithoutProjection(); {
-			case !any:
-				paras = append(paras, "Its nodes need nothing else: pod certificate projection is GA in their kubelets.")
+			// Some pool is below 1.37 here, or the cluster would serve the
+			// APIs as GA and be ready: decide only whether they can be named.
+			switch pools, _ := sel.PoolsWithoutProjection(); {
 			case len(pools) > 0:
-				noun := "pool"
+				phrase := "1 node pool runs"
 				if len(pools) > 1 {
-					noun = "pools"
+					phrase = fmt.Sprintf("%d node pools run", len(pools))
 				}
-				paras = append(paras, fmt.Sprintf("%d node %s run below %s and must be replaced before Substrate starts; provision shows how.", len(pools), noun, gcp.PodCertificateGARelease))
+				paras = append(paras, fmt.Sprintf("%s below %s and must be replaced before Substrate starts; provision shows how.", phrase, gcp.PodCertificateGARelease))
 			default:
 				paras = append(paras, "Its nodes run below "+gcp.PodCertificateGARelease.String()+", so its node pools must be replaced before Substrate starts; provision shows how.")
 			}
@@ -993,11 +994,12 @@ func (s *clusterScreen) View(w int) string {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 78)).Render(
 			theme.Warning.Render(title) + "\n\n" + strings.Join(paras, "\n\n")))
 	default:
-		b.WriteString("\n" + theme.Subtle.Render(
-			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer, plus the beta PodCertificate APIs,\n"+
-				"which GKE serves only for clusters that opted in. A cluster without them\n"+
-				"is fixed in place by the provision step — though below "+gcp.PodCertificateGARelease.String()+" its node\n"+
-				"pools must be replaced afterward. New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
+		// Wrapped to the content width rather than broken by hand: at 80
+		// columns the hand-broken lines ran past the edge and were cut.
+		b.WriteString("\n" + theme.Subtle.Width(max(w-2, 20)).Render(
+			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer. Below "+gcp.PodCertificateGARelease.String()+" it also needs the beta PodCertificate APIs, "+
+				"which GKE serves only for clusters that opted in; provision turns them on for a cluster without them, "+
+				"and its pools below "+gcp.PodCertificateGARelease.String()+" must then be replaced. New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
 	}
 	return b.String()
 }

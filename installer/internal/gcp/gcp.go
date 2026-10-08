@@ -27,29 +27,33 @@ import (
 	"time"
 )
 
-// RequiredBetaAPIs are the Kubernetes beta APIs Substrate depends on. They are
-// required on every release the installer supports, 1.37 included, even though
-// 1.37 serves both resources under certificates.k8s.io/v1 by default.
+// RequiredBetaAPIs are the Kubernetes beta APIs a cluster needs unless it
+// serves the same two resources as GA everywhere that matters — a 1.37 control
+// plane and only 1.37 node pools (see Cluster.ServesPodCertificatesAsGA).
 //
-// That is a fact about the pinned upstream, not about Kubernetes, and it has
-// been argued the other way before — upstream's own tools/setup-gcp README at
-// the pin says 1.37 needs no beta enablement — so the reasoning is worth
-// keeping:
+// That line is a fact about the pinned upstream as much as about Kubernetes,
+// and it has moved once already, so the reasoning is worth keeping:
 //
-//   - PodCertificateRequest is read through v1 where it is served (upstream
-//     #1829), but ClusterTrustBundle is still v1beta1-only at the pin: ate-setup
-//     waits on a hardcoded v1beta1 kind and atelet lists v1beta1. A plain 1.37
-//     cluster serves no v1beta1, so the install hangs at "Waiting for
-//     podcertificate ClusterTrustBundles to be ready". Upstream #1924 adds v1
-//     ClusterTrustBundle support; once the pin includes it, 1.37 stops needing
-//     this list.
-//   - setup-gcp's bootstrap requests both APIs on every cluster it creates and
-//     turns both on for an existing cluster that lacks them. Readiness asks for
-//     the same pair, so the badge predicts what provision will actually do.
+//   - From v0.4.0, every Substrate component discovers the API version: it
+//     prefers certificates.k8s.io/v1 and falls back to v1beta1 only when v1 is
+//     not served (upstream #1829 for PodCertificateRequest, #1924 for
+//     ClusterTrustBundle). Before #1924, ClusterTrustBundle was v1beta1-only
+//     and a plain 1.37 cluster hung at "Waiting for podcertificate
+//     ClusterTrustBundles to be ready"; a pin older than v0.4.0 would need
+//     the beta APIs on 1.37 again.
+//   - Below 1.37 the kubelet serves pod certificate projection only behind the
+//     beta gate, so any node pool below 1.37 still needs the beta APIs whatever
+//     its control plane serves.
 //
-// The claim that they cannot be enabled on an existing cluster is also wrong:
-// on both 1.36 and 1.37, `clusters update --enable-kubernetes-unstable-apis`
-// was accepted and the APIs were served afterward (measured 2026-09-21; see
+// setup-gcp's bootstrap still requests both on every cluster it creates and
+// turns both on for an existing one that lacks them, even where they are no
+// longer needed. That is harmless but not free — it is a control-plane update
+// of about ten minutes — so the provision screen says so (MissingBetaAPIs)
+// rather than readiness pretending it is required.
+//
+// The claim that they cannot be enabled on an existing cluster is wrong: on
+// both 1.36 and 1.37, `clusters update --enable-kubernetes-unstable-apis` was
+// accepted and the APIs were served afterward (measured 2026-09-21; see
 // agent-substrate/substrate#1819).
 //
 // GKE serves them only when they are listed in the cluster's enableK8sBetaApis,
@@ -83,9 +87,9 @@ var MinSupportedRelease = Release{1, 36}
 
 // The first Kubernetes release serving the PodCertificate APIs as GA.
 //
-// This does not decide whether a cluster can run Substrate — upstream needs the
-// beta APIs either way, so SubstrateReady ignores it. What it decides is how a
-// cluster that lacks them is repaired, which genuinely differs across this line:
+// It decides two things. A cluster whose control plane and every node pool are
+// at or above it needs no beta APIs at all (see RequiredBetaAPIs). For one that
+// does need them and lacks them, it decides how the repair goes:
 //
 //   - At or above it, the projection is GA, so the kubelet implements it on
 //     every node. Enabling the beta APIs on the running cluster is the whole fix.
@@ -209,14 +213,24 @@ func (c Cluster) MissingBetaAPIs() bool {
 	return false
 }
 
+// ServesPodCertificatesAsGA reports whether the cluster serves everything
+// Substrate needs without the beta APIs: a control plane at or above
+// PodCertificateGARelease, which serves both resources under v1, and no node
+// pool below it, whose kubelet would serve projection only behind the beta
+// gate. The pools are read rather than assumed because GKE lets them trail the
+// control plane.
+func (c Cluster) ServesPodCertificatesAsGA() bool {
+	_, stale := c.PoolsWithoutProjection()
+	return c.PodCertificateGA() && !stale
+}
+
 // SubstrateReady reports whether the cluster can run Substrate: a supported
-// release, with the beta APIs enabled on it. Both halves are load-bearing and
-// neither substitutes for the other — a 1.37 cluster without the beta APIs is
-// not ready, because the pinned upstream still reads ClusterTrustBundle only
-// through v1beta1 (see RequiredBetaAPIs); and a 1.35 cluster with them is not
-// ready either, because the release itself is outside the supported set.
+// release that either serves the PodCertificate APIs as GA throughout or has
+// the beta APIs enabled. The release half is never optional — a 1.35 cluster
+// with the beta APIs is not ready, because the release itself is outside the
+// supported set.
 func (c Cluster) SubstrateReady() bool {
-	return c.SupportedRelease() && !c.MissingBetaAPIs()
+	return c.SupportedRelease() && (c.ServesPodCertificatesAsGA() || !c.MissingBetaAPIs())
 }
 
 // atLeastMinor reports whether a GKE version names a Kubernetes release at or
@@ -322,11 +336,11 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 	if c.DryRun {
 		// Between them these cover every verdict the cluster screen can reach,
 		// so a --dry-run walkthrough shows the whole story without a GCP
-		// project. The three that lack the beta APIs each land on a different
-		// branch of the confirm panel — too old to enable, enable and replace pools,
-		// enable and go — and the last two names are also cues for
-		// CheckInstalled's sim, which supplies the installed and partial
-		// states of the reinstall guard.
+		// project. Two lack the beta APIs and need them, and land on the two
+		// branches of the confirm panel — too old to enable, and enable and
+		// replace pools; substrate-ga lacks them and needs none. The last two
+		// names are also cues for CheckInstalled's sim, which supplies the
+		// installed and partial states of the reinstall guard.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
@@ -340,9 +354,9 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 			{Name: "ml-staging", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 6,
 				PoolVersions: []PoolVersion{{"default-pool", "1.36.4-gke.1247000"}, {"gpu-pool", "1.36.4-gke.1247000"}}},
-			// Missing the beta APIs on a release that also serves them as GA:
-			// not ready either, but repaired by enabling them on the running
-			// cluster, with none of the pool replacement ml-staging needs.
+			// No beta APIs, and none needed: control plane and pool are both on
+			// 1.37, which serves the APIs as GA. Ready, though bootstrap will
+			// still turn the beta APIs on, so provision says so.
 			{Name: "substrate-ga", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.37.1-gke.1000000", NodeCount: 2,
 				PoolVersions: []PoolVersion{{"default-pool", "1.37.1-gke.1000000"}}},

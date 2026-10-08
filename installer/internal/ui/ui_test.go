@@ -1071,10 +1071,11 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	calls := 0
 	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, versions: "substrate-71e7623", calls: &calls}
 	press := pressToCluster(t, app)
-	// The list load already background-probed the three substrate-ready
-	// clusters; legacy-prod is not ready, so selecting it probes fresh.
-	if calls != 3 {
-		t.Fatalf("background probes on load = %d, want 3", calls)
+	// The list load already background-probed the four substrate-ready
+	// clusters (substrate-ga is ready through v1); legacy-prod is not ready,
+	// so selecting it probes fresh.
+	if calls != 4 {
+		t.Fatalf("background probes on load = %d, want 4", calls)
 	}
 
 	press("2", "enter") // pick legacy-prod (us-central1)
@@ -1118,13 +1119,13 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	// Re-selecting the same cluster answers from the cache instead of paying
 	// another gcloud+kubectl round trip.
 	press("enter")
-	if scr.mode != "installed" || calls != 4 {
-		t.Errorf("re-selection: mode=%q probes=%d, want installed from cache after 4 probes", scr.mode, calls)
+	if scr.mode != "installed" || calls != 5 {
+		t.Errorf("re-selection: mode=%q probes=%d, want installed from cache after 5 probes", scr.mode, calls)
 	}
 	// Pressing 'r' invalidates the cache and re-probes.
 	press("r")
-	if scr.mode != "installed" || calls != 5 {
-		t.Errorf("re-probe: mode=%q probes=%d, want installed after 5 probes", scr.mode, calls)
+	if scr.mode != "installed" || calls != 6 {
+		t.Errorf("re-probe: mode=%q probes=%d, want installed after 6 probes", scr.mode, calls)
 	}
 }
 
@@ -1138,8 +1139,8 @@ func TestListBackgroundProbesReadyClusters(t *testing.T) {
 	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, versions: "substrate-0b3d2d078f64", calls: &calls}
 	pressToCluster(t, app)
 
-	if calls != 3 {
-		t.Fatalf("background probes = %d, want 3 (only the substrate-ready clusters)", calls)
+	if calls != 4 {
+		t.Fatalf("background probes = %d, want 4 (only the substrate-ready clusters)", calls)
 	}
 	if view := app.View(); !strings.Contains(view, "substrate installed") {
 		t.Errorf("list row missing the background-probed badge:\n%s", view)
@@ -1178,28 +1179,25 @@ func flat(view string) string {
 	return strings.Join(strings.Fields(strings.NewReplacer("│", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ", "─", " ").Replace(view)), " ")
 }
 
-// A cluster missing the beta APIs is stopped at the confirmation whatever its
-// release. What the release changes is the remedy, and all three are
-// materially different — below 1.36 nothing that can be enabled makes the
-// cluster supported, on pools below 1.37 the repair works but costs replacing
-// them, from 1.37 it costs nothing. Offering the wrong one sends someone to
+// What a cluster without the beta APIs is told depends on its release, and
+// the cases are materially different. On 1.37 throughout it needs nothing:
+// Substrate uses the v1 APIs there. Below 1.36 nothing that can be enabled
+// makes the cluster supported. In between, the repair works but costs
+// replacing the pools below 1.37. Offering the wrong one sends someone to
 // rebuild a cluster that needed ten minutes, or leaves them watching pods
 // that will never mount.
 func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
 
-	press("4", "enter") // substrate-ga: 1.37, no beta APIs enabled
-	scr := app.cur.(*clusterScreen)
-	if app.mach.Current() != state.Cluster || scr.mode != "confirm" {
-		t.Fatalf("1.37 cluster with no beta APIs: step=%v mode=%q, want the confirmation",
-			app.mach.Current(), scr.mode)
-	}
-	if view := flat(scr.View(120)); !strings.Contains(view, "need nothing else") || strings.Contains(view, "must be replaced") {
-		t.Errorf("a 1.37 confirmation should promise no node pool replacement:\n%s", view)
+	press("4", "enter") // substrate-ga: 1.37 everywhere, no beta APIs
+	if app.mach.Current() != state.Provision {
+		t.Fatalf("a 1.37 cluster with no beta APIs: step=%v, want straight to provision", app.mach.Current())
 	}
 
-	press("n")          // back to the list
+	app = testApp(t)
+	press = pressToCluster(t, app)
+	scr := app.cur.(*clusterScreen)
 	press("3", "enter") // ml-staging: 1.36 pools, no beta APIs enabled
 	if scr.mode != "confirm" {
 		t.Fatalf("1.36 cluster: mode=%q, want the confirmation", scr.mode)
@@ -1244,7 +1242,7 @@ func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 // and a split pool name is checked for directly.
 func TestConfirmAndReplacementPanelsFitSmallTerminals(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {100, 30}, {120, 40}} {
-		for _, row := range []string{"2", "3", "4"} {
+		for _, row := range []string{"2", "3"} { // the two confirmations
 			app := testApp(t)
 			press := pressToCluster(t, app)
 			pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
@@ -1395,7 +1393,7 @@ func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
 func TestProvisionSaysWhenItTurnsOnTheBetaAPIs(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
-	press("4", "enter", "y") // substrate-ga: 1.37 pools, no beta APIs
+	press("4", "enter") // substrate-ga: ready through v1, but bootstrap still enables the beta APIs
 	if app.mach.Current() != state.Provision || !app.deps.Setup.EnableBetaAPIs {
 		t.Fatalf("step=%v EnableBetaAPIs=%v, want Provision/true", app.mach.Current(), app.deps.Setup.EnableBetaAPIs)
 	}
@@ -1541,6 +1539,31 @@ func TestAReloadDoesNotDisturbWorkInProgress(t *testing.T) {
 	drive(clustersMsg{owner: s, err: errors.New("transient gcloud failure")})
 	if s.mode != "teardown" || len(s.clusters) != len(clusters) || s.clusters[s.cursor].Name != "ml-staging" {
 		t.Errorf("reload during teardown: mode=%q clusters=%d, want the teardown and its list untouched", s.mode, len(s.clusters))
+	}
+}
+
+// A 1.37 control plane does not make 1.36 pools safe: their kubelets serve
+// pod certificate projection only behind the beta gate. Such a cluster without
+// the beta APIs has to stop at the confirmation and name the old pool; waving
+// it through on the control plane's version alone hangs Substrate's pods on
+// those nodes.
+func TestA137ControlPlaneWithOldPoolsStillNeedsTheRepair(t *testing.T) {
+	s, drive, _ := drivenClusterScreen(t)
+	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
+		Name: "mixed", Location: "us-west1-c", Status: "RUNNING", MasterVersion: "1.37.1-gke.1000000", NodeCount: 3,
+		PoolVersions: []gcp.PoolVersion{{Name: "old-pool", Version: "1.36.4-gke.1247000"}, {Name: "new-pool", Version: "1.37.1-gke.1000000"}},
+	}}})
+	s.cursor = 0
+	drive(key("enter"))
+	if s.mode != "confirm" {
+		t.Fatalf("mode = %q, want the confirmation", s.mode)
+	}
+	if view := flat(s.View(120)); !strings.Contains(view, "1 node pool runs below") {
+		t.Errorf("the confirmation should name one old pool:\n%s", view)
+	}
+	drive(key("y"))
+	if got := strings.Join(s.deps.Setup.NodePoolsToReplace, ","); got != "old-pool" {
+		t.Errorf("pools to replace = %q, want old-pool", got)
 	}
 }
 
