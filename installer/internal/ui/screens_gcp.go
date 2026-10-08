@@ -143,7 +143,9 @@ func (s *projectScreen) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (s *projectScreen) CapturesText() bool { return true }
+// CapturesText is false while the enable runs: no field takes input then,
+// and the app's own keys ([v] log, / commands, ? help) must get through.
+func (s *projectScreen) CapturesText() bool { return s.enabling == nil }
 
 func (s *projectScreen) Hints() []Hint {
 	if s.enabling != nil {

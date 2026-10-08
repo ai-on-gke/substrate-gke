@@ -615,27 +615,67 @@ func TestProjectScreenEnablesTheGKEAPI(t *testing.T) {
 	}
 }
 
-// The running enable is the screen's execComp, so [l]/[v] show its live
-// output and stopCurrent can cancel it, as on every other exec screen.
+// The running enable is the screen's execComp, and [v] pressed through the
+// App opens the log overlay on its live output, as on every other exec
+// screen. Without an enable, v is just a letter for the focused field.
 func TestProjectScreenExposesTheEnableToTheLogOverlay(t *testing.T) {
 	app := testApp(t)
 	var argv [][]string
 	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, argv: &argv}
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	scr := newProjectScreen(app.deps)
+	app.cur = scr
 	var _ execCompProvider = scr
 	if scr.logComp() != nil {
 		t.Fatal("no enable is running yet, logComp should be nil")
 	}
 	scr.fields[0].input.SetValue("acme")
+	app.Update(key("v"))
+	if app.over == overlayLog || scr.fields[0].input.Value() != "acmev" {
+		t.Fatalf("with no enable running, v should type; over=%v field=%q", app.over, scr.fields[0].input.Value())
+	}
+	scr.fields[0].input.SetValue("acme")
+
 	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
-	cmd := scr.Update(key("e"))
+	queue := runCmd(scr.Update(key("e")))
 	if scr.logComp() == nil || scr.logComp() != scr.enabling {
 		t.Fatal("while enabling, logComp should return the running enable")
 	}
-	driveProject(t, scr, cmd)
+	// Let the enable print something, but not finish.
+	deadline := time.Now().Add(10 * time.Second)
+	for len(scr.enabling.lines) == 0 {
+		if len(queue) == 0 || time.Now().After(deadline) {
+			t.Fatal("the enable printed nothing")
+		}
+		msg := queue[0]
+		queue = queue[1:]
+		queue = append(queue, runCmd(scr.Update(msg))...)
+	}
+	if scr.enabling == nil {
+		t.Fatal("the enable finished before v could be pressed")
+	}
+	app.Update(key("v"))
+	if app.over != overlayLog || !app.logFromComp {
+		t.Fatalf("v during the enable should open the log on its output; over=%v fromComp=%v", app.over, app.logFromComp)
+	}
+	if got := scr.fields[0].input.Value(); got != "acme" {
+		t.Errorf("v must not reach the field during the enable, got %q", got)
+	}
+	app.Update(key("v")) // close the overlay
+	driveProject(t, scr, cmdOf(queue))
 	if scr.logComp() != nil {
 		t.Error("once the enable is over, logComp should be nil again")
 	}
+}
+
+// cmdOf replays already-produced messages as a command.
+func cmdOf(msgs []tea.Msg) tea.Cmd {
+	cmds := make([]tea.Cmd, len(msgs))
+	for i, m := range msgs {
+		m := m
+		cmds[i] = func() tea.Msg { return m }
+	}
+	return tea.Batch(cmds...)
 }
 
 // A failed enable says why and how to fix it, and offers [e] again.
