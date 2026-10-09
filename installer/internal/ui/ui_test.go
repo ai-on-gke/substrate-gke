@@ -503,6 +503,603 @@ func TestProjectScreenBlocksOnDocker(t *testing.T) {
 	}
 }
 
+// driveProject feeds scr the messages cmd produces, and theirs in turn, until
+// they drain. It reports whether the screen asked to advance.
+func driveProject(t *testing.T, scr *projectScreen, cmd tea.Cmd) (advanced bool) {
+	t.Helper()
+	queue := runCmd(cmd)
+	deadline := time.Now().Add(30 * time.Second)
+	for len(queue) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("project screen did not settle")
+		}
+		msg := queue[0]
+		queue = queue[1:]
+		if msg == tea.Msg(navNext) {
+			advanced = true
+			continue
+		}
+		queue = append(queue, runCmd(scr.Update(msg))...)
+	}
+	return advanced
+}
+
+// enableRunner records the specs it is handed and, with fail set, fails
+// `gcloud services enable` the way a missing role does (or with failLine,
+// when set). Everything else it replays.
+type enableRunner struct {
+	inner    execx.Runner
+	fail     bool
+	failLine string
+	argv     *[][]string
+}
+
+func (r enableRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	*r.argv = append(*r.argv, spec.Argv)
+	if !r.fail || spec.Label != "enable "+gcp.GKEService {
+		return r.inner.Start(ctx, spec)
+	}
+	line := r.failLine
+	if line == "" {
+		line = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
+	}
+	ch := make(chan execx.Event, 2)
+	ch <- execx.Event{Line: line, Stderr: true}
+	ch <- execx.Event{Done: true, Err: errors.New("exit status 1")}
+	close(ch)
+	return ch
+}
+
+// No billing blocks outright, with the fix on screen, and is not something
+// [e] can fix: e keeps typing.
+func TestProjectScreenBlocksOnBilling(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	if cmd := scr.Update(projValidMsg{owner: scr, number: "42", billingOff: true, apiOff: true}); cmd != nil {
+		t.Fatal("a project without billing must not advance the wizard")
+	}
+	for _, want := range []string{"gcloud billing projects link acme", "billing/linkedaccount?project=acme", gcp.GKEService} {
+		if !strings.Contains(scr.errText, want) {
+			t.Errorf("error should mention %q, got %q", want, scr.errText)
+		}
+	}
+	if scr.enableFor != "" {
+		t.Error("enabling the API cannot work before billing is linked, so it must not be offered")
+	}
+	scr.Update(key("e"))
+	if got := scr.fields[0].input.Value(); got != "acmee" {
+		t.Errorf("without an offer e should type, field = %q", got)
+	}
+	if scr.permAcked || scr.probeAcked {
+		t.Error("no billing must not count as acknowledging anything")
+	}
+	if cmd := scr.Update(projValidMsg{owner: scr, number: "42"}); cmd == nil {
+		t.Error("once billing is linked, the step should advance")
+	}
+}
+
+// A project with billing but without the GKE API blocks, offers [e], and
+// [e] enables it and validates again.
+func TestProjectScreenEnablesTheGKEAPI(t *testing.T) {
+	app := testApp(t)
+	var argv [][]string
+	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, argv: &argv}
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	if cmd := scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true}); cmd != nil {
+		t.Fatal("a project without the GKE API must not advance the wizard")
+	}
+	if scr.enableFor != "acme" || !strings.Contains(scr.errText, gcp.EnableServiceCommand("acme", gcp.GKEService)) {
+		t.Fatalf("expected an offer to enable the API on acme, got enableFor=%q err=%q", scr.enableFor, scr.errText)
+	}
+	if hints := scr.Hints(); hints[0].Key != "e" {
+		t.Errorf("hints should lead with [e], got %v", hints)
+	}
+
+	cmd := scr.Update(key("e"))
+	if scr.enabling == nil || !strings.Contains(scr.View(100), "Enabling "+gcp.GKEService) {
+		t.Fatalf("e should start enabling the API:\n%s", scr.View(100))
+	}
+	if got := scr.fields[0].input.Value(); got != "acme" {
+		t.Errorf("the offer's e must not type, field = %q", got)
+	}
+	// The dry-run client reports a healthy project, so the check that
+	// follows a successful enable passes and the step advances.
+	if !driveProject(t, scr, cmd) {
+		t.Fatalf("after enabling, the project should validate and advance; err=%q", scr.errText)
+	}
+	want := strings.Join(gcp.EnableService("acme", gcp.GKEService).Argv, " ")
+	if len(argv) != 1 || strings.Join(argv[0], " ") != want {
+		t.Errorf("runner got %v, want one %q", argv, want)
+	}
+}
+
+// The running enable is the screen's execComp, and [v] pressed through the
+// App opens the log overlay on its live output, as on every other exec
+// screen. Without an enable, v is just a letter for the focused field.
+func TestProjectScreenExposesTheEnableToTheLogOverlay(t *testing.T) {
+	app := testApp(t)
+	var argv [][]string
+	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, argv: &argv}
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	scr := newProjectScreen(app.deps)
+	app.cur = scr
+	var _ execCompProvider = scr
+	if scr.logComp() != nil {
+		t.Fatal("no enable is running yet, logComp should be nil")
+	}
+	scr.fields[0].input.SetValue("acme")
+	app.Update(key("v"))
+	if app.over == overlayLog || scr.fields[0].input.Value() != "acmev" {
+		t.Fatalf("with no enable running, v should type; over=%v field=%q", app.over, scr.fields[0].input.Value())
+	}
+	scr.fields[0].input.SetValue("acme")
+
+	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+	queue := runCmd(scr.Update(key("e")))
+	if scr.logComp() == nil || scr.logComp() != scr.enabling {
+		t.Fatal("while enabling, logComp should return the running enable")
+	}
+	// Let the enable print something, but not finish.
+	deadline := time.Now().Add(10 * time.Second)
+	for len(scr.enabling.lines) == 0 {
+		if len(queue) == 0 || time.Now().After(deadline) {
+			t.Fatal("the enable printed nothing")
+		}
+		msg := queue[0]
+		queue = queue[1:]
+		queue = append(queue, runCmd(scr.Update(msg))...)
+	}
+	if scr.enabling == nil {
+		t.Fatal("the enable finished before v could be pressed")
+	}
+	app.Update(key("v"))
+	if app.over != overlayLog || !app.logFromComp {
+		t.Fatalf("v during the enable should open the log on its output; over=%v fromComp=%v", app.over, app.logFromComp)
+	}
+	if got := scr.fields[0].input.Value(); got != "acme" {
+		t.Errorf("v must not reach the field during the enable, got %q", got)
+	}
+	app.Update(key("v")) // close the overlay
+	driveProject(t, scr, cmdOf(queue))
+	if scr.logComp() != nil {
+		t.Error("once the enable is over, logComp should be nil again")
+	}
+}
+
+// cmdOf replays already-produced messages as a command.
+func cmdOf(msgs []tea.Msg) tea.Cmd {
+	cmds := make([]tea.Cmd, len(msgs))
+	for i, m := range msgs {
+		m := m
+		cmds[i] = func() tea.Msg { return m }
+	}
+	return tea.Batch(cmds...)
+}
+
+// A failed enable says why and how to fix it, and offers [e] again.
+func TestProjectScreenEnableFailureOffersRetry(t *testing.T) {
+	app := testApp(t)
+	var argv [][]string
+	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, fail: true, argv: &argv}
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+
+	if driveProject(t, scr, scr.Update(key("e"))) {
+		t.Fatal("a failed enable must not advance the wizard")
+	}
+	if scr.enabling != nil {
+		t.Error("the enable should be over")
+	}
+	for _, want := range []string{"PERMISSION_DENIED", "roles/serviceusage.serviceUsageAdmin", "[e] to try again"} {
+		if !strings.Contains(scr.errText, want) {
+			t.Errorf("error should mention %q, got %q", want, scr.errText)
+		}
+	}
+	if scr.enableFor != "acme" {
+		t.Error("a failed enable should stay retryable with [e]")
+	}
+}
+
+// A failed enable asks the billing API why before picking a panel:
+//   - billing provably off: the billing panel, [e] withdrawn
+//   - billing provably on: gcloud's text decides permission vs. other, and
+//     a "billing" in it is not believed
+//   - billing probe cannot answer: gcloud's text is the fallback, billing
+//     included
+//
+// Status names count, never bare codes: an id containing 403 is "other".
+func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
+	const (
+		billingLine = "ERROR: (gcloud.services.enable) FAILED_PRECONDITION: Billing must be enabled for activation of service(s) 'container.googleapis.com' to proceed."
+		permLine    = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
+		// gcloud's PERMISSION_DENIED variants can name billing too.
+		permBillLine = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]; caller lacks serviceusage.services.enable, which is checked before billing."
+		otherLine    = "ERROR: (gcloud.services.enable) UNAVAILABLE: The service is currently unavailable."
+		id403Line    = "ERROR: (gcloud.services.enable) INTERNAL: Operation operations/acf.p2-403712345678-5d1e failed."
+	)
+	type probe struct {
+		on  bool
+		err error
+	}
+	var (
+		billingOn  = probe{on: true}
+		billingOff = probe{on: false}
+		cannotTell = probe{err: errors.New("403 Forbidden: PERMISSION_DENIED on billingInfo")}
+	)
+	// Panels, recognized by what only they say.
+	const (
+		billingPanel = "Billing is not enabled on acme"
+		enableBill   = "Billing must be enabled on acme"
+		permPanel    = "roles/serviceusage.serviceUsageAdmin"
+		retry        = "[e] to try again"
+	)
+	for _, tc := range []struct {
+		name       string
+		probe      probe
+		line       string
+		want, not  []string
+		keepsOffer bool
+	}{
+		{"off/billing text", billingOff, billingLine, []string{billingPanel, "gcloud billing projects link acme"}, []string{permPanel, retry}, false},
+		{"off/permission text", billingOff, permLine, []string{billingPanel}, []string{permPanel, retry}, false},
+		{"off/other text", billingOff, otherLine, []string{billingPanel}, []string{permPanel, retry}, false},
+
+		{"on/billing text", billingOn, billingLine, []string{"FAILED_PRECONDITION", retry}, []string{billingPanel, enableBill, permPanel}, true},
+		{"on/permission text", billingOn, permLine, []string{"PERMISSION_DENIED", permPanel, retry}, []string{billingPanel, enableBill}, true},
+		// Billing is confirmed on, so a permission line that mentions
+		// billing is a permission failure, not a billing one.
+		{"on/permission text naming billing", billingOn, permBillLine, []string{"PERMISSION_DENIED", permPanel, retry}, []string{billingPanel, enableBill}, true},
+		{"on/other text", billingOn, otherLine, []string{"UNAVAILABLE", gcp.EnableServiceCommand("acme", gcp.GKEService), retry}, []string{permPanel, enableBill}, true},
+		{"on/403 in an id", billingOn, id403Line, []string{"INTERNAL", retry}, []string{permPanel, enableBill}, true},
+
+		{"unknown/billing text", cannotTell, billingLine, []string{"FAILED_PRECONDITION", enableBill, "billing/linkedaccount?project=acme"}, []string{permPanel, retry}, false},
+		{"unknown/permission text", cannotTell, permLine, []string{permPanel, retry}, []string{enableBill}, true},
+		{"unknown/other text", cannotTell, otherLine, []string{"UNAVAILABLE", retry}, []string{permPanel, enableBill}, true},
+	} {
+		app := testApp(t)
+		var argv [][]string
+		app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, fail: true, failLine: tc.line, argv: &argv}
+		scr := newProjectScreen(app.deps)
+		var asked []string
+		scr.billingCheck = func(_ context.Context, pid string) (bool, error) {
+			asked = append(asked, pid)
+			return tc.probe.on, tc.probe.err
+		}
+		scr.fields[0].input.SetValue("acme")
+		scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+		if driveProject(t, scr, scr.Update(key("e"))) {
+			t.Fatalf("%s: a failed enable must not advance the wizard", tc.name)
+		}
+		if len(asked) != 1 || asked[0] != "acme" {
+			t.Errorf("%s: billing should be asked once about acme, asked %v", tc.name, asked)
+		}
+		if scr.validating || scr.checkingEnable {
+			t.Errorf("%s: the check should be over", tc.name)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(scr.errText, w) {
+				t.Errorf("%s: error should mention %q, got %q", tc.name, w, scr.errText)
+			}
+		}
+		for _, n := range tc.not {
+			if strings.Contains(scr.errText, n) {
+				t.Errorf("%s: error should not mention %q, got %q", tc.name, n, scr.errText)
+			}
+		}
+		// A billing failure cannot be retried away, so it withdraws [e]:
+		// the hints drop it and e types again. Anything else keeps it.
+		if offered := scr.enableFor != ""; offered != tc.keepsOffer {
+			t.Errorf("%s: enableFor = %q, want offer kept = %v", tc.name, scr.enableFor, tc.keepsOffer)
+		}
+		if hints := scr.Hints(); (hints[0].Key == "e") != tc.keepsOffer {
+			t.Errorf("%s: hints = %v", tc.name, hints)
+		}
+		if !tc.keepsOffer {
+			before := len(argv)
+			scr.Update(key("e"))
+			if scr.enabling != nil || len(argv) != before || scr.fields[0].input.Value() != "acmee" {
+				t.Errorf("%s: e should type, not re-run the enable; field=%q", tc.name, scr.fields[0].input.Value())
+			}
+		}
+	}
+}
+
+// The hint bar only advertises keys that do something: during the billing
+// check that is esc alone (not the [e]/[enter] of the offer still standing
+// behind it), and while the project validates, nothing.
+func TestProjectScreenHintsDuringChecks(t *testing.T) {
+	app := testApp(t)
+	scr, check, ctxs := startHungCheck(t, app, "ERROR: (gcloud.services.enable) UNAVAILABLE: try again")
+	go check()
+	<-ctxs
+	if hints := scr.Hints(); len(hints) != 1 || hints[0] != (Hint{"esc", "stop waiting"}) {
+		t.Errorf("during the billing check hints = %v, want only [esc] stop waiting", hints)
+	}
+	scr.abandonCheck()
+
+	scr.submit()
+	if hints := scr.Hints(); len(hints) != 1 || hints[0] != (Hint{"esc", "stop waiting"}) {
+		t.Errorf("while validating hints = %v, want only [esc] stop waiting", hints)
+	}
+	scr.Stop()
+}
+
+// A submit's checks are bounded as a whole and can be abandoned, like the
+// billing check: with the network down every gcloud call would otherwise
+// wait its own timeout in turn while every key is swallowed. esc stops
+// waiting at once (a second esc goes back), v / ? reach the app meanwhile,
+// and the abandoned submit's late result must not advance the wizard.
+func TestProjectScreenSubmitIsBoundedAndCancellable(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	scr := newProjectScreen(app.deps)
+	app.cur = scr
+	ctxs := make(chan context.Context, 1)
+	scr.projectNumber = func(ctx context.Context, _ string) (string, error) {
+		ctxs <- ctx
+		<-ctx.Done()
+		// A healthy answer that would advance the wizard if this late
+		// result were not dropped.
+		return "42", nil
+	}
+	scr.fields[0].input.SetValue("acme")
+	cmd := scr.submit()
+	if scr.CapturesText() {
+		t.Error("while validating the app's keys must get through")
+	}
+	if hints := scr.Hints(); len(hints) != 1 || hints[0].Key != "esc" {
+		t.Errorf("while validating hints = %v, want only [esc]", hints)
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	ctx := <-ctxs
+	if dl, ok := ctx.Deadline(); !ok || time.Until(dl) > submitTimeout {
+		t.Errorf("the submit must be bounded by %v, deadline set=%v", submitTimeout, ok)
+	}
+
+	app.Update(key("v"))
+	if app.over != overlayLog {
+		t.Error("v while validating should open the log overlay")
+	}
+	app.Update(key("v")) // close it
+
+	start := time.Now()
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if time.Since(start) > 100*time.Millisecond {
+		t.Errorf("esc took %v; it must not wait for the checks", time.Since(start))
+	}
+	if scr.validating || !strings.Contains(scr.errText, "Stopped validating acme") {
+		t.Fatalf("esc should stop validating at once; validating=%v err=%q", scr.validating, scr.errText)
+	}
+	if ctx.Err() == nil {
+		t.Error("esc should cancel the submit's context")
+	}
+	if !scr.CapturesText() {
+		t.Error("after esc the fields should take input again")
+	}
+
+	select {
+	case late := <-done:
+		if cmd := scr.Update(late); cmd != nil {
+			t.Error("an abandoned submit's late result must not advance the wizard")
+		}
+		if !strings.Contains(scr.errText, "Stopped validating acme") {
+			t.Errorf("a late result replaced the panel: %q", scr.errText)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled submit did not return")
+	}
+
+	// A second esc goes back, as on the plain screen.
+	if cmd := scr.Update(tea.KeyMsg{Type: tea.KeyEsc}); cmd == nil {
+		t.Error("esc with nothing running should go back")
+	}
+}
+
+// startHungCheck drives a failing enable up to the billing check, whose
+// billingCheck blocks until its context ends, and returns the check's
+// command unrun along with the context the check was handed.
+func startHungCheck(t *testing.T, app *App, failLine string) (*projectScreen, tea.Cmd, <-chan context.Context) {
+	t.Helper()
+	var argv [][]string
+	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, fail: true, failLine: failLine, argv: &argv}
+	scr := newProjectScreen(app.deps)
+	app.cur = scr
+	ctxs := make(chan context.Context, 1)
+	scr.billingCheck = func(ctx context.Context, _ string) (bool, error) {
+		ctxs <- ctx
+		<-ctx.Done()
+		// A definite "billing off", which would replace the panel if a
+		// late answer were not dropped.
+		return false, nil
+	}
+	scr.fields[0].input.SetValue("acme")
+	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+	queue := runCmd(scr.Update(key("e")))
+	deadline := time.Now().Add(10 * time.Second)
+	for !scr.checkingEnable {
+		if len(queue) == 0 || time.Now().After(deadline) {
+			t.Fatal("the failed enable never started the billing check")
+		}
+		msg := queue[0]
+		queue = queue[1:]
+		cmd := scr.Update(msg)
+		if scr.checkingEnable {
+			return scr, cmd, ctxs
+		}
+		queue = append(queue, runCmd(cmd)...)
+	}
+	t.Fatal("unreachable")
+	return nil, nil, nil
+}
+
+// The billing check after a failed enable is bounded and can be abandoned:
+// the enable often failed because the network is down, and before the
+// check its panel appeared at once. esc shows the failure from gcloud's
+// text straight away and drops the check's late answer; meanwhile v, / and
+// ? reach the app as during the enable.
+func TestProjectScreenBillingCheckIsBoundedAndCancellable(t *testing.T) {
+	const permLine = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	scr, check, ctxs := startHungCheck(t, app, permLine)
+	if scr.CapturesText() {
+		t.Error("during the check the app's keys must get through")
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- check() }()
+	ctx := <-ctxs
+	dl, ok := ctx.Deadline()
+	if !ok || time.Until(dl) > enableCheckTimeout {
+		t.Errorf("the check must be bounded by %v, deadline set=%v in %v", enableCheckTimeout, ok, time.Until(dl))
+	}
+
+	app.Update(key("v"))
+	if app.over != overlayLog {
+		t.Error("v during the check should open the log overlay")
+	}
+	app.Update(key("v")) // close it
+
+	start := time.Now()
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if time.Since(start) > 100*time.Millisecond {
+		t.Errorf("esc took %v; it must not wait for the check", time.Since(start))
+	}
+	if scr.checkingEnable || scr.validating {
+		t.Fatal("esc should end the check")
+	}
+	if !strings.Contains(scr.errText, "roles/serviceusage.serviceUsageAdmin") || scr.enableFor != "acme" {
+		t.Errorf("esc should show the failure from gcloud's text (permission, [e] kept); err=%q enableFor=%q", scr.errText, scr.enableFor)
+	}
+	if ctx.Err() == nil {
+		t.Error("esc should cancel the check's context")
+	}
+
+	// The abandoned check's answer ("billing off") arrives late and must
+	// not replace the panel.
+	select {
+	case late := <-done:
+		shown := scr.errText
+		scr.Update(late)
+		if scr.errText != shown {
+			t.Errorf("a late check result replaced the panel: %q", scr.errText)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled check did not return")
+	}
+}
+
+// The offer is for the project as validated: editing the fields withdraws
+// it, and e types again.
+func TestProjectScreenEditWithdrawsTheEnableOffer(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+	scr.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if scr.enableFor != "" {
+		t.Fatal("editing the project should withdraw the offer")
+	}
+	scr.Update(key("e"))
+	if got := scr.fields[0].input.Value(); got != "acme" {
+		t.Errorf("field = %q, want the backspaced-then-typed %q", got, "acme")
+	}
+	if scr.enabling != nil {
+		t.Error("e must not enable once the offer is withdrawn")
+	}
+}
+
+// Moving to another field withdraws the offer too: an e typed into the zone
+// or machine type must land there, not start the enable.
+func TestProjectScreenFocusChangeWithdrawsTheEnableOffer(t *testing.T) {
+	for _, move := range []string{"tab", "down", "shift+tab", "up"} {
+		app := testApp(t)
+		var argv [][]string
+		app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, argv: &argv}
+		scr := newProjectScreen(app.deps)
+		scr.fields[0].input.SetValue("acme")
+		scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+		var msg tea.KeyMsg
+		switch move {
+		case "tab":
+			msg = tea.KeyMsg{Type: tea.KeyTab}
+		case "down":
+			msg = tea.KeyMsg{Type: tea.KeyDown}
+		case "shift+tab":
+			msg = tea.KeyMsg{Type: tea.KeyShiftTab}
+		case "up":
+			msg = tea.KeyMsg{Type: tea.KeyUp}
+		}
+		scr.Update(msg)
+		if scr.enableFor != "" {
+			t.Errorf("%s: moving focus should withdraw the offer", move)
+		}
+		before := scr.fields[scr.focus].input.Value()
+		scr.Update(key("e"))
+		if scr.enabling != nil || len(argv) != 0 {
+			t.Errorf("%s: e must not enable after a focus change", move)
+		}
+		if got := scr.fields[scr.focus].input.Value(); got != before+"e" {
+			t.Errorf("%s: e should type into the focused field, got %q", move, got)
+		}
+	}
+}
+
+// A billing or API probe that could not run proves nothing: it is shown
+// once, and the next enter goes on, as a failed permission probe does.
+func TestProjectScreenProbeErrorIsAdvisory(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	failed := projValidMsg{owner: scr, number: "42", probeErr: errors.New("403 Forbidden: Cloud Billing API has not been used")}
+	if cmd := scr.Update(failed); cmd != nil {
+		t.Fatal("the first probe error should be shown, not skipped")
+	}
+	if !strings.Contains(scr.errText, "Could not verify billing") || !strings.Contains(scr.errText, "has not been used") {
+		t.Errorf("error should explain what could not be checked, got %q", scr.errText)
+	}
+	if cmd := scr.Update(failed); cmd == nil {
+		t.Error("once shown, a probe error should not block the next enter")
+	}
+}
+
+// An ack is for the project it was given on. Ack a probe failure (and a
+// permission failure) on one project, change the field, and the next
+// project's failures are shown again rather than waved through.
+func TestProjectScreenEditResetsTheAcks(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	probeFail := projValidMsg{owner: scr, number: "42", probeErr: errors.New("403 Forbidden")}
+	permFail := projValidMsg{owner: scr, number: "42", missing: gcp.BootstrapPermissions[:1]}
+	scr.Update(probeFail)
+	scr.Update(permFail)
+	if !scr.probeAcked || !scr.permAcked {
+		t.Fatalf("both problems should be acknowledged on acme, probe=%v perm=%v", scr.probeAcked, scr.permAcked)
+	}
+
+	for _, r := range "-b" {
+		scr.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if scr.probeAcked || scr.permAcked {
+		t.Fatal("editing the project should reset both acks")
+	}
+	if cmd := scr.Update(probeFail); cmd != nil {
+		t.Error("acme-b's probe error must be shown, not swallowed by acme's ack")
+	}
+	if !strings.Contains(scr.errText, "acme-b") {
+		t.Errorf("the warning should be about acme-b, got %q", scr.errText)
+	}
+	if cmd := scr.Update(permFail); cmd != nil {
+		t.Error("acme-b's missing permissions must be shown, not swallowed by acme's ack")
+	}
+}
+
 // Building from source points the whole run at the commit the user chose: the
 // checkout the steps fetch, and the doctor that reports on it.
 func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {

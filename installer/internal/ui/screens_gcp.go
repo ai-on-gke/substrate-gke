@@ -16,8 +16,11 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,9 +47,17 @@ type prefillMsg struct {
 }
 
 type projValidMsg struct {
-	owner  *projectScreen
+	owner *projectScreen
+	// seq is the submit this answers; see projectScreen.validateSeq.
+	seq    int
 	number string
 	err    error
+	// billingOff and apiOff are set when the project provably has no
+	// billing account or has GKEService disabled; probeErr means one of
+	// those probes could not run, which proves neither.
+	billingOff bool
+	apiOff     bool
+	probeErr   error
 	// missing are bootstrap permissions the credentials provably lack;
 	// permErr means the permission probe itself could not run.
 	missing []gcp.RequiredPermission
@@ -75,6 +86,60 @@ type projectScreen struct {
 	// enter proceeds anyway: the probe is advisory (a role might be granted
 	// minutes from now), but failing here beats failing mid-bootstrap.
 	permAcked bool
+	// probeAcked does the same for a billing or API probe that could not
+	// run. A project provably without billing or the API is never waved
+	// through: the very next screen would fail on it.
+	//
+	// Both acks hold only for the fields as they were: any edit resets
+	// them, so changing the project shows its problems afresh.
+	probeAcked bool
+	// enableFor is the project [e] would enable GKEService on, set while
+	// that offer is on screen; "" when there is no offer. Any edit to the
+	// fields withdraws it, so e types normally again.
+	enableFor string
+	// enabling is the running `gcloud services enable`, nil otherwise.
+	enabling *execComp
+	// checkingEnable is set while a failed enable's cause is looked into;
+	// see enableChecked. checkCancel abandons that check (esc, or leaving
+	// the screen), checkSeq tells its result from an abandoned one's, and
+	// checkPending is the failure being looked into, shown from gcloud's
+	// text alone if the check is abandoned.
+	checkingEnable bool
+	checkCancel    context.CancelFunc
+	checkSeq       int
+	checkPending   enableCheckedMsg
+	// billingCheck asks whether a project has billing. It is the gcp
+	// client's BillingEnabled; tests swap in fixed answers.
+	billingCheck func(ctx context.Context, projectID string) (bool, error)
+	// projectNumber resolves the project ID, the first call a submit makes.
+	// It is the gcp client's ProjectNumber; tests swap in one that blocks.
+	projectNumber func(ctx context.Context, projectID string) (string, error)
+	// validateCancel abandons a running submit's checks (esc, or leaving
+	// the screen), and validateSeq tells its result from an abandoned
+	// one's, which must not advance the wizard.
+	validateCancel context.CancelFunc
+	validateSeq    int
+}
+
+// submitTimeout bounds a submit's checks as a whole. A healthy run takes a
+// few seconds; with the network down each gcloud call would otherwise wait
+// its own cmdTimeout, one after the other.
+const submitTimeout = 30 * time.Second
+
+// enableCheckTimeout bounds the billing check after a failed enable. The
+// enable often failed because the network is down, and the panel it
+// delays used to appear at once.
+const enableCheckTimeout = 10 * time.Second
+
+// enableCheckedMsg carries a failed enable and what a fresh billing probe
+// then said about the project.
+type enableCheckedMsg struct {
+	owner     *projectScreen
+	seq       int
+	projectID string
+	cause     string
+	billingOn bool
+	err       error
 }
 
 func newField(label, value, placeholder string, set func(*state.Setup, string)) field {
@@ -107,7 +172,8 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			)
 		}
 	}
-	scr := &projectScreen{deps: deps, fields: fields}
+	scr := &projectScreen{deps: deps, fields: fields,
+		billingCheck: deps.GCP.BillingEnabled, projectNumber: deps.GCP.ProjectNumber}
 	scr.fields[0].input.Focus()
 	return scr
 }
@@ -122,13 +188,33 @@ func (s *projectScreen) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (s *projectScreen) CapturesText() bool { return true }
+// CapturesText is false while the enable, the billing check after a
+// failed one, or a submit's checks run: no field takes input then, and the
+// app's own keys ([v] log, / commands, ? help) must get through.
+func (s *projectScreen) CapturesText() bool {
+	return s.enabling == nil && !s.checkingEnable && !s.validating
+}
 
 func (s *projectScreen) Hints() []Hint {
+	if s.enabling != nil {
+		return []Hint{{"esc", "stop waiting"}}
+	}
+	// The bar only advertises keys Update acts on: during the billing check
+	// or a submit's checks that is esc alone.
+	if s.checkingEnable || s.validating {
+		return []Hint{{"esc", "stop waiting"}}
+	}
+	if s.enableFor != "" {
+		return []Hint{{"e", "enable the GKE API"}, {"enter", "check again"}, {"esc", "back"}}
+	}
 	return []Hint{{"tab/↓", "next field"}, {"enter", "validate & continue"}, {"esc", "back"}}
 }
 
 func (s *projectScreen) setFocus(i int) tea.Cmd {
+	// Moving to another field withdraws the [e] offer, like an edit does:
+	// otherwise the first e typed there (europe-west1-b, e2-standard-4)
+	// would start the enable instead.
+	s.enableFor = ""
 	s.fields[s.focus].input.Blur()
 	s.focus = (i + len(s.fields)) % len(s.fields)
 	return s.fields[s.focus].input.Focus()
@@ -141,27 +227,73 @@ func (s *projectScreen) submit() tea.Cmd {
 		return s.setFocus(0)
 	}
 	s.errText = ""
+	s.enableFor = ""
 	s.validating = true
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
 	s.checkingDocker = registry != ""
+	// One deadline for the whole submit, cancellable with esc: with the
+	// network down, each call below would otherwise wait its own
+	// cmdTimeout in turn while every key is swallowed.
+	s.validateSeq++
+	seq := s.validateSeq
+	ctx, cancel := context.WithTimeout(context.Background(), submitTimeout)
+	s.validateCancel = cancel
+	projectNumber := s.projectNumber
 	return func() tea.Msg {
-		msg := projValidMsg{owner: s}
-		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
+		defer cancel()
+		msg := projValidMsg{owner: s, seq: seq}
+		// Each submit re-reads ADC: after a PERMISSION_DENIED panel the
+		// user may have run `gcloud auth application-default login` as
+		// someone else. The probes in this submit still share one fetch.
+		// This runs here in the Cmd, never on the Update goroutine.
+		s.deps.GCP.ResetToken()
+		// The token does not depend on the project: fetch it while
+		// `projects describe` runs, so the probes below find it cached
+		// instead of paying a second cold gcloud spawn after it.
+		go s.deps.GCP.WarmToken(context.Background())
+		msg.number, msg.err = projectNumber(ctx, pid)
+		if msg.err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			msg.err = fmt.Errorf("timed out after %v looking up project %s: %w", submitTimeout, pid, msg.err)
+		}
+		// The cluster step lists clusters next, and that fails outright on
+		// a project without billing or without the GKE API. Catch both
+		// here, where the fix is still one command away.
+		if msg.err == nil {
+			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(ctx, s.deps.GCP, pid)
+		}
+		// No billing or no API blocks the step, and Update then shows
+		// that alone, so the checks below would be paid for and thrown
+		// away, on every retry.
+		blocked := msg.err != nil || msg.billingOff || msg.apiOff
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
-		if msg.err == nil && !acked {
-			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
+		if !blocked && !acked {
+			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(ctx, pid)
 		}
-		if msg.err == nil && registry != "" {
+		if !blocked && registry != "" {
 			for _, c := range doctor.DockerChecks(registry) {
-				if res := c.Run(context.Background()); res.Status == doctor.Fail {
+				if res := c.Run(ctx); res.Status == doctor.Fail {
 					msg.docker = append(msg.docker, failedCheck{c.Name, res})
 				}
 			}
 		}
 		return msg
 	}
+}
+
+// abandonValidation stops waiting for a submit's checks (esc): they are
+// cancelled, their late result is dropped, and the fields are live again.
+// esc again then goes back, as usual.
+func (s *projectScreen) abandonValidation() {
+	if s.validateCancel != nil {
+		s.validateCancel()
+		s.validateCancel = nil
+	}
+	s.validateSeq++
+	s.validating, s.checkingDocker = false, false
+	pid := strings.TrimSpace(s.fields[0].input.Value())
+	s.errText = fmt.Sprintf("Stopped validating %s. Press [enter] to check again, or [esc] to go back.", pid)
 }
 
 // dockerRegistry is the registry the install will push to with docker, or ""
@@ -226,7 +358,232 @@ func permProblem(projectID string, missing []gcp.RequiredPermission, permErr err
 	return b.String()
 }
 
+// projectServing asks whether projectID has billing and the GKE API on.
+// Each probe that could not run adds to probeErr instead of claiming either
+// answer. The two probes run concurrently and share the Client's cached
+// access token, so together they cost one round trip, not two.
+func projectServing(ctx context.Context, gc *gcp.Client, projectID string) (billingOff, apiOff bool, probeErr error) {
+	var (
+		wg                 sync.WaitGroup
+		billingOn, apiOn   bool
+		billingErr, apiErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		billingOn, billingErr = gc.BillingEnabled(ctx, projectID)
+	}()
+	go func() {
+		defer wg.Done()
+		apiOn, apiErr = gc.ServiceEnabled(ctx, projectID, gcp.GKEService)
+	}()
+	wg.Wait()
+	if billingErr == nil {
+		billingOff = !billingOn
+	}
+	if apiErr == nil {
+		apiOff = !apiOn
+	}
+	return billingOff, apiOff, errors.Join(billingErr, apiErr)
+}
+
+// billingProblem renders a project without billing. There is no offer to fix
+// it here: linking an account needs the user to pick one, and often a
+// billing admin to allow it.
+func billingProblem(projectID string, apiOff bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Billing is not enabled on %s; GKE refuses every request without it.\n", projectID)
+	b.WriteString(billingFix(projectID))
+	if apiOff {
+		fmt.Fprintf(&b, "%s is disabled too; once billing is linked, this screen can enable it for you.\n", gcp.GKEService)
+	}
+	b.WriteString(billingNext)
+	return b.String()
+}
+
+// billingFix is the fix for a project without billing, shared by every
+// panel that reports one so they cannot drift apart.
+func billingFix(projectID string) string {
+	return fmt.Sprintf("  fix: gcloud billing projects link %s --billing-account=ACCOUNT_ID\n"+
+		"   or: https://console.cloud.google.com/billing/linkedaccount?project=%s\n", projectID, projectID)
+}
+
+// billingNext closes a billing panel: nothing here can link an account.
+const billingNext = "Link an account, then press [enter] to check again."
+
+// apiProblem renders a project with billing but without the GKE API, and
+// offers to enable it.
+func apiProblem(projectID string) string {
+	return fmt.Sprintf("%s is disabled on %s; the cluster step cannot list or create clusters without it.\n"+
+		"  fix: %s\n"+
+		"Press [e] to enable it now, or [enter] to check again.",
+		gcp.GKEService, projectID, gcp.EnableServiceCommand(projectID, gcp.GKEService))
+}
+
+// probeProblem renders a billing or API probe that could not run. Like a
+// permission probe failure it proves nothing, so a second enter goes on.
+func probeProblem(projectID string, err error) string {
+	return fmt.Sprintf("Could not verify billing and the GKE API on %s:\n%v\n"+
+		"Press [enter] again to continue anyway; the cluster step may fail.", projectID, err)
+}
+
+// enableProblem renders a failed `gcloud services enable`, with the fix for
+// kind. A project provably without billing never gets here: it takes the
+// billingProblem panel instead (see enableChecked).
+func enableProblem(projectID, cause string, kind enableFailure) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Could not enable %s on %s", gcp.GKEService, projectID)
+	if cause != "" {
+		b.WriteString(":\n" + cause)
+	}
+	b.WriteString("\n")
+	switch kind {
+	case enableFailedBilling:
+		fmt.Fprintf(&b, "Billing must be enabled on %s before any API can be.\n", projectID)
+		b.WriteString(billingFix(projectID))
+		b.WriteString(billingNext)
+		return b.String()
+	case enableFailedPermission:
+		b.WriteString("Enabling it needs serviceusage.services.enable (roles/serviceusage.serviceUsageAdmin).\n")
+	}
+	fmt.Fprintf(&b, "  fix: %s\n"+
+		"Press [e] to try again, or [enter] to check again.", gcp.EnableServiceCommand(projectID, gcp.GKEService))
+	return b.String()
+}
+
+type enableFailure int
+
+const (
+	enableFailedOther enableFailure = iota
+	enableFailedPermission
+	enableFailedBilling
+)
+
+// enableFailureKind sorts a `gcloud services enable` error by its cause.
+// gcloud prints the API's status, e.g. "FAILED_PRECONDITION: Billing must
+// be enabled for activation of service(s)" or "PERMISSION_DENIED:
+// Permission denied to enable service". It matches status names, never
+// bare codes like 403: the line often carries operation names and project
+// numbers that contain those digits.
+//
+// billingOn is set when the billing API has confirmed billing is enabled;
+// the text is then never read as a billing failure, so a line such as
+// "PERMISSION_DENIED: … billing …" is the permission failure it says it is.
+func enableFailureKind(cause string, billingOn bool) enableFailure {
+	lower := strings.ToLower(cause)
+	switch {
+	case !billingOn && strings.Contains(lower, "billing"):
+		return enableFailedBilling
+	case strings.Contains(cause, "PERMISSION_DENIED"), strings.Contains(lower, "permission denied"):
+		return enableFailedPermission
+	}
+	return enableFailedOther
+}
+
+// enable runs `gcloud services enable` for the offered project.
+func (s *projectScreen) enable() tea.Cmd {
+	s.errText = ""
+	s.enabling = newExecComp(s.deps.Runner, gcp.EnableService(s.enableFor, gcp.GKEService), nil, s.deps.LogPath)
+	return s.enabling.start()
+}
+
+// enableDone routes the finished enable: on success every check runs again,
+// so the screen advances only once the whole project validates. On failure
+// it asks the billing API whether billing is why, rather than guessing from
+// gcloud's text; enableChecked then picks the panel.
+func (s *projectScreen) enableDone() tea.Cmd {
+	comp := s.enabling
+	s.enabling = nil
+	if comp.failed == nil {
+		return s.submit()
+	}
+	cause := comp.cause
+	if cause == "" {
+		cause = comp.failed.Error()
+	}
+	pid := s.enableFor
+	s.validating, s.checkingEnable = true, true
+	s.checkSeq++
+	ctx, cancel := context.WithTimeout(context.Background(), enableCheckTimeout)
+	s.checkCancel = cancel
+	pending := enableCheckedMsg{owner: s, seq: s.checkSeq, projectID: pid, cause: cause}
+	s.checkPending = pending
+	check := s.billingCheck
+	return func() tea.Msg {
+		defer cancel()
+		m := pending
+		m.billingOn, m.err = check(ctx, pid)
+		return m
+	}
+}
+
+// abandonCheck stops waiting for the billing check (esc): the failure is
+// shown at once from gcloud's text alone, as when the probe cannot answer,
+// and the check's late result is dropped.
+func (s *projectScreen) abandonCheck() {
+	m := s.checkPending
+	m.err = context.Canceled
+	s.enableChecked(m)
+}
+
+// enableChecked shows a failed enable once the billing probe has answered.
+//
+//   - Billing provably off: the billing panel, as on submit. [e] is
+//     withdrawn: no enable can work until an account is linked.
+//   - Billing provably on: gcloud's text is read for the permission case
+//     only; anything else gets the cause and the manual command.
+//   - The probe could not answer: gcloud's text is the only evidence left,
+//     so a billing precondition in it still gets the billing fix. This is
+//     the case [e] is offered in without a billing answer (probeErr on
+//     submit), so it is where a billing failure is most likely, and
+//     dropping the fallback would show a generic panel for it.
+func (s *projectScreen) enableChecked(m enableCheckedMsg) {
+	s.validating, s.checkingEnable = false, false
+	if s.checkCancel != nil {
+		s.checkCancel()
+		s.checkCancel = nil
+	}
+	if m.err == nil && !m.billingOn {
+		s.enableFor = ""
+		s.errText = billingProblem(m.projectID, true)
+		return
+	}
+	kind := enableFailureKind(m.cause, m.err == nil)
+	s.errText = enableProblem(m.projectID, m.cause, kind)
+	if kind == enableFailedBilling {
+		// Only when the probe could not answer. The billing panel says
+		// to link an account and press enter: another enable would
+		// fail the same way.
+		s.enableFor = ""
+	}
+}
+
+// Stop cancels an enable, the billing check after one, or a submit's
+// checks, still running when the wizard leaves the screen.
+func (s *projectScreen) Stop() {
+	if s.enabling != nil {
+		s.enabling.stop()
+	}
+	if s.checkCancel != nil {
+		s.checkCancel()
+	}
+	if s.validateCancel != nil {
+		s.validateCancel()
+	}
+}
+
+// logComp exposes the running enable, so [l]/[v] show its live output.
+func (s *projectScreen) logComp() *execComp { return s.enabling }
+
 func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
+	if s.enabling != nil {
+		if cmd, handled := s.enabling.update(msg); handled {
+			if s.enabling.finished {
+				return s.enableDone()
+			}
+			return cmd
+		}
+	}
 	switch m := msg.(type) {
 	case prefillMsg:
 		if m.owner == s && s.fields[0].input.Value() == "" {
@@ -234,22 +591,52 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		}
 		return nil
 
+	case enableCheckedMsg:
+		// A result for a check that was abandoned (esc) comes too late.
+		if m.owner == s && s.checkingEnable && m.seq == s.checkSeq {
+			s.enableChecked(m)
+		}
+		return nil
+
 	case projValidMsg:
-		if m.owner != s {
+		// A result for a submit that was abandoned (esc) or superseded
+		// must not advance the wizard or replace the panel.
+		if m.owner != s || m.seq != s.validateSeq {
 			return nil
 		}
+		if s.validateCancel != nil {
+			s.validateCancel()
+			s.validateCancel = nil
+		}
 		s.validating = false
+		pid := strings.TrimSpace(s.fields[0].input.Value())
 		if m.err != nil {
 			s.errText = m.err.Error()
+			return nil
+		}
+		// Billing and the API first: nothing after them works without
+		// them, and neither can be waved through.
+		if m.billingOff {
+			s.errText = billingProblem(pid, m.apiOff)
+			return nil
+		}
+		if m.apiOff {
+			s.enableFor = pid
+			s.errText = apiProblem(pid)
 			return nil
 		}
 		if len(m.docker) > 0 {
 			s.errText = dockerProblem(m.docker)
 			return nil
 		}
+		if m.probeErr != nil && !s.probeAcked {
+			s.probeAcked = true
+			s.errText = probeProblem(pid, m.probeErr)
+			return nil
+		}
 		if len(m.missing) > 0 || m.permErr != nil {
 			s.permAcked = true
-			s.errText = permProblem(strings.TrimSpace(s.fields[0].input.Value()), m.missing, m.permErr)
+			s.errText = permProblem(pid, m.missing, m.permErr)
 			return nil
 		}
 		st := s.deps.Setup
@@ -263,7 +650,29 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		return goNext
 
 	case tea.KeyMsg:
+		if s.checkingEnable {
+			// esc stops waiting for the billing check and shows the
+			// failure from gcloud's text; nothing else is live.
+			if m.String() == "esc" {
+				s.abandonCheck()
+			}
+			return nil
+		}
 		if s.validating {
+			// esc stops waiting for the checks; a second esc goes back.
+			if m.String() == "esc" {
+				s.abandonValidation()
+			}
+			return nil
+		}
+		if s.enabling != nil {
+			// Only esc gets through: it abandons the wait, not the
+			// operation, which gcloud may already have started server-side.
+			if m.String() == "esc" {
+				s.enabling.stop()
+				s.enabling = nil
+				s.errText = fmt.Sprintf("Stopped waiting for %s to enable. Press [enter] to check again.", gcp.GKEService)
+			}
 			return nil
 		}
 		switch m.String() {
@@ -278,7 +687,18 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 				return s.setFocus(s.focus + 1)
 			}
 			return s.submit()
+		case "e":
+			if s.enableFor != "" {
+				return s.enable()
+			}
 		}
+		// Editing a field withdraws the offer: it was for the project as
+		// validated, and e has to type again. It also re-arms the
+		// advisory warnings: "continue anyway" was said about the project
+		// as it was, and must not wave a different one through.
+		s.enableFor = ""
+		s.probeAcked = false
+		s.permAcked = false
 		var cmd tea.Cmd
 		s.fields[s.focus].input, cmd = s.fields[s.focus].input.Update(msg)
 		return cmd
@@ -305,14 +725,19 @@ func (s *projectScreen) View(w int) string {
 
 	b.WriteString("\n")
 	switch {
+	case s.enabling != nil:
+		b.WriteString(theme.Accent.Render(fmt.Sprintf("Enabling %s on %s… (this can take a minute or two)", gcp.GKEService, s.enableFor)) + "\n\n")
+		b.WriteString(s.enabling.view(w))
+	case s.checkingEnable:
+		b.WriteString(theme.Accent.Render(fmt.Sprintf("Enabling %s failed; checking billing on %s…", gcp.GKEService, s.enableFor)))
 	case s.validating && s.checkingDocker:
-		b.WriteString(theme.Accent.Render("Validating project with gcloud and checking Docker…"))
+		b.WriteString(theme.Accent.Render("Validating project, billing and APIs with gcloud and checking Docker…"))
 	case s.validating:
-		b.WriteString(theme.Accent.Render("Validating project with gcloud…"))
+		b.WriteString(theme.Accent.Render("Validating project, billing and APIs with gcloud…"))
 	case s.errText != "":
-		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
+		b.WriteString(theme.ErrorPanel.Width(min(w-4, 90)).Render(theme.Bad.Render(s.errText)))
 	default:
-		b.WriteString(theme.Subtle.Render("The project is validated with `gcloud projects describe` on submit."))
+		b.WriteString(theme.Subtle.Render("On submit the project is validated, and billing and the GKE API are checked."))
 	}
 	return b.String()
 }
