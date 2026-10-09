@@ -143,7 +143,11 @@ if ${KEEP_REPOSITORY}; then
     exit 1
   fi
 elif ! grep -q -- '--delete-repository' "${TEARDOWN}"; then
-  echo "this upstream version does not support repository deletion; pass --commit with the installation's revision or use --substrate-root" >&2
+  if [ -z "${COMMIT}" ]; then
+    echo "this checkout has no repository teardown; use a newer one" >&2
+  else
+    echo "this upstream version does not support repository deletion; pass --commit with the installation's revision or use --substrate-root" >&2
+  fi
   exit 1
 fi
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")

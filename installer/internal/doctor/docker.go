@@ -107,7 +107,7 @@ func warnOnly(c Check) Check {
 	c.Fatal, c.SourceOnly = false, true
 	c.Run = func(ctx context.Context) Result {
 		res := run(ctx)
-		if res.Status == Fail {
+		if res.Status == Fail || res.Status == Warn {
 			res.Status = Warn
 			res.Detail += " (only needed to build Substrate 0.2 or later from source)"
 		}
@@ -206,7 +206,7 @@ func dockerAuthConfigured(_ context.Context) Result {
 	}
 	if !configured {
 		if cfg.CredsStore != "" {
-			return Result{Warn, "credential store configured; cannot verify credentials before a registry is chosen", ""}
+			return Result{Warn, "credential store configured; cannot verify credentials before a registry is chosen", fix}
 		}
 		return Result{Fail, "no Docker credential helper or saved credentials configured", fix}
 	}

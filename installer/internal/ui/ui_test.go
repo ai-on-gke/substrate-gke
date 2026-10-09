@@ -520,23 +520,29 @@ func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {
 	app.deps.Builder = snapshot.NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	app.deps.Setup.Track = state.TrackAdvanced
 
-	if got := newProjectScreen(app.deps).dockerRegistry("acme"); got != "" {
+	scr := newProjectScreen(app.deps)
+	st := scr.inputSetup("acme")
+	if got := scr.dockerRegistry(&st); got != "" {
 		t.Errorf("the pin builds nothing with docker, got registry %q", got)
 	}
 	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
-	scr := newProjectScreen(app.deps)
-	if got := scr.dockerRegistry("acme"); got != "gcr.io/acme/ate-images" {
+	scr = newProjectScreen(app.deps)
+	st = scr.inputSetup("acme")
+	if got := scr.dockerRegistry(&st); got != "gcr.io/acme/ate-images" {
 		t.Errorf("dockerRegistry = %q, want the default registry", got)
 	}
 	scr.fields[len(scr.fields)-1].input.SetValue("us-docker.pkg.dev/acme/ate")
-	if got := scr.dockerRegistry("acme"); got != "us-docker.pkg.dev/acme/ate" {
+	st = scr.inputSetup("acme")
+	if got := scr.dockerRegistry(&st); got != "us-docker.pkg.dev/acme/ate" {
 		t.Errorf("dockerRegistry = %q, want the typed registry", got)
 	}
 	if app.deps.Setup.KoDockerRepo != "" {
 		t.Error("probing the registry must not commit it before the project validates")
 	}
 	app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
-	if got := newProjectScreen(app.deps).dockerRegistry("acme"); got != "" {
+	scr = newProjectScreen(app.deps)
+	st = scr.inputSetup("acme")
+	if got := scr.dockerRegistry(&st); got != "" {
 		t.Errorf("a pre-built install builds nothing with docker, got registry %q", got)
 	}
 }
@@ -808,6 +814,10 @@ func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
 	if app.mach.Current() != state.UpgradeSource || scr.errText == "" {
 		t.Fatal("a source install without its registry was accepted")
 	}
+	if scr.focus != 2 || !strings.Contains(scr.errText, "pre-built") || !strings.Contains(scr.errText, "source") {
+		t.Fatalf("missing registry: focus=%d, error=%q", scr.focus, scr.errText)
+	}
+	press("enter")
 	const registry = "europe-west4-docker.pkg.dev/acme/shared-images"
 	typeText(t, app, registry)
 	press("enter")
@@ -1973,7 +1983,7 @@ func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 	st := app.deps.Setup
 	st.ProjectID, st.Zone = "acme", "us-west1-c"
 	scr := newProjectScreen(app.deps)
-	if got := scr.dockerRegistry("acme"); got != "" {
+	if got := scr.dockerRegistry(st); got != "" {
 		t.Fatalf("project checked a region-dependent default: %q", got)
 	}
 	st.Zone = "europe-west4-a"

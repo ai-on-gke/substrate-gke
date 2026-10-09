@@ -135,7 +135,7 @@ func TestApplyProjectDefaultsRespectsOverrides(t *testing.T) {
 	}
 }
 
-func TestApplyProjectDefaultsValidatesRepositoryName(t *testing.T) {
+func TestValidateRepositoryName(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		valid bool
@@ -146,9 +146,7 @@ func TestApplyProjectDefaultsValidatesRepositoryName(t *testing.T) {
 		{"../images", false},
 		{strings.Repeat("a", 64), false},
 	} {
-		s := NewSetup()
-		s.ArtifactRegistryRepository = tc.name
-		if err := s.ApplyProjectDefaults(); (err == nil) != tc.valid {
+		if err := ValidateRepositoryName(tc.name); (err == nil) != tc.valid {
 			t.Errorf("repository %q: %v; valid=%t", tc.name, err, tc.valid)
 		}
 	}

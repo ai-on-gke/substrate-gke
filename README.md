@@ -243,7 +243,7 @@ That flow names the cluster, reads what it currently runs, takes the new version
 
 When a source upgrade needs the default Artifact Registry repository, the hand-over includes its setup commands.
 
-The installed tree is fetched at the commit the running API server reports it was built from (Go stamps every binary; `ateapi --version` prints it). If the cluster can't be read, or the binary carries no commit, you'll be prompted to enter the commit, version, and — for pre-built images — the registry.
+The installed tree is fetched at the commit the running API server reports it was built from (Go stamps every binary; `ateapi --version` prints it). If the cluster can't be read, or the binary carries no commit, you'll be prompted to enter the commit, version, and image registry. For source builds, enter the registry the images were pushed to.
 
 ## Tearing down
 
@@ -258,7 +258,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. Repositories are kept by default. The installer's command adds `--delete-repository` when it provisioned one; replace it with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` to delete the repository. It's safe to re-run after a partial failure.
+The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. Repositories are kept by default. The installer's command adds `--delete-repository` when it provisioned one; replace it with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` together with `SUBSTRATE_COMMIT=<sha>` (or `SUBSTRATE_ROOT=<path>`) for a version that supports repository deletion. It's safe to re-run after a partial failure.
 
 To remove **only** the Substrate control plane and keep the cluster:
 

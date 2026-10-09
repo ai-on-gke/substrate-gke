@@ -191,8 +191,8 @@ func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 		s.errText = "The installed version is required; it is the ate.dev/substrate-version label on the nodes."
 		return s.setFocus(1)
 	case registry == "" && sourceRegistry == "":
-		s.errText = "The registry used by the installed source build is required."
-		return s.setFocus(3)
+		s.errText = "Enter the pre-built image registry, or for a source build the registry its images were pushed to."
+		return s.setFocus(2)
 	case registry != "" && sourceRegistry != "":
 		s.errText = "Enter either a pre-built image registry or a source build registry."
 		return s.setFocus(3)
@@ -326,7 +326,7 @@ func (s *upgradeSourceScreen) View(w int) string {
 	case s.mode == "manual" && s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
 	case s.mode == "manual":
-		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. The commit is\nwhat the running API server prints for --version, or what the images were\nbuilt from. Pre-built images came from a registry; the release registry is offered."))
+		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. The commit is\nwhat the running API server prints for --version, or what the images were\nbuilt from. Enter the pre-built image registry or, for source builds, the registry\nthe images were pushed to."))
 	default:
 		b.WriteString(theme.Subtle.Render("The installer reads the running version, images and commit off the cluster.\nCredentials are fetched with gcloud."))
 	}

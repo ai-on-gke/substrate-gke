@@ -331,9 +331,6 @@ func defaultBucketName(projectID, clusterName, zone string) string {
 // name, and cluster location unless the user already overrode them. It runs
 // once the cluster is chosen, so the cluster name is always set by then.
 func (s *Setup) ApplyProjectDefaults() error {
-	if err := ValidateRepositoryName(s.ArtifactRegistryRepository); err != nil {
-		return err
-	}
 	if s.BucketName == "" {
 		s.BucketName = defaultBucketName(s.ProjectID, s.ClusterName, s.Zone)
 	}

@@ -153,7 +153,8 @@ func (s *projectScreen) submit() tea.Cmd {
 	if s.repositoryField >= 0 {
 		name := strings.TrimSpace(s.fields[s.repositoryField].input.Value())
 		if err := state.ValidateRepositoryName(name); err != nil {
-			s.errText = err.Error()
+			message := err.Error()
+			s.errText = strings.ToUpper(message[:1]) + message[1:] + "."
 			return s.setFocus(s.repositoryField)
 		}
 	}
@@ -165,7 +166,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	if s.deps.Builder.CreatesArtifactRepository(&st) {
 		repositoryPermissions = gcp.RepositoryPermissions
 	}
-	registry := s.dockerRegistry(pid)
+	registry := s.dockerRegistry(&st)
 	s.checkingDocker = registry != ""
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
@@ -198,18 +199,17 @@ func (s *projectScreen) inputSetup(pid string) state.Setup {
 
 // dockerRegistry selects checks for a known build destination. The default AR
 // destination waits for cluster selection, which may change its region.
-func (s *projectScreen) dockerRegistry(pid string) string {
+func (s *projectScreen) dockerRegistry(st *state.Setup) string {
 	if s.deps.DryRun || s.deps.Builder == nil {
 		return ""
 	}
-	st := s.inputSetup(pid)
-	if !s.deps.Builder.BuildsWithDocker(&st) {
+	if !s.deps.Builder.BuildsWithDocker(st) {
 		return ""
 	}
-	if s.deps.Builder.CreatesArtifactRepository(&st) {
+	if s.deps.Builder.CreatesArtifactRepository(st) {
 		return ""
 	}
-	return s.deps.Builder.BuildRepository(&st)
+	return s.deps.Builder.BuildRepository(st)
 }
 
 // dockerProblem renders the docker checks that failed. Unlike a permission

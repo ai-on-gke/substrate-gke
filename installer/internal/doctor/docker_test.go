@@ -275,6 +275,9 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 				if tc.name == "store" && !strings.Contains(res.Detail, "before a registry is chosen") {
 					t.Errorf("credential store: %s", res.Detail)
 				}
+				if res.Status == Warn && (res.Fix == "" || !strings.Contains(res.Detail, "only needed to build")) {
+					t.Errorf("warning needs a fix and source-build qualifier: %+v", res)
+				}
 				if res.Status == Pass && !strings.Contains(res.Detail, "after selection") {
 					t.Error("configuration check must not imply registry credentials were verified")
 				}
