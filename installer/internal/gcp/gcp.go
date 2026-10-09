@@ -82,6 +82,10 @@ type Client struct {
 	// token overrides how the REST probes obtain an access token; nil
 	// means asking gcloud for the application-default one.
 	token func(ctx context.Context) (string, error)
+	// onTokenWait, when set, is called each time a caller joins a token
+	// fetch already under way. Tests use it to know every caller is
+	// queued before releasing the fetch, instead of sleeping.
+	onTokenWait func()
 
 	// tokenMu guards the access token accessToken caches, so one submit's
 	// REST probes, run concurrently, share a single gcloud spawn.

@@ -192,12 +192,16 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		return token, nil
 	}
 	f := c.tokenFetch
+	joined := f != nil
 	if f == nil {
 		f = &tokenFetch{done: make(chan struct{})}
 		c.tokenFetch = f
 		go c.runTokenFetch(f)
 	}
 	c.tokenMu.Unlock()
+	if joined && c.onTokenWait != nil {
+		c.onTokenWait()
+	}
 
 	select {
 	case <-f.done:

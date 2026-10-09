@@ -252,6 +252,7 @@ func TestFailedTokenFetchIsSharedByItsWaiters(t *testing.T) {
 	defer srv.Close()
 	var fetches atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
+	joined := make(chan struct{}, 3)
 	c := &Client{billingBase: srv.URL, serviceUsageBase: srv.URL, crmBase: srv.URL,
 		token: func(context.Context) (string, error) {
 			if fetches.Add(1) == 1 {
@@ -259,7 +260,9 @@ func TestFailedTokenFetchIsSharedByItsWaiters(t *testing.T) {
 			}
 			<-release
 			return "", errors.New("Reauthentication failed. cannot prompt during non-interactive execution.")
-		}}
+		},
+		onTokenWait: func() { joined <- struct{}{} },
+	}
 
 	go c.WarmToken(context.Background())
 	<-started
@@ -267,7 +270,10 @@ func TestFailedTokenFetchIsSharedByItsWaiters(t *testing.T) {
 	go func() { _, err := c.BillingEnabled(context.Background(), "acme"); errs <- err }()
 	go func() { _, err := c.ServiceEnabled(context.Background(), "acme", GKEService); errs <- err }()
 	go func() { _, err := c.MissingPermissions(context.Background(), "acme"); errs <- err }()
-	time.Sleep(50 * time.Millisecond) // let the probes queue on the fetch
+	// Fail the fetch only once all three probes have joined it.
+	for range 3 {
+		<-joined
+	}
 	close(release)
 	for range 3 {
 		if err := <-errs; err == nil || !strings.Contains(err.Error(), "Reauthentication failed") {
