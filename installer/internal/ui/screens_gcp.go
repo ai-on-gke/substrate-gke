@@ -402,12 +402,13 @@ const (
 // bare codes like 403: the line often carries operation names and project
 // numbers that contain those digits.
 //
-// Whether billing is the cause is asked of the billing API first; the
-// text is consulted for billing only when that probe cannot answer.
-func enableFailureKind(cause string) enableFailure {
+// billingOn is set when the billing API has confirmed billing is enabled;
+// the text is then never read as a billing failure, so a line such as
+// "PERMISSION_DENIED: … billing …" is the permission failure it says it is.
+func enableFailureKind(cause string, billingOn bool) enableFailure {
 	lower := strings.ToLower(cause)
 	switch {
-	case strings.Contains(lower, "billing"):
+	case !billingOn && strings.Contains(lower, "billing"):
 		return enableFailedBilling
 	case strings.Contains(cause, "PERMISSION_DENIED"), strings.Contains(lower, "permission denied"):
 		return enableFailedPermission
@@ -458,26 +459,18 @@ func (s *projectScreen) enableDone() tea.Cmd {
 //     dropping the fallback would show a generic panel for it.
 func (s *projectScreen) enableChecked(m enableCheckedMsg) {
 	s.validating, s.checkingEnable = false, false
-	switch {
-	case m.err == nil && !m.billingOn:
+	if m.err == nil && !m.billingOn {
 		s.enableFor = ""
 		s.errText = billingProblem(m.projectID, true)
 		return
-	case m.err == nil:
-		kind := enableFailureKind(m.cause)
-		if kind == enableFailedBilling {
-			// The API says billing is on; the text is wrong or stale.
-			kind = enableFailedOther
-		}
-		s.errText = enableProblem(m.projectID, m.cause, kind)
-	default:
-		kind := enableFailureKind(m.cause)
-		s.errText = enableProblem(m.projectID, m.cause, kind)
-		if kind == enableFailedBilling {
-			// The billing panel says to link an account and press
-			// enter: another enable would fail the same way.
-			s.enableFor = ""
-		}
+	}
+	kind := enableFailureKind(m.cause, m.err == nil)
+	s.errText = enableProblem(m.projectID, m.cause, kind)
+	if kind == enableFailedBilling {
+		// Only when the probe could not answer. The billing panel says
+		// to link an account and press enter: another enable would
+		// fail the same way.
+		s.enableFor = ""
 	}
 }
 

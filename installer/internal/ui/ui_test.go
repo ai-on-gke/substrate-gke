@@ -715,8 +715,10 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 	const (
 		billingLine = "ERROR: (gcloud.services.enable) FAILED_PRECONDITION: Billing must be enabled for activation of service(s) 'container.googleapis.com' to proceed."
 		permLine    = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
-		otherLine   = "ERROR: (gcloud.services.enable) UNAVAILABLE: The service is currently unavailable."
-		id403Line   = "ERROR: (gcloud.services.enable) INTERNAL: Operation operations/acf.p2-403712345678-5d1e failed."
+		// gcloud's PERMISSION_DENIED variants can name billing too.
+		permBillLine = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]; caller lacks serviceusage.services.enable, which is checked before billing."
+		otherLine    = "ERROR: (gcloud.services.enable) UNAVAILABLE: The service is currently unavailable."
+		id403Line    = "ERROR: (gcloud.services.enable) INTERNAL: Operation operations/acf.p2-403712345678-5d1e failed."
 	)
 	type probe struct {
 		on  bool
@@ -747,6 +749,9 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 
 		{"on/billing text", billingOn, billingLine, []string{"FAILED_PRECONDITION", retry}, []string{billingPanel, enableBill, permPanel}, true},
 		{"on/permission text", billingOn, permLine, []string{"PERMISSION_DENIED", permPanel, retry}, []string{billingPanel, enableBill}, true},
+		// Billing is confirmed on, so a permission line that mentions
+		// billing is a permission failure, not a billing one.
+		{"on/permission text naming billing", billingOn, permBillLine, []string{"PERMISSION_DENIED", permPanel, retry}, []string{billingPanel, enableBill}, true},
 		{"on/other text", billingOn, otherLine, []string{"UNAVAILABLE", gcp.EnableServiceCommand("acme", gcp.GKEService), retry}, []string{permPanel, enableBill}, true},
 		{"on/403 in an id", billingOn, id403Line, []string{"INTERNAL", retry}, []string{permPanel, enableBill}, true},
 
