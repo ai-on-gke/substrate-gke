@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -44,6 +45,12 @@ var BootstrapPermissions = []RequiredPermission{
 	{"monitoring.dashboards.create", "roles/monitoring.editor"},
 }
 
+// RepositoryPermissions are needed when bootstrap provisions an image repository.
+var RepositoryPermissions = []RequiredPermission{
+	{"artifactregistry.repositories.get", "roles/artifactregistry.admin"},
+	{"artifactregistry.repositories.create", "roles/artifactregistry.admin"},
+}
+
 // MissingPermissions reports which of the bootstrap permissions the active
 // application-default credentials do not hold on projectID. It asks Cloud
 // Resource Manager's testIamPermissions, which evaluates the caller's full
@@ -54,7 +61,7 @@ var BootstrapPermissions = []RequiredPermission{
 // An error means the question could not be asked (no token, no network, API
 // rejection), not that permissions are missing; callers should degrade to a
 // warning rather than block on it.
-func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]RequiredPermission, error) {
+func (c *Client) MissingPermissions(ctx context.Context, projectID string, extra ...RequiredPermission) ([]RequiredPermission, error) {
 	if c.DryRun {
 		return nil, nil
 	}
@@ -70,8 +77,9 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 		return nil, err
 	}
 
-	perms := make([]string, len(BootstrapPermissions))
-	for i, p := range BootstrapPermissions {
+	required := slices.Concat(BootstrapPermissions, extra)
+	perms := make([]string, len(required))
+	for i, p := range required {
 		perms[i] = p.Permission
 	}
 	body, err := json.Marshal(map[string][]string{"permissions": perms})
@@ -113,18 +121,18 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 	if err := json.Unmarshal(respBody, &held); err != nil {
 		return nil, fmt.Errorf("parsing testIamPermissions response: %w", err)
 	}
-	return missingFrom(held.Permissions), nil
+	return missingFrom(held.Permissions, extra...), nil
 }
 
 // missingFrom returns the bootstrap permissions absent from held, in the
-// stable BootstrapPermissions order.
-func missingFrom(held []string) []RequiredPermission {
+// order requested, with version-specific permissions last.
+func missingFrom(held []string, extra ...RequiredPermission) []RequiredPermission {
 	heldSet := make(map[string]bool, len(held))
 	for _, p := range held {
 		heldSet[p] = true
 	}
 	var missing []RequiredPermission
-	for _, p := range BootstrapPermissions {
+	for _, p := range slices.Concat(BootstrapPermissions, extra) {
 		if !heldSet[p.Permission] {
 			missing = append(missing, p)
 		}

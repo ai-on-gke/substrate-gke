@@ -63,10 +63,11 @@ type failedCheck struct {
 }
 
 type projectScreen struct {
-	deps       *Deps
-	fields     []field
-	focus      int
-	validating bool
+	deps            *Deps
+	fields          []field
+	repositoryField int
+	focus           int
+	validating      bool
 	// checkingDocker is set while validation also runs the docker checks,
 	// so a slow docker is not taken for a slow gcloud.
 	checkingDocker bool
@@ -102,12 +103,18 @@ func newProjectScreen(deps *Deps) *projectScreen {
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
 		if !st.Prebuilt() {
+			placeholder := "<region>-docker.pkg.dev/<project>/ate-images"
 			fields = append(fields,
-				newField("Image registry (leave empty for default)", st.KoDockerRepo, "gcr.io/<project>/ate-images", func(s *state.Setup, v string) { s.KoDockerRepo = v }),
+				newField("Image registry (leave empty for default)", st.KoDockerRepo, placeholder, func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 			)
 		}
 	}
-	scr := &projectScreen{deps: deps, fields: fields}
+	repositoryField := -1
+	if st.Track == state.TrackAdvanced && !st.Prebuilt() {
+		repositoryField = len(fields)
+		fields = append(fields, newField("Artifact Registry repository (leave empty for default)", st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
+	}
+	scr := &projectScreen{deps: deps, fields: fields, repositoryField: repositoryField}
 	scr.fields[0].input.Focus()
 	return scr
 }
@@ -140,10 +147,23 @@ func (s *projectScreen) submit() tea.Cmd {
 		s.errText = "A project ID is required."
 		return s.setFocus(0)
 	}
+	if s.repositoryField >= 0 {
+		name := strings.TrimSpace(s.fields[s.repositoryField].input.Value())
+		if err := state.ValidateRepositoryName(name); err != nil {
+			message := err.Error()
+			s.errText = strings.ToUpper(message[:1]) + message[1:] + "."
+			return s.setFocus(s.repositoryField)
+		}
+	}
 	s.errText = ""
 	s.validating = true
 	acked := s.permAcked
-	registry := s.dockerRegistry(pid)
+	st := s.inputSetup(pid)
+	var repositoryPermissions []gcp.RequiredPermission
+	if st.CreatesArtifactRepository() {
+		repositoryPermissions = gcp.RepositoryPermissions
+	}
+	registry := s.dockerRegistry(&st)
 	s.checkingDocker = registry != ""
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
@@ -151,7 +171,7 @@ func (s *projectScreen) submit() tea.Cmd {
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
 		if msg.err == nil && !acked {
-			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
+			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid, repositoryPermissions...)
 		}
 		if msg.err == nil && registry != "" {
 			for _, c := range doctor.DockerChecks(registry) {
@@ -164,38 +184,36 @@ func (s *projectScreen) submit() tea.Cmd {
 	}
 }
 
-// dockerRegistry is the registry the install will push to with docker, or ""
-// when it builds nothing with docker. The doctor already ran the docker
-// checks, but against the default registry and before the images step, where
-// a user who meant to install pre-built images may have skipped them. Now
-// that both the track and the registry are known, they run for real.
-//
-// A dry run skips them, as it skips the doctor's own probes.
-func (s *projectScreen) dockerRegistry(pid string) string {
-	if s.deps.DryRun || s.deps.Builder == nil {
-		return ""
-	}
-	// What the fields would make of the setup, without committing them
-	// before the project has validated.
+// inputSetup reads the form without committing it before validation succeeds.
+func (s *projectScreen) inputSetup(pid string) state.Setup {
 	st := *s.deps.Setup
 	for _, f := range s.fields {
 		f.set(&st, strings.TrimSpace(f.input.Value()))
 	}
 	st.ProjectID = pid
-	if !s.deps.Builder.BuildsWithDocker(&st) {
+	return st
+}
+
+// dockerRegistry selects checks for a known build destination. The default AR
+// destination waits for cluster selection, which may change its region.
+func (s *projectScreen) dockerRegistry(st *state.Setup) string {
+	if s.deps.DryRun || s.deps.Builder == nil {
 		return ""
 	}
-	if st.KoDockerRepo == "" {
-		return st.DefaultKoDockerRepo()
+	if !s.deps.Builder.BuildsWithDocker(st) {
+		return ""
 	}
-	return st.KoDockerRepo
+	if st.CreatesArtifactRepository() {
+		return ""
+	}
+	return st.BuildRepository()
 }
 
 // dockerProblem renders the docker checks that failed. Unlike a permission
 // problem it cannot be waved through: nothing outside this machine is going
 // to fix it, and the build it blocks runs only after the control plane is
 // applied.
-func dockerProblem(failed []failedCheck) string {
+func dockerProblem(failed []failedCheck, retryKey string) string {
 	var b strings.Builder
 	b.WriteString("This substrate builds its envoy-dataplane image with docker buildx, and docker is not ready:\n")
 	for _, f := range failed {
@@ -204,7 +222,7 @@ func dockerProblem(failed []failedCheck) string {
 			fmt.Fprintf(&b, "    fix: %s\n", f.res.Fix)
 		}
 	}
-	b.WriteString("Fix them, then press [enter] to check again. Or set ATE_ATENET_DATAPLANE=agentgateway before starting the installer, which builds nothing with docker.")
+	fmt.Fprintf(&b, "Fix them, then press [%s] to check again. Or set ATE_ATENET_DATAPLANE=agentgateway before starting the installer, which builds nothing with docker.", retryKey)
 	return b.String()
 }
 
@@ -244,7 +262,7 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if len(m.docker) > 0 {
-			s.errText = dockerProblem(m.docker)
+			s.errText = dockerProblem(m.docker, "enter")
 			return nil
 		}
 		if len(m.missing) > 0 || m.permErr != nil {
@@ -257,9 +275,6 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			f.set(st, strings.TrimSpace(f.input.Value()))
 		}
 		st.ProjectNumber = m.number
-		if st.KoDockerRepo == "" && !st.Prebuilt() {
-			st.KoDockerRepo = st.DefaultKoDockerRepo()
-		}
 		return goNext
 
 	case tea.KeyMsg:

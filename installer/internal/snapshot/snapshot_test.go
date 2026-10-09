@@ -16,6 +16,7 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -947,7 +948,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 		"CLUSTER_LOCATION=us-west1-c",
 		"GCE_REGION=us-west1",
 		"BUCKET_NAME=ate-snapshots-acme-substrate-test-us-west1-c",
-		"KO_DOCKER_REPO=gcr.io/acme/ate-images",
+		"KO_DOCKER_REPO=us-west1-docker.pkg.dev/acme/ate-images",
 		"NO_DEV_ENV=1",
 		"VERSION=substrate-" + ShortCommit(),
 	} {
@@ -1136,6 +1137,7 @@ func prebuiltSetup(t *testing.T) *state.Setup {
 // atelet actually is — a checkout's commit stamp would overwrite it with a lie.
 func TestPrebuiltEnvDropsTheBuildVariables(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
+	b.UseSource(Revision{Repo: RepoURL, Commit: Commit})
 	env := b.DeployAteSystem(prebuiltSetup(t)).Env
 
 	for _, unwanted := range []string{"KO_DOCKER_REPO", "KO_DEFAULTPLATFORMS"} {
@@ -1261,6 +1263,7 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "cache", "substrate-x"), true)
 	b.UseSource(Revision{Repo: origin, Commit: newSHA})
 	st := testSetup(t)
+	st.KoDockerRepo = "registry.example.com/installed-images"
 	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = origin, oldSHA, "substrate-"+shorten(oldSHA)
 
 	// A path with a space and a $ in it: the script must quote it
@@ -1332,7 +1335,7 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
 		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
 		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(st.KoDockerRepo), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
+		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
@@ -1369,7 +1372,7 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 		t.Errorf("installed exports:\n%s", installed)
 	}
 	next := b.NewExports(st)
-	if !strings.Contains(next, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
+	if !strings.Contains(next, "export KO_DOCKER_REPO='us-west1-docker.pkg.dev/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
 		t.Errorf("new exports:\n%s", next)
 	}
 }
@@ -1423,5 +1426,136 @@ func TestBuildsWithDockerReadsAUserSuppliedTree(t *testing.T) {
 	}
 	if !b.BuildsWithDocker(st) {
 		t.Error("a tree with the Dockerfile must need docker")
+	}
+}
+
+func TestArtifactRegistryBootstrap(t *testing.T) {
+	for _, tc := range []struct {
+		name, override, registry  string
+		managed, prebuilt, create bool
+	}{
+		{"default source registry", "", "europe-west4-docker.pkg.dev/acme/build-images", true, false, true},
+		{"custom source registry", "registry.example.com/shared", "registry.example.com/shared", true, false, false},
+		{"prebuilt images", "", "", true, true, false},
+		{"local source checkout", "", "europe-west4-docker.pkg.dev/acme/build-images", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CREATE_ARTIFACT_REPOSITORY", fmt.Sprint(!tc.create))
+			st := testSetup(t)
+			st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
+			st.KoDockerRepo = tc.override
+			if tc.prebuilt {
+				st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+			}
+			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), tc.managed)
+			b.SetupGCP = "/src/substrate-gke/tools/setup-gcp"
+			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40)})
+			spec := b.Bootstrap(st)
+			for _, want := range []string{"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(tc.create), "ARTIFACT_REGISTRY_REPOSITORY=build-images", "GCE_REGION=europe-west4"} {
+				if !slices.Contains(spec.Env, want) {
+					t.Errorf("missing %q in %v", want, spec.Env)
+				}
+			}
+			if !tc.prebuilt && (!slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) || !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.registry))) {
+				t.Errorf("build and upgrade must use %q", tc.registry)
+			}
+			steps := 7
+			if tc.create {
+				steps++
+			}
+			if slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
+				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
+			}
+			if strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {
+				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st))
+			}
+		})
+	}
+}
+
+func TestCleanupCommandRepositoryOptions(t *testing.T) {
+	b := NewBuilder(t.TempDir(), true)
+	for _, tc := range []struct{ name, repository, registry, imageRepo, suffix string }{
+		{"default repository", "", "", "", " --delete-repository"},
+		{"explicit default", "ate-images", "", "", " --delete-repository"},
+		{"custom repository", "build-images", "", "", " --repository 'build-images' --delete-repository"},
+		{"custom registry", "build-images", "registry.example.com/shared", "", ""},
+		{"prebuilt images", "build-images", "", ReleaseRepo, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testSetup(t)
+			st.Zone = "europe-west4-a"
+			st.ArtifactRegistryRepository, st.KoDockerRepo, st.ImageRepo = tc.repository, tc.registry, tc.imageRepo
+			want := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) + tc.suffix
+			if got := b.CleanupCommand(st); got != want {
+				t.Errorf("cleanup = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	for _, tc := range []struct {
+		name, zone, repository, registry string
+		envoy, prebuilt                  bool
+	}{
+		{name: "zonal cluster", zone: "us-west1-c", envoy: true},
+		{name: "regional cluster with custom repository", zone: "europe-west4", repository: "build-images"},
+		{name: "explicit registry", zone: "us-west1-c", registry: "registry.example.com/shared", envoy: true},
+		{name: "prebuilt target", zone: "us-west1-c", envoy: true, prebuilt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testSetup(t)
+			st.Upgrade = true
+			st.InstalledCommit, st.InstalledVersion = Commit, ReleaseVersion
+			st.InstalledImageRepo, st.InstalledImageTag = ReleaseRepo, ReleaseVersion
+			st.Zone, st.ArtifactRegistryRepository, st.KoDockerRepo = tc.zone, tc.repository, tc.registry
+			if tc.prebuilt {
+				st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.3.0"
+			}
+			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: tc.envoy})
+			b.SetupGCP = filepath.Join(t.TempDir(), "installer's tools/setup-gcp")
+			installed, next := t.TempDir(), filepath.Join(t.TempDir(), "new tree's checkout")
+			if err := os.Mkdir(next, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var script []string
+			for _, line := range strings.Split(b.UpgradeSummary(st, installed, next), "\n") {
+				if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
+					script = append(script, strings.TrimSpace(line))
+				}
+			}
+			bin, log := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+			for _, name := range []string{"go", "gcloud"} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(`#!/bin/sh
+printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_TEST_LOG"
+`), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", strings.Join(script, "\n"))
+			cmd.Env = []string{"PATH=" + bin, "UPGRADE_TEST_LOG=" + log, "GCE_REGION=wrong-region", "ARTIFACT_REGISTRY_REPOSITORY=wrong-repository"}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("upgrade instructions: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			var want string
+			if !tc.prebuilt && tc.registry == "" {
+				registry := st.Region() + "-docker.pkg.dev/acme/" + st.RepositoryName()
+				want = "gcloud|" + next + "|services enable artifactregistry.googleapis.com --project acme|" + registry + "\n" +
+					"go|" + next + "|-C " + b.SetupGCP + " run . create repository --project-id acme --region " + st.Region() + " --name " + st.RepositoryName() + "|" + registry + "\n"
+				if tc.envoy {
+					want += "gcloud|" + next + "|auth configure-docker " + st.Region() + "-docker.pkg.dev|" + registry + "\n"
+				}
+			}
+			if string(data) != want {
+				t.Fatalf("preparation calls = %q, want %q", data, want)
+			}
+		})
 	}
 }

@@ -19,10 +19,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 )
 
-func fakeCRM(t *testing.T, held []string, wantProject string) *httptest.Server {
+func fakeCRM(t *testing.T, held []string, wantProject string, extra ...RequiredPermission) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if want := "/v1/projects/" + wantProject + ":testIamPermissions"; r.URL.Path != want {
@@ -37,8 +38,12 @@ func fakeCRM(t *testing.T, held []string, wantProject string) *httptest.Server {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("bad request body: %v", err)
 		}
-		if len(req.Permissions) != len(BootstrapPermissions) {
-			t.Errorf("asked about %d permissions, want %d", len(req.Permissions), len(BootstrapPermissions))
+		var want []string
+		for _, p := range slices.Concat(BootstrapPermissions, extra) {
+			want = append(want, p.Permission)
+		}
+		if !slices.Equal(req.Permissions, want) {
+			t.Errorf("requested permissions = %v, want %v", req.Permissions, want)
 		}
 		json.NewEncoder(w).Encode(map[string][]string{"permissions": held})
 	}))
@@ -120,5 +125,19 @@ func TestMissingPermissionsDryRun(t *testing.T) {
 	missing, err := c.MissingPermissions(context.Background(), "acme")
 	if err != nil || missing != nil {
 		t.Errorf("dry-run = (%v, %v), want (nil, nil)", missing, err)
+	}
+}
+
+func TestMissingPermissionsIncludesRepositoryPermissions(t *testing.T) {
+	extra := RepositoryPermissions
+	held := []string{extra[0].Permission}
+	for _, p := range BootstrapPermissions {
+		held = append(held, p.Permission)
+	}
+	srv := fakeCRM(t, held, "acme", extra...)
+	defer srv.Close()
+	missing, err := permClient(srv.URL).MissingPermissions(context.Background(), "acme", extra...)
+	if err != nil || !slices.Equal(missing, extra[1:]) {
+		t.Fatalf("missing = %v, %v; want %v", missing, err, extra[1:])
 	}
 }

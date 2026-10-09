@@ -234,9 +234,12 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	note("Delete everything this install created in GCP — the cluster, the",
-		"snapshot bucket, IAM bindings, and dashboards:")
-	command(cleanupCommand(st))
+	resources := "snapshot bucket, IAM bindings, and dashboards"
+	if st.CreatesArtifactRepository() {
+		resources = "snapshot bucket, IAM bindings, dashboards, and the image repository"
+	}
+	note("Delete everything this install created in GCP — the cluster, the", resources+":")
+	command(b.CleanupCommand(st))
 
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
 	// install leaves a written copy behind.
@@ -248,10 +251,4 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 			command(cmd)
 		}
 	}
-}
-
-// cleanupCommand renders the tools/cleanup-gcp invocation for this install.
-// Quoted for pasting, like the teardown command.
-func cleanupCommand(st *state.Setup) string {
-	return snapshot.CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
 }

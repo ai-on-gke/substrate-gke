@@ -115,10 +115,8 @@ func CheckInstalled(projectID, cluster, location string) execx.Spec {
 	}
 }
 
-// CleanupCommand renders the tools/cleanup-gcp invocation that deletes
-// everything an install created, quoted for pasting. bucket may be empty
-// when the install's bucket is unknown — a cluster this run did not install —
-// leaving a placeholder for the user to fill in.
+// CleanupCommand renders cluster cleanup while keeping image repositories.
+// An unknown bucket is left as a placeholder for the user to fill in.
 func CleanupCommand(projectID, cluster, location, bucket string) string {
 	quoted := "<snapshot-bucket>"
 	if bucket != "" {
@@ -172,7 +170,7 @@ func ProbeCluster(st *state.Setup, credentials bool) execx.Spec {
 		Argv:    []string{"bash", "-c", strings.Join(lines, "\n")},
 		SimLines: []string{
 			versionsMarker + "substrate-" + ShortCommit(),
-			imageMarker + "gcr.io/" + st.ProjectID + "/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
+			imageMarker + st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
 			buildMarker + "substrate-" + ShortCommit() + " commit=" + Commit + " built=2026-01-01T00:00:00Z linux/amd64",
 		},
 	}
@@ -260,12 +258,12 @@ func clusterExports(st *state.Setup) []string {
 // Exports renders the environment for running upstream's ate-setup against
 // the cluster st names, at the given running version.
 func (p Probe) Exports(st *state.Setup, version string) string {
-	return strings.Join(append(clusterExports(st), p.versionExports(st, version)...), "\n")
+	return strings.Join(append(clusterExports(st), p.versionExports(version)...), "\n")
 }
 
 // versionExports is the part of the environment that names a version: the
 // version itself and where its images come from.
-func (p Probe) versionExports(st *state.Setup, version string) []string {
+func (p Probe) versionExports(version string) []string {
 	// ate-setup installs pre-built images whenever ATE_IMAGE_REPO is set, so
 	// each block unsets the other family: the two are pasted into one shell
 	// when an upgrade rolls back, and a leftover would silently deploy the
@@ -275,15 +273,8 @@ func (p Probe) versionExports(st *state.Setup, version string) []string {
 		lines = append(lines, "unset KO_DOCKER_REPO KO_DEFAULTPLATFORMS",
 			"export ATE_IMAGE_REPO="+ShellQuote(p.ImageRepo), "export ATE_IMAGE_TAG="+ShellQuote(p.ImageTag))
 	} else {
-		// A build from source needs a registry to push to. A cluster that
-		// ran pre-built images never had one, and one described by hand
-		// names none; both get the project's default, as an install does.
-		repo := p.KoDockerRepo
-		if repo == "" {
-			repo = st.DefaultKoDockerRepo()
-		}
 		lines = append(lines, "unset ATE_IMAGE_REPO ATE_IMAGE_TAG",
-			"export KO_DOCKER_REPO="+ShellQuote(repo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
+			"export KO_DOCKER_REPO="+ShellQuote(p.KoDockerRepo), "export KO_DEFAULTPLATFORMS='linux/amd64'")
 	}
 	return lines
 }
@@ -309,8 +300,6 @@ func (p Probe) Apply(st *state.Setup, version string) {
 		// carries none; the tag is the version either way.
 		st.InstalledImageTag = version
 	}
-	// Empty for pre-built images: the exports fall back to the project's
-	// default, and a registry probed off an earlier cluster must not leak.
 	st.KoDockerRepo = p.KoDockerRepo
 }
 
@@ -318,5 +307,5 @@ func (p Probe) Apply(st *state.Setup, version string) {
 // installed version and where its images come from. The cluster stays.
 func InstalledExports(st *state.Setup) string {
 	installed := Probe{KoDockerRepo: st.KoDockerRepo, ImageRepo: st.InstalledImageRepo, ImageTag: st.InstalledImageTag}
-	return strings.Join(installed.versionExports(st, st.InstalledVersion), "\n")
+	return strings.Join(installed.versionExports(st.InstalledVersion), "\n")
 }

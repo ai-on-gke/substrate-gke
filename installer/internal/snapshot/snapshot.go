@@ -417,9 +417,7 @@ type Builder struct {
 	// repo and commit are the tree to fetch. They start at the pin and move
 	// only when the wizard's images step picks something else.
 	repo, commit string
-	// envoy is the chosen revision's EnvoyDataplane. The pin it starts from
-	// predates the image; the source track always resolves a revision, which
-	// sets it.
+	// envoy records whether the chosen revision builds envoy-dataplane.
 	envoy bool
 	// lock, while open, is the shared flock marking Root as in use by this
 	// process. Taken by Lock, released by Cleanup (or process exit).
@@ -461,6 +459,18 @@ func (b *Builder) UseSource(rev Revision) {
 	if relock {
 		b.Lock()
 	}
+}
+
+// CleanupCommand preserves the cluster and repository targets used by this install.
+func (b *Builder) CleanupCommand(st *state.Setup) string {
+	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
+	if st.CreatesArtifactRepository() {
+		if st.RepositoryName() != "ate-images" {
+			command += " --repository " + ShellQuote(st.RepositoryName())
+		}
+		command += " --delete-repository"
+	}
+	return command
 }
 
 // BuildsWithDocker reports whether deploying the control plane runs `docker
@@ -523,6 +533,8 @@ func (b *Builder) env(st *state.Setup) []string {
 		"PROJECT_ID=" + st.ProjectID,
 		"PROJECT_NUMBER=" + st.ProjectNumber,
 		"GCE_REGION=" + st.Region(),
+		"ARTIFACT_REGISTRY_REPOSITORY=" + st.RepositoryName(),
+		"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(st.CreatesArtifactRepository()),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
 		"NETWORK=" + st.Network,
@@ -546,7 +558,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		return append(env, "VERSION="+imageVersion(st.ImageTag))
 	}
 	return append(env,
-		"KO_DOCKER_REPO="+st.KoDockerRepo,
+		"KO_DOCKER_REPO="+st.BuildRepository(),
 		"KO_DEFAULTPLATFORMS="+targetPlatform,
 		"VERSION="+b.Version,
 	)
@@ -693,28 +705,31 @@ func (b *Builder) fetchSimLines() []string {
 	return []string{CachedLine + shorten(b.commit)}
 }
 
-// Bootstrap provisions GCP resources (APIs, cluster, bucket, IAM,
-// dashboards) via this repository's tools/setup-gcp, whatever revision the
-// Substrate checkout is at. All seven steps are idempotent, so it is safe to
-// run against an existing cluster. It still runs inside the checkout, because
-// it is the first step and the install checklist expects the fetch to happen
-// here; `go -C` then switches to the setup-gcp module.
+// Bootstrap provisions GCP resources through this repository's setup-gcp,
+// after fetching the selected Substrate checkout.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
+	phases := []string{"Enabling required APIs..."}
+	if st.CreatesArtifactRepository() {
+		phases = append(phases, "Creating Artifact Registry repository...")
+	}
+	phases = append(phases,
+		"Creating GKE Cluster...",
+		"Creating GCS Bucket for snapshots...",
+		"Granting GKE Node permissions...",
+		"Granting Atelet permissions...",
+		"Creating IAM policy bindings for bucket...",
+		"Creating Monitoring Dashboards...",
+	)
+	lines := b.fetchSimLines()
+	for i, phase := range phases {
+		lines = append(lines, fmt.Sprintf("Step %d/%d: %s", i+1, len(phases), phase))
+	}
 	return execx.Spec{
-		Label:   "setup-gcp bootstrap",
-		Display: "go -C " + SetupGCPPath + " run . bootstrap",
-		Argv:    b.inTree("go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"),
-		Env:     b.env(st),
-		SimLines: append(b.fetchSimLines(),
-			"Step 1/7: Enabling required APIs...",
-			"Step 2/7: Creating GKE Cluster...",
-			"Step 3/7: Creating GCS Bucket for snapshots...",
-			"Step 4/7: Granting GKE Node permissions...",
-			"Step 5/7: Granting Atelet permissions...",
-			"Step 6/7: Creating IAM policy bindings for bucket...",
-			"Step 7/7: Creating Monitoring Dashboards...",
-			"Bootstrap completed successfully.",
-		),
+		Label:    "setup-gcp bootstrap",
+		Display:  "go -C " + SetupGCPPath + " run . bootstrap",
+		Argv:     b.inTree("go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"),
+		Env:      b.env(st),
+		SimLines: append(lines, "Bootstrap completed successfully."),
 	}
 }
 

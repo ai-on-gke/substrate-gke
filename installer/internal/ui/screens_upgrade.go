@@ -97,21 +97,21 @@ func (s *upgradeSourceScreen) enterTarget() tea.Cmd {
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
 
-// enterManual asks for what could not be read or resolved: the installed
-// commit and version, and the registry of its images when they were
-// pre-built. Whatever the read did learn is offered back.
+// enterManual asks for the installed commit, version, and image registry.
 func (s *upgradeSourceScreen) enterManual() tea.Cmd {
 	st := s.deps.Setup
 	s.mode, s.focus, s.errText, s.comp = "manual", 0, "", nil
 	s.labels = []string{
 		"Installed Substrate commit (full SHA)",
 		"Installed version (the ate.dev/substrate-version node label)",
-		"Installed image registry (blank for a build from source)",
+		"Pre-built image registry (leave empty for source builds)",
+		"Source build registry (leave empty for pre-built images)",
 	}
 	s.fields = []textinput.Model{
 		newInput(st.InstalledCommit, "40 hex characters"),
 		newInput(st.InstalledVersion, "kubectl get nodes -L ate.dev/substrate-version"),
 		newInput(st.InstalledImageRepo, snapshot.ReleaseRepo),
+		newInput(st.KoDockerRepo, "<region>-docker.pkg.dev/<project>/ate-images"),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
@@ -182,6 +182,7 @@ func (s *upgradeSourceScreen) use(version string) tea.Cmd {
 
 func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 	commit, version, registry := s.value(0), s.value(1), s.value(2)
+	sourceRegistry := s.value(3)
 	switch {
 	case !fullSHA.MatchString(strings.ToLower(commit)):
 		s.errText = "The installed commit has to be a full 40-character SHA. The running API server prints it: kubectl -n ate-system exec deploy/ate-api-server -- /ko-app/ateapi --version."
@@ -189,6 +190,12 @@ func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 	case version == "":
 		s.errText = "The installed version is required; it is the ate.dev/substrate-version label on the nodes."
 		return s.setFocus(1)
+	case registry == "" && sourceRegistry == "":
+		s.errText = "Enter the pre-built image registry, or for a source build the registry its images were pushed to."
+		return s.setFocus(2)
+	case registry != "" && sourceRegistry != "":
+		s.errText = "Enter either a pre-built image registry or a source build registry."
+		return s.setFocus(3)
 	}
 	if err := snapshot.CheckImageTag(version); err != nil {
 		s.errText = err.Error()
@@ -196,9 +203,8 @@ func (s *upgradeSourceScreen) submitManual() tea.Cmd {
 	}
 	st := s.deps.Setup
 	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = snapshot.RepoURL, strings.ToLower(commit), version
-	// Pre-built images are tagged with their version; a build from source
-	// has no registry to name here and gets the project's default.
 	st.InstalledImageRepo, st.InstalledImageTag = registry, ""
+	st.KoDockerRepo = sourceRegistry
 	if registry != "" {
 		st.InstalledImageTag = version
 	}
@@ -320,7 +326,7 @@ func (s *upgradeSourceScreen) View(w int) string {
 	case s.mode == "manual" && s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
 	case s.mode == "manual":
-		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. The commit is\nwhat the running API server prints for --version, or what the images were\nbuilt from. Pre-built images came from a registry; the release registry is offered."))
+		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. The commit is\nwhat the running API server prints for --version, or what the images were\nbuilt from. Enter the pre-built image registry or, for source builds, the registry\nthe images were pushed to."))
 	default:
 		b.WriteString(theme.Subtle.Render("The installer reads the running version, images and commit off the cluster.\nCredentials are fetched with gcloud."))
 	}

@@ -280,6 +280,8 @@ go -C tools/setup-gcp run . bootstrap [flags]
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default). | `BOOT_DISK_TYPE` | None |
 | `--bucket-name` | Name of the GCS bucket for snapshots. | `BUCKET_NAME` | None (Required*) |
+| `--create-repository` | Create a Docker image repository for source builds. | `CREATE_ARTIFACT_REPOSITORY` | `false` |
+| `--repository-name` | Artifact Registry repository name. | `ARTIFACT_REGISTRY_REPOSITORY` | `ate-images` |
 | `--dashboard-dir` | Directory containing dashboard JSON files. Empty uses the copies of `tools/setup-gcp/dashboards` built into the binary. | `DASHBOARD_DIR` | (empty) |
 
 *\*Note: Required unless the `BUCKET_NAME` environment variable is set.*
@@ -287,6 +289,12 @@ go -C tools/setup-gcp run . bootstrap [flags]
 `--enable-nested-virtualization` is on by default and needs a `--machine-type`
 that supports the feature; pass `--enable-nested-virtualization=false` to turn
 it off. It applies only to a cluster this command creates.
+
+To create only the image repository, after enabling the Artifact Registry API:
+
+```bash
+go -C tools/setup-gcp run . create repository --project-id <project> --region <region> --name ate-images
+```
 
 ## Teardown
 
@@ -297,6 +305,10 @@ variables (`PROJECT_ID`, `PROJECT_NUMBER`, `CLUSTER_NAME`, `CLUSTER_LOCATION`,
 `BUCKET_NAME`) and shells out to `gcloud`. Each step can run alone; see
 `tools/setup-gcp/teardown.sh` with no arguments for the list. It sources
 `.ate-dev-env.sh` from the working directory unless `NO_DEV_ENV=1` is set.
+
+Image repositories are kept by default, including with `--all`. Add
+`--delete-repository` to delete one, setting `GCE_REGION` and optionally
+`ARTIFACT_REGISTRY_REPOSITORY` (default `ate-images`).
 
 Change it whenever `bootstrap` gains or changes a resource. Most users should
 run [`tools/cleanup-gcp`](../cleanup-gcp) instead, which takes flags, looks up

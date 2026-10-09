@@ -16,7 +16,8 @@
 
 # cleanup-gcp deletes the GCP resources the installer's provision step
 # (`setup-gcp bootstrap`) creates: monitoring dashboards, IAM bindings, the
-# snapshot bucket, and the GKE cluster.
+# snapshot bucket, and the GKE cluster. Image repositories are kept unless
+# --delete-repository is given.
 #
 # It is a thin wrapper: the deletions themselves live in
 # tools/setup-gcp/teardown.sh, next to the bootstrap they reverse, so a new
@@ -40,30 +41,50 @@ PROJECT_ID=""
 CLUSTER_NAME=""
 CLUSTER_LOCATION=""
 BUCKET_NAME=""
-ASSUME_YES="false"
+GCE_REGION=""
+ARTIFACT_REGISTRY_REPOSITORY="ate-images"
+KEEP_REPOSITORY=true
+ASSUME_YES=false
 
 usage() {
   cat >&2 <<'EOF'
-Usage: tools/cleanup-gcp --project ID --cluster NAME --location ZONE --bucket NAME [--yes]
+Usage: tools/cleanup-gcp --project ID --cluster NAME --location LOCATION --bucket NAME [options]
 
-Deletes everything the installer's provision step created in GCP:
-the Substrate monitoring dashboards, the IAM bindings it granted, the
-snapshot bucket and its contents, and the GKE cluster (and, with it, the
-Substrate control plane).
+Deletes the GKE cluster, snapshot bucket, IAM bindings, and monitoring dashboards.
+Image repositories are kept unless --delete-repository is given.
 
-The values are printed by the installer's exit summary; they are the answers
-you gave the wizard. --yes skips the confirmation prompt. Needs gcloud.
+Options:
+  --region REGION         Repository region (default: derived from --location)
+  --repository NAME       Repository created during setup (default: ate-images)
+  --delete-repository     Also delete the repository and its images
+  --keep-repository       Keep the repository (default); overrides an earlier --delete-repository
+  --yes                   Skip the confirmation prompt
+
+The installer prints a command with the values for your installation.
+Needs gcloud; deletion is delegated to tools/setup-gcp/teardown.sh.
 EOF
   exit 1
 }
 
 while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    --project) PROJECT_ID="$2"; shift ;;
-    --cluster) CLUSTER_NAME="$2"; shift ;;
-    --location) CLUSTER_LOCATION="$2"; shift ;;
-    --bucket) BUCKET_NAME="$2"; shift ;;
-    --yes) ASSUME_YES="true" ;;
+  case "$1" in
+    --project|--cluster|--location|--bucket|--region|--repository)
+      if [[ "$#" -lt 2 || -z "$2" || "$2" == --* ]]; then
+        echo "$1 requires a value" >&2
+        usage
+      fi
+      case "$1" in
+        --project) PROJECT_ID="$2" ;;
+        --cluster) CLUSTER_NAME="$2" ;;
+        --location) CLUSTER_LOCATION="$2" ;;
+        --bucket) BUCKET_NAME="$2" ;;
+        --region) GCE_REGION="$2" ;;
+        --repository) ARTIFACT_REGISTRY_REPOSITORY="$2" ;;
+      esac
+      shift ;;
+    --delete-repository) KEEP_REPOSITORY=false ;;
+    --keep-repository) KEEP_REPOSITORY=true ;;
+    --yes) ASSUME_YES=true ;;
     *) usage ;;
   esac
   shift
@@ -71,19 +92,29 @@ done
 
 for var in PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION BUCKET_NAME; do
   if [ -z "${!var}" ]; then
-    echo "missing ${var}; see --help" >&2
+    echo "${var} is required" >&2
     usage
   fi
 done
-
+if [[ ! "${ARTIFACT_REGISTRY_REPOSITORY}" =~ ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  echo "invalid repository name: ${ARTIFACT_REGISTRY_REPOSITORY}" >&2
+  exit 1
+fi
+if [ -z "${GCE_REGION}" ]; then
+  GCE_REGION="${CLUSTER_LOCATION}"
+  if [[ "${CLUSTER_LOCATION}" =~ ^(.+[0-9])-[a-z]$ ]]; then
+    GCE_REGION="${BASH_REMATCH[1]}"
+  fi
+fi
 if [ ! -x "${TEARDOWN}" ]; then
   echo "cannot find ${TEARDOWN}; run cleanup-gcp from a substrate-gke checkout" >&2
   exit 1
 fi
-
-# The IAM principals are keyed to the project number, not the ID.
+set -- --all
+if ! ${KEEP_REPOSITORY}; then
+  set -- "$@" --delete-repository
+fi
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-
 cat <<EOF
 About to delete from project ${PROJECT_ID}:
   - the Substrate monitoring dashboards
@@ -91,12 +122,17 @@ About to delete from project ${PROJECT_ID}:
   - gs://${BUCKET_NAME} and every snapshot in it
   - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
 EOF
-if [ "${ASSUME_YES}" != "true" ]; then
+if ${KEEP_REPOSITORY}; then
+  echo "  Image repositories will be kept."
+else
+  echo "  - Artifact Registry repository ${ARTIFACT_REGISTRY_REPOSITORY} in ${GCE_REGION} and its images"
+fi
+if ! ${ASSUME_YES}; then
   read -r -p "Type 'yes' to continue: " answer
   [ "${answer}" = "yes" ] || { echo "aborted"; exit 1; }
 fi
 
-# NODE_POOL_NAME stays unset on purpose: deleting the cluster removes its
+# NODE_POOL_NAME stays empty on purpose: deleting the cluster removes its
 # pools, and teardown.sh skips the separate pool step without it. NO_DEV_ENV
 # keeps teardown.sh from sourcing a .ate-dev-env.sh in the working directory,
 # which could name a different project or cluster than the flags above.
@@ -106,6 +142,9 @@ PROJECT_NUMBER="${PROJECT_NUMBER}" \
 CLUSTER_NAME="${CLUSTER_NAME}" \
 CLUSTER_LOCATION="${CLUSTER_LOCATION}" \
 BUCKET_NAME="${BUCKET_NAME}" \
-  "${TEARDOWN}" --all
+GCE_REGION="${GCE_REGION}" \
+ARTIFACT_REGISTRY_REPOSITORY="${ARTIFACT_REGISTRY_REPOSITORY}" \
+NODE_POOL_NAME="" \
+  bash "${TEARDOWN}" "$@"
 
 echo "Done. APIs enabled by bootstrap were left enabled (they are free while unused)."

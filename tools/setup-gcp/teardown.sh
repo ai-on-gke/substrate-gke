@@ -58,6 +58,7 @@ function usage() {
   echo "  --delete-gvisor-node-pool             Delete gVisor node pool"
   echo "  --delete-cluster                      Delete GKE cluster"
   echo "  --delete-dashboards                   Delete the Substrate monitoring dashboards"
+  echo "  --delete-repository                   Delete the Artifact Registry repository and its images"
   echo "  --all                                 Run all teardown steps (reverse order of setup)"
   exit 1
 }
@@ -164,36 +165,66 @@ delete_cluster() {
     --quiet || true
 }
 
+validate_repository_config() {
+  require PROJECT_ID GCE_REGION
+  ARTIFACT_REGISTRY_REPOSITORY="${ARTIFACT_REGISTRY_REPOSITORY:-ate-images}"
+  if [[ ! "${ARTIFACT_REGISTRY_REPOSITORY}" =~ ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+    echo "ARTIFACT_REGISTRY_REPOSITORY must be 1-63 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit" >&2
+    exit 1
+  fi
+}
+
+delete_repository() {
+  local repository="projects/${PROJECT_ID}/locations/${GCE_REGION}/repositories/${ARTIFACT_REGISTRY_REPOSITORY}"
+  if ! gcloud artifacts repositories describe "${ARTIFACT_REGISTRY_REPOSITORY}" \
+    --project="${PROJECT_ID}" \
+    --location="${GCE_REGION}" \
+    --quiet >/dev/null; then
+    echo "Warning: unable to check Artifact Registry repository ${repository}; skipping repository cleanup." >&2
+    return
+  fi
+  echo "Deleting Artifact Registry repository ${repository} and its images..."
+  gcloud artifacts repositories delete "${ARTIFACT_REGISTRY_REPOSITORY}" \
+    --project="${PROJECT_ID}" \
+    --location="${GCE_REGION}" \
+    --quiet
+}
+
 # --- Main Logic ---
 if [ "$#" -eq 0 ]; then
   usage
 fi
 
-while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    --revoke-gke-node-permissions) revoke_gke_node_permissions ;;
-    --revoke-atelet-permissions) revoke_atelet_permissions ;;
-    --delete-iam-policy-bindings) delete_iam_policy_bindings ;;
-    --delete-snapshot-bucket) delete_snapshot_bucket ;;
-    --delete-gvisor-node-pool) delete_gvisor_node_pool ;;
-    --delete-cluster) delete_cluster ;;
-    --delete-dashboards) delete_dashboards ;;
+steps=()
+delete_repository_requested=false
+for arg in "$@"; do
+  case "${arg}" in
+    --revoke-gke-node-permissions) steps+=(revoke_gke_node_permissions) ;;
+    --revoke-atelet-permissions) steps+=(revoke_atelet_permissions) ;;
+    --delete-iam-policy-bindings) steps+=(delete_iam_policy_bindings) ;;
+    --delete-snapshot-bucket) steps+=(delete_snapshot_bucket) ;;
+    --delete-gvisor-node-pool) steps+=(delete_gvisor_node_pool) ;;
+    --delete-cluster) steps+=(delete_cluster) ;;
+    --delete-dashboards) steps+=(delete_dashboards) ;;
+    --delete-repository)
+      steps+=(delete_repository)
+      delete_repository_requested=true
+      ;;
     --all)
-      delete_dashboards
-      delete_iam_policy_bindings
-      revoke_atelet_permissions
-      revoke_gke_node_permissions
-      delete_snapshot_bucket
+      steps+=(delete_dashboards delete_iam_policy_bindings revoke_atelet_permissions revoke_gke_node_permissions delete_snapshot_bucket)
       # Deleting the cluster removes its node pools, so --all does not insist
       # on a pool name a caller (e.g. an installer) may not track.
       if [ -n "${NODE_POOL_NAME:-}" ]; then
-        delete_gvisor_node_pool
-      else
-        echo "NODE_POOL_NAME not set; skipping node pool deletion (the cluster deletion removes its pools)"
+        steps+=(delete_gvisor_node_pool)
       fi
-      delete_cluster
+      steps+=(delete_cluster)
       ;;
     *) usage ;;
   esac
-  shift
+done
+if ${delete_repository_requested}; then
+  validate_repository_config
+fi
+for step in "${steps[@]}"; do
+  "${step}"
 done
