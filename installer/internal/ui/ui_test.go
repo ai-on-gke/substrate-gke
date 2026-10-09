@@ -807,6 +807,25 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 	}
 }
 
+// The hint bar only advertises keys that do something: during the billing
+// check that is esc alone (not the [e]/[enter] of the offer still standing
+// behind it), and while the project validates, nothing.
+func TestProjectScreenHintsDuringChecks(t *testing.T) {
+	app := testApp(t)
+	scr, check, ctxs := startHungCheck(t, app, "ERROR: (gcloud.services.enable) UNAVAILABLE: try again")
+	go check()
+	<-ctxs
+	if hints := scr.Hints(); len(hints) != 1 || hints[0] != (Hint{"esc", "stop waiting"}) {
+		t.Errorf("during the billing check hints = %v, want only [esc] stop waiting", hints)
+	}
+	scr.abandonCheck()
+
+	scr.submit()
+	if hints := scr.Hints(); len(hints) != 0 {
+		t.Errorf("while validating hints = %v, want none", hints)
+	}
+}
+
 // startHungCheck drives a failing enable up to the billing check, whose
 // billingCheck blocks until its context ends, and returns the check's
 // command unrun along with the context the check was handed.

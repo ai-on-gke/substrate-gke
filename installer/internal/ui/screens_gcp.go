@@ -181,6 +181,14 @@ func (s *projectScreen) Hints() []Hint {
 	if s.enabling != nil {
 		return []Hint{{"esc", "stop waiting"}}
 	}
+	// The bar only advertises keys Update acts on: during the billing check
+	// that is esc alone, and while the project validates, nothing.
+	if s.checkingEnable {
+		return []Hint{{"esc", "stop waiting"}}
+	}
+	if s.validating {
+		return nil
+	}
 	if s.enableFor != "" {
 		return []Hint{{"e", "enable the GKE API"}, {"enter", "check again"}, {"esc", "back"}}
 	}
