@@ -1334,7 +1334,7 @@ func TestAnUnreadableControlPlaneOverGoodPoolsPromisesNoReplacement(t *testing.T
 // The cluster version and release channel only matter when the run creates a
 // cluster, so they are advanced-track fields — but they have to actually be
 // reachable there, and to reach upstream with whatever the user typed.
-func TestAdvancedTrackOffersTheClusterVersion(t *testing.T) {
+func TestAdvancedTrackOffersTheClusterVersionAndChannel(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	for _, m := range runCmd(app.Init()) {
@@ -1366,18 +1366,25 @@ func TestAdvancedTrackOffersTheClusterVersion(t *testing.T) {
 		t.Fatalf("default version=%q, want %q", st.ClusterVersion, state.DefaultClusterVersion)
 	}
 
+	if st.ReleaseChannel != state.DefaultReleaseChannel {
+		t.Fatalf("default channel=%q, want %q", st.ReleaseChannel, state.DefaultReleaseChannel)
+	}
+
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
-	// 5:Subnetwork, 6:ClusterVersion
+	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel
 	press("enter", "enter", "enter", "enter", "enter", "enter")
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("1.38")
+	typed("1.36")
+	press("enter") // to the channel field
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("regular")
 	press("enter") // submit from the last field
 
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("after project: %v", app.mach.Current())
 	}
-	if st.ClusterVersion != "1.38" {
-		t.Errorf("edited: version=%q, want 1.38", st.ClusterVersion)
+	if st.ClusterVersion != "1.36" || st.ReleaseChannel != "regular" {
+		t.Errorf("edited: version=%q channel=%q, want 1.36 on regular", st.ClusterVersion, st.ReleaseChannel)
 	}
 }
 
@@ -1412,7 +1419,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("1.35")
-	press("enter")
+	press("enter", "enter") // past the channel field, then submit
 	if app.mach.Current() != state.Project {
 		t.Fatalf("1.35 was accepted: step=%v, want to stay on the project screen", app.mach.Current())
 	}
@@ -1421,7 +1428,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	press("enter")
+	press("enter", "enter")
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("an empty version was refused: step=%v, want Cluster", app.mach.Current())
 	}
@@ -1666,6 +1673,61 @@ func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
 	if st := s.deps.Setup; st.ClusterName != "old-with-apis" || st.EnableBetaAPIs || (st.ReplacePools.Needed && !st.ReplacePools.Unsure) {
 		t.Errorf("chose %q with EnableBetaAPIs=%v pools=%+v, want nothing to enable and any pool advice unsure",
 			st.ClusterName, st.EnableBetaAPIs, st.ReplacePools)
+	}
+}
+
+// The version and channel have to go together, or GKE refuses the create:
+// a channel only offers the versions it carries, and today 1.37 is in Rapid
+// alone. The installer asks GKE which channel carries what (canned under
+// --dry-run) and stops on the project screen, pointing at a channel that
+// works, rather than letting provision fail. Extended can never work, since
+// it refuses the beta APIs setup-gcp turns on, so it is refused without
+// asking.
+func TestTheChannelHasToOfferTheVersion(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	for _, m := range runCmd(app.Init()) {
+		pump(t, app, m)
+	}
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	typed := func(s string) {
+		for _, r := range s {
+			pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	press("2", "enter")                                         // welcome: advanced track
+	press("enter")                                              // doctor
+	press("1", "enter")                                         // images: pre-built
+	press("enter", "enter", "enter")                            // images fields
+	press("enter", "enter", "enter", "enter", "enter", "enter") // to the version field
+	press("enter")                                              // keep 1.37; to the channel field
+
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("regular")
+	press("enter")
+	if app.mach.Current() != state.Project {
+		t.Fatalf("1.37 on regular was accepted: step=%v", app.mach.Current())
+	}
+	if view := flat(app.View()); !strings.Contains(view, "regular channel does not offer version 1.37") || !strings.Contains(view, "rapid does") {
+		t.Errorf("the refusal should say regular lacks 1.37 and rapid has it:\n%s", view)
+	}
+
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("extended")
+	press("enter")
+	if app.mach.Current() != state.Project || !strings.Contains(flat(app.View()), "extended channel does not allow the beta APIs") {
+		t.Errorf("extended should be refused with its reason: step=%v\n%s", app.mach.Current(), app.View())
+	}
+
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("rapid")
+	press("enter")
+	if app.mach.Current() != state.Cluster || app.deps.Setup.ReleaseChannel != "rapid" {
+		t.Errorf("1.37 on rapid: step=%v channel=%q, want Cluster/rapid", app.mach.Current(), app.deps.Setup.ReleaseChannel)
 	}
 }
 

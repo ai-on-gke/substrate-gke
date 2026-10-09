@@ -57,6 +57,9 @@ type projValidMsg struct {
 	// docker are the docker checks that failed, when the install builds an
 	// image with docker; see dockerProblem.
 	docker []failedCheck
+	// channel is why GKE would refuse the new-cluster version on the chosen
+	// channel, or ""; see channelProblem.
+	channel string
 }
 
 // failedCheck is a doctor check that did not pass, with what it found.
@@ -106,6 +109,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			// screen: the fields would have to appear after it, splitting one
 			// form into two.
 			clusterVersionField(st.ClusterVersion),
+			releaseChannelField(st.ReleaseChannel),
 		)
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
@@ -128,7 +132,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 // "no version", which would hand the choice to GKE's Regular channel, whose
 // own default is below the floor.
 func clusterVersionField(current string) field {
-	f := newField("Cluster version (new clusters)", current, state.DefaultClusterVersion, func(s *state.Setup, v string) {
+	f := newField(clusterVersionLabel, current, state.DefaultClusterVersion, func(s *state.Setup, v string) {
 		if v == "" {
 			v = state.DefaultClusterVersion
 		}
@@ -147,6 +151,83 @@ func clusterVersionProblem(v string) string {
 		return ""
 	}
 	return fmt.Sprintf("Cluster version %s is below %s, the oldest release Substrate is supported on.", v, gcp.MinSupportedRelease)
+}
+
+// Labels of the new-cluster fields, which submit reads back to ask GKE
+// whether the channel carries the version.
+const (
+	clusterVersionLabel = "Cluster version (new clusters)"
+	releaseChannelLabel = "Release channel (new clusters)"
+)
+
+// releaseChannelField is the advanced track's channel for a cluster the run
+// creates. Cleared, it means the default, as the version field does: an unset
+// channel lands the cluster on Regular, which does not carry the default
+// version.
+func releaseChannelField(current string) field {
+	f := newField(releaseChannelLabel, current, state.DefaultReleaseChannel, func(s *state.Setup, v string) {
+		if v == "" {
+			v = state.DefaultReleaseChannel
+		}
+		s.ReleaseChannel = strings.ToLower(v)
+	})
+	f.check = releaseChannelProblem
+	return f
+}
+
+// releaseChannelProblem rejects what can never work, and leaves the rest to
+// GKE's own list of what each channel carries (see channelProblem). Extended
+// is refused outright: it does not allow beta APIs, and setup-gcp asks for
+// them on every cluster it creates, so it refuses extended itself. "none"
+// is not offered either; GKE no longer lets new accounts create a cluster
+// outside a channel.
+func releaseChannelProblem(v string) string {
+	switch strings.ToLower(v) {
+	case "", "rapid", "regular", "stable":
+		return ""
+	case "extended":
+		return "The extended channel does not allow the beta APIs setup-gcp turns on for every cluster. Use rapid, regular, or stable."
+	}
+	return fmt.Sprintf("Release channel %q is not one of rapid, regular, or stable.", v)
+}
+
+// channelProblem asks GKE whether the channel carries the version in this
+// location, and says so if it does not. Asked rather than worked out, because
+// it changes every few weeks: 1.37 is in Rapid alone today and will reach
+// Regular in a couple of months. If GKE cannot be asked, nothing is reported;
+// the create itself will fail fast with GKE's own message.
+func channelProblem(gc *gcp.Client, project, location, version, channel string) string {
+	if version == "" || channel == "" || version == "latest" {
+		return ""
+	}
+	carried, err := gc.ChannelVersions(context.Background(), project, location)
+	if err != nil {
+		return ""
+	}
+	if gcp.ChannelCarries(carried[channel], version) {
+		return ""
+	}
+	var with []string
+	for _, ch := range []string{"rapid", "regular", "stable"} {
+		if gcp.ChannelCarries(carried[ch], version) {
+			with = append(with, ch)
+		}
+	}
+	if len(with) == 0 {
+		return fmt.Sprintf("GKE has no channel that offers version %s in %s.", version, location)
+	}
+	return fmt.Sprintf("The %s channel does not offer version %s in %s; %s does.", channel, version, location, strings.Join(with, " and "))
+}
+
+// fieldValue returns the trimmed value of the field labeled label, or "" when
+// the form has no such field (the quickstart track).
+func (s *projectScreen) fieldValue(label string) (string, int) {
+	for i, f := range s.fields {
+		if f.label == label {
+			return strings.TrimSpace(f.input.Value()), i
+		}
+	}
+	return "", -1
 }
 
 func (s *projectScreen) Init() tea.Cmd {
@@ -191,9 +272,24 @@ func (s *projectScreen) submit() tea.Cmd {
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
 	s.checkingDocker = registry != ""
+	// Only the advanced track can change the version or channel, so only it
+	// pays for asking GKE whether they go together. Empty fields mean the
+	// defaults, which is what is checked.
+	zone, _ := s.fieldValue("Cluster location (zone)")
+	version, versionAt := s.fieldValue(clusterVersionLabel)
+	channel, _ := s.fieldValue(releaseChannelLabel)
+	if version == "" {
+		version = state.DefaultClusterVersion
+	}
+	if channel == "" {
+		channel = state.DefaultReleaseChannel
+	}
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
+		if msg.err == nil && versionAt >= 0 {
+			msg.channel = channelProblem(s.deps.GCP, pid, zone, version, strings.ToLower(channel))
+		}
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
 		if msg.err == nil && !acked {
@@ -292,6 +388,11 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		if len(m.docker) > 0 {
 			s.errText = dockerProblem(m.docker)
 			return nil
+		}
+		if m.channel != "" {
+			s.errText = m.channel
+			_, at := s.fieldValue(releaseChannelLabel)
+			return s.setFocus(at)
 		}
 		if len(m.missing) > 0 || m.permErr != nil {
 			s.permAcked = true

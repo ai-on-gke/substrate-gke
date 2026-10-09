@@ -530,6 +530,9 @@ func (b *Builder) env(st *state.Setup) []string {
 		// the alternative, omitting it conditionally, would make the
 		// environment differ between two runs that provision the same way.
 		"CLUSTER_VERSION=" + st.ClusterVersion,
+		// The two travel together: GKE serves a version only in the
+		// channels that carry it, and an unset channel means Regular.
+		"RELEASE_CHANNEL=" + st.ReleaseChannel,
 		"NETWORK=" + st.Network,
 		"SUBNETWORK=" + st.Subnetwork,
 		"GVISOR_NODE_MACHINE_TYPE=" + st.MachineType,

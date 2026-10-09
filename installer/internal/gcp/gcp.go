@@ -496,6 +496,59 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 	return clusters, nil
 }
 
+// ChannelVersions lists, per release channel (lower-cased: "rapid",
+// "regular", …), the cluster versions GKE will create in location. Which
+// versions a channel carries changes every few weeks, so the installer asks
+// rather than encoding it: today 1.37 is in Rapid alone, and in a couple of
+// months Regular will carry it too.
+func (c *Client) ChannelVersions(ctx context.Context, projectID, location string) (map[string][]string, error) {
+	if c.DryRun {
+		return map[string][]string{
+			"rapid":    {"1.37.0-gke.3503000", "1.36.4-gke.1495000"},
+			"regular":  {"1.36.4-gke.1391000", "1.35.8-gke.1225000"},
+			"stable":   {"1.35.6-gke.1250001"},
+			"extended": {"1.36.4-gke.1391000", "1.35.8-gke.1225000"},
+		}, nil
+	}
+	out, err := c.run(ctx, "container", "get-server-config", "--project="+projectID, "--location="+location, "--format=json")
+	if err != nil {
+		return nil, err
+	}
+	return ParseChannelVersions(out)
+}
+
+// ParseChannelVersions decodes the channels of `gcloud container
+// get-server-config --format=json`.
+func ParseChannelVersions(data []byte) (map[string][]string, error) {
+	var raw struct {
+		Channels []struct {
+			Channel       string   `json:"channel"`
+			ValidVersions []string `json:"validVersions"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing server config: %w", err)
+	}
+	out := make(map[string][]string, len(raw.Channels))
+	for _, ch := range raw.Channels {
+		out[strings.ToLower(ch.Channel)] = ch.ValidVersions
+	}
+	return out, nil
+}
+
+// ChannelCarries reports whether a channel's versions include want, the way
+// GKE reads a requested version: a bare minor ("1.37") or a minor and patch
+// ("1.37.0") names the newest build under it, and a full version
+// ("1.37.0-gke.3503000") names itself.
+func ChannelCarries(versions []string, want string) bool {
+	for _, v := range versions {
+		if v == want || strings.HasPrefix(v, want+".") || strings.HasPrefix(v, want+"-") {
+			return true
+		}
+	}
+	return false
+}
+
 // ListNodePools lists a cluster's node pools.
 func (c *Client) ListNodePools(ctx context.Context, projectID, cluster, location string) ([]NodePool, error) {
 	if c.DryRun {

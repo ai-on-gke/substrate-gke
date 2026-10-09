@@ -202,19 +202,23 @@ const (
 	SandboxMicroVM = "microvm"
 )
 
-// DefaultClusterVersion is the release a new cluster is created at.
+// DefaultClusterVersion and DefaultReleaseChannel are what a new cluster is
+// created with: 1.37 on the Rapid channel.
 //
-// It is the newest release GKE's Regular channel carries, which is where
-// upstream's bootstrap lands a cluster — it sets no release channel, so GKE
-// applies its default. Regular's own default version is below
-// gcp.MinSupportedRelease, so leaving this empty would have the installer
-// create clusters it then refuses to install onto.
+// 1.37 serves the PodCertificate APIs as v1, which Substrate uses from
+// v0.4.0, and its kubelets serve pod certificate projection without the beta
+// gate, so a cluster made this way needs no repair of any kind. Rapid is the
+// only channel that carries 1.37 today. Both are a choice, not a requirement:
+// the advanced track can pick Regular and 1.36, the newest Regular carries.
 //
-// That it currently equals the floor is a coincidence of GKE's rollout, not a
-// rule. 1.37 would be the better choice — pod certificate projection is GA
-// there — but it is Rapid-only, and upstream cannot yet be told which channel
-// to use.
-const DefaultClusterVersion = "1.36"
+// They go together. Leaving the channel unset puts a cluster on GKE's default
+// channel, Regular, which rejects 1.37; leaving the version unset gets that
+// channel's default version, which for Regular is below
+// gcp.MinSupportedRelease.
+const (
+	DefaultClusterVersion = "1.37"
+	DefaultReleaseChannel = "rapid"
+)
 
 // Setup accumulates everything the user chose plus values resolved from GCP.
 type Setup struct {
@@ -276,11 +280,13 @@ type Setup struct {
 	// lists them, with the commands, when it finishes.
 	ReplacePools gcp.PoolReplacement
 
-	// ClusterVersion shapes a cluster the install creates and is ignored for
-	// one it connects to: upstream's bootstrap reads it only on the creation
-	// path. A bare minor is fine — GKE resolves it to the newest patch it
-	// serves, so there is no patch number here to go stale.
+	// ClusterVersion and ReleaseChannel shape a cluster the install creates
+	// and are ignored for one it connects to: bootstrap reads them only on the
+	// creation path. A bare minor is fine for the version — GKE resolves it to
+	// the newest patch the channel serves, so there is no patch number here to
+	// go stale.
 	ClusterVersion string
+	ReleaseChannel string
 
 	BucketName   string
 	KoDockerRepo string
@@ -313,6 +319,7 @@ func NewSetup() *Setup {
 		MachineType:    "c3-standard-4",
 		ClusterName:    "substrate-test",
 		ClusterVersion: DefaultClusterVersion,
+		ReleaseChannel: DefaultReleaseChannel,
 		NodePool:       "substrate-node-pool",
 		SandboxClass:   SandboxGVisor,
 		AutoscaleMin:   1,

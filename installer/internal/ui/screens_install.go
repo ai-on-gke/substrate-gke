@@ -105,7 +105,7 @@ func (s *provisionScreen) View(w int) string {
 	switch {
 	case st.ClusterIsNew:
 		b.WriteString(sub.Render(fmt.Sprintf(
-			"Creating cluster %s in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.Zone)) + "\n\n")
+			"Creating cluster %s (%s, %s channel) in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.ClusterVersion, st.ReleaseChannel, st.Zone)) + "\n\n")
 	case st.EnableBetaAPIs && st.BetaAPIsOptional:
 		// The cluster badged ready and went straight here, so nothing has
 		// prepared the user for an update: say it is not needed, and why it

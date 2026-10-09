@@ -377,3 +377,32 @@ func TestMissingBetaAPIsIsNotTheInverseOfReadiness(t *testing.T) {
 		t.Error("a cluster with only one of the two APIs must count as missing them")
 	}
 }
+
+// The channel check reads GKE's own list of what each channel carries, and a
+// requested version is usually a bare minor ("1.37") that GKE resolves to a
+// build. If either half were wrong, the installer would refuse combinations
+// GKE accepts or wave through ones it rejects.
+func TestChannelVersionsAndCarries(t *testing.T) {
+	carried, err := ParseChannelVersions([]byte(`{"channels": [
+	  {"channel": "RAPID", "validVersions": ["1.37.0-gke.3503000", "1.36.4-gke.1495000"]},
+	  {"channel": "REGULAR", "validVersions": ["1.36.4-gke.1391000"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		channel, version string
+		want             bool
+	}{
+		{"rapid", "1.37", true},
+		{"rapid", "1.37.0", true},
+		{"rapid", "1.37.0-gke.3503000", true},
+		{"regular", "1.37", false},
+		{"regular", "1.36", true},
+		{"regular", "1.3", false}, // a prefix of 1.36 is not 1.36
+		{"stable", "1.36", false},
+	} {
+		if got := ChannelCarries(carried[tc.channel], tc.version); got != tc.want {
+			t.Errorf("%s carries %s = %v, want %v", tc.channel, tc.version, got, tc.want)
+		}
+	}
+}
