@@ -14,7 +14,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Delegate resource deletion to this repository's setup-gcp teardown.
+# cleanup-gcp deletes the GCP resources the installer's provision step
+# (`setup-gcp bootstrap`) creates: monitoring dashboards, IAM bindings, the
+# snapshot bucket, and the GKE cluster. Image repositories are kept unless
+# --delete-repository is given.
+#
+# It is a thin wrapper: the deletions themselves live in
+# tools/setup-gcp/teardown.sh, next to the bootstrap they reverse, so a new
+# bootstrap step and its teardown change in the same commit. Both moved here
+# from agent-substrate/substrate (agent-substrate/substrate#2304). What stays
+# here is the user experience: friendly flags, a confirmation prompt, and
+# project-number derivation.
+#
+# It does NOT remove the Substrate control plane from a cluster you keep; the
+# installer's exit summary prints the `ate-setup delete ate-system` command
+# for that. Deleting the cluster removes the control plane with it.
+#
+# The deletions are idempotent, so re-running after a partial failure is safe.
+
 set -o errexit -o nounset -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -106,7 +123,7 @@ About to delete from project ${PROJECT_ID}:
   - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
 EOF
 if ${KEEP_REPOSITORY}; then
-  echo "  Repository ${ARTIFACT_REGISTRY_REPOSITORY} in ${GCE_REGION} will be kept."
+  echo "  Image repositories will be kept."
 else
   echo "  - Artifact Registry repository ${ARTIFACT_REGISTRY_REPOSITORY} in ${GCE_REGION} and its images"
 fi
@@ -115,6 +132,10 @@ if ! ${ASSUME_YES}; then
   [ "${answer}" = "yes" ] || { echo "aborted"; exit 1; }
 fi
 
+# NODE_POOL_NAME stays empty on purpose: deleting the cluster removes its
+# pools, and teardown.sh skips the separate pool step without it. NO_DEV_ENV
+# keeps teardown.sh from sourcing a .ate-dev-env.sh in the working directory,
+# which could name a different project or cluster than the flags above.
 NO_DEV_ENV=1 \
 PROJECT_ID="${PROJECT_ID}" \
 PROJECT_NUMBER="${PROJECT_NUMBER}" \

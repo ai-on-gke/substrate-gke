@@ -194,7 +194,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 
 	section("Resources")
 	fmt.Printf("  project    %s\n  cluster    %s (%s)\n  sandbox    %s\n  bucket     gs://%s\n  images     %s\n",
-		st.ProjectID, st.ClusterName, st.Zone, ui.SandboxSummary(st), st.BucketName, b.ImageSummary(st))
+		st.ProjectID, st.ClusterName, st.Zone, ui.SandboxSummary(st), st.BucketName, st.ImageSummary())
 	if deps.LogPath != "" {
 		fmt.Printf("  log        %s\n", deps.LogPath)
 	}
@@ -235,7 +235,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
 	resources := "snapshot bucket, IAM bindings, and dashboards"
-	if b.CreatesArtifactRepository(st) {
+	if st.CreatesArtifactRepository() {
 		resources = "snapshot bucket, IAM bindings, dashboards, and the image repository"
 	}
 	note("Delete everything this install created in GCP — the cluster, the", resources+":")

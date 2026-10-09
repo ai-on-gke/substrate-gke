@@ -463,12 +463,12 @@ func (b *Builder) UseSource(rev Revision) {
 
 // CleanupCommand preserves the cluster and repository targets used by this install.
 func (b *Builder) CleanupCommand(st *state.Setup) string {
-	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) +
-		" --region " + ShellQuote(st.Region()) + " --repository " + ShellQuote(st.RepositoryName())
-	if b.CreatesArtifactRepository(st) {
+	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
+	if st.CreatesArtifactRepository() {
+		if st.RepositoryName() != "ate-images" {
+			command += " --repository " + ShellQuote(st.RepositoryName())
+		}
 		command += " --delete-repository"
-	} else {
-		command += " --keep-repository"
 	}
 	return command
 }
@@ -498,27 +498,6 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 		return HasEnvoyDockerfile(b.Root)
 	}
 	return b.envoy
-}
-
-// CreatesArtifactRepository reports whether this install provisions its build repository.
-func (b *Builder) CreatesArtifactRepository(st *state.Setup) bool {
-	return !st.Prebuilt() && st.KoDockerRepo == ""
-}
-
-// BuildRepository resolves the image destination for this checkout.
-func (b *Builder) BuildRepository(st *state.Setup) string {
-	if st.KoDockerRepo != "" {
-		return st.KoDockerRepo
-	}
-	return st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/" + st.RepositoryName()
-}
-
-// ImageSummary describes where this install's images come from.
-func (b *Builder) ImageSummary(st *state.Setup) string {
-	if st.Prebuilt() {
-		return st.ImageRepo + ":" + st.ImageTag
-	}
-	return b.BuildRepository(st) + " (built from source)"
 }
 
 // EnvoyRouter reports whether ate-setup deploys the envoy router, its default
@@ -555,7 +534,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		"PROJECT_NUMBER=" + st.ProjectNumber,
 		"GCE_REGION=" + st.Region(),
 		"ARTIFACT_REGISTRY_REPOSITORY=" + st.RepositoryName(),
-		"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(b.CreatesArtifactRepository(st)),
+		"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(st.CreatesArtifactRepository()),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
 		"NETWORK=" + st.Network,
@@ -579,7 +558,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		return append(env, "VERSION="+imageVersion(st.ImageTag))
 	}
 	return append(env,
-		"KO_DOCKER_REPO="+b.BuildRepository(st),
+		"KO_DOCKER_REPO="+st.BuildRepository(),
 		"KO_DEFAULTPLATFORMS="+targetPlatform,
 		"VERSION="+b.Version,
 	)
@@ -730,7 +709,7 @@ func (b *Builder) fetchSimLines() []string {
 // after fetching the selected Substrate checkout.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	phases := []string{"Enabling required APIs..."}
-	if b.CreatesArtifactRepository(st) {
+	if st.CreatesArtifactRepository() {
 		phases = append(phases, "Creating Artifact Registry repository...")
 	}
 	phases = append(phases,

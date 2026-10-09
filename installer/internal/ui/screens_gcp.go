@@ -160,7 +160,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	acked := s.permAcked
 	st := s.inputSetup(pid)
 	var repositoryPermissions []gcp.RequiredPermission
-	if s.deps.Builder.CreatesArtifactRepository(&st) {
+	if st.CreatesArtifactRepository() {
 		repositoryPermissions = gcp.RepositoryPermissions
 	}
 	registry := s.dockerRegistry(&st)
@@ -203,10 +203,10 @@ func (s *projectScreen) dockerRegistry(st *state.Setup) string {
 	if !s.deps.Builder.BuildsWithDocker(st) {
 		return ""
 	}
-	if s.deps.Builder.CreatesArtifactRepository(st) {
+	if st.CreatesArtifactRepository() {
 		return ""
 	}
-	return s.deps.Builder.BuildRepository(st)
+	return st.BuildRepository()
 }
 
 // dockerProblem renders the docker checks that failed. Unlike a permission

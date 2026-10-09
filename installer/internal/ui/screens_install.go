@@ -49,18 +49,18 @@ type provisionDockerMsg struct {
 func newProvisionScreen(deps *Deps) *provisionScreen {
 	return &provisionScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Builder.CreatesArtifactRepository(deps.Setup)), deps.LogPath),
+		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Setup.CreatesArtifactRepository()), deps.LogPath),
 	}
 }
 
 func (s *provisionScreen) Init() tea.Cmd {
 	s.dockerError = ""
 	st := s.deps.Setup
-	if s.deps.DryRun || !s.deps.Builder.CreatesArtifactRepository(st) || !s.deps.Builder.BuildsWithDocker(st) {
+	if s.deps.DryRun || !st.CreatesArtifactRepository() || !s.deps.Builder.BuildsWithDocker(st) {
 		return s.comp.start()
 	}
 	s.checkingDocker = true
-	registry := s.deps.Builder.BuildRepository(st)
+	registry := st.BuildRepository()
 	return func() tea.Msg {
 		msg := provisionDockerMsg{owner: s}
 		for _, check := range doctor.DockerChecks(registry) {
@@ -215,7 +215,7 @@ func (s *controlPlaneScreen) View(w int) string {
 	b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
 	subtitle := "Builds the control-plane images from the substrate checkout with ko and\ninstalls CRDs, the API server, controller, atenet, and atelet."
 	if s.deps.Setup.Prebuilt() {
-		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Builder.ImageSummary(s.deps.Setup) + "."
+		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
 	}
 	subtitle += "\nEgress credential provider: " + snapshot.CredentialProvider() + " (set ATE_CREDENTIAL_PROVIDER to change it)."
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
@@ -1017,7 +1017,7 @@ func (s *completeScreen) View(w int) string {
 		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
 		SandboxSummary(st),
 		st.BucketName,
-		s.deps.Builder.ImageSummary(st),
+		st.ImageSummary(),
 		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
 		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
 		DemoSummary(st),

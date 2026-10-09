@@ -176,15 +176,11 @@ validate_repository_config() {
 
 delete_repository() {
   local repository="projects/${PROJECT_ID}/locations/${GCE_REGION}/repositories/${ARTIFACT_REGISTRY_REPOSITORY}"
-  local existing
-  existing=$(gcloud artifacts repositories list \
+  if ! gcloud artifacts repositories describe "${ARTIFACT_REGISTRY_REPOSITORY}" \
     --project="${PROJECT_ID}" \
     --location="${GCE_REGION}" \
-    --filter="name=\"${repository}\"" \
-    --format="value(name)" \
-    --quiet)
-  if [ -z "${existing}" ]; then
-    echo "Artifact Registry repository ${repository} does not exist; skipping"
+    --quiet >/dev/null; then
+    echo "Warning: unable to check Artifact Registry repository ${repository}; skipping repository cleanup." >&2
     return
   fi
   echo "Deleting Artifact Registry repository ${repository} and its images..."
@@ -199,44 +195,36 @@ if [ "$#" -eq 0 ]; then
   usage
 fi
 
+steps=()
 delete_repository_requested=false
 for arg in "$@"; do
   case "${arg}" in
-    --delete-repository) delete_repository_requested=true ;;
-    --all|--revoke-gke-node-permissions|--revoke-atelet-permissions|--delete-iam-policy-bindings|--delete-snapshot-bucket|--delete-gvisor-node-pool|--delete-cluster|--delete-dashboards) ;;
+    --revoke-gke-node-permissions) steps+=(revoke_gke_node_permissions) ;;
+    --revoke-atelet-permissions) steps+=(revoke_atelet_permissions) ;;
+    --delete-iam-policy-bindings) steps+=(delete_iam_policy_bindings) ;;
+    --delete-snapshot-bucket) steps+=(delete_snapshot_bucket) ;;
+    --delete-gvisor-node-pool) steps+=(delete_gvisor_node_pool) ;;
+    --delete-cluster) steps+=(delete_cluster) ;;
+    --delete-dashboards) steps+=(delete_dashboards) ;;
+    --delete-repository)
+      steps+=(delete_repository)
+      delete_repository_requested=true
+      ;;
+    --all)
+      steps+=(delete_dashboards delete_iam_policy_bindings revoke_atelet_permissions revoke_gke_node_permissions delete_snapshot_bucket)
+      # Deleting the cluster removes its node pools, so --all does not insist
+      # on a pool name a caller (e.g. an installer) may not track.
+      if [ -n "${NODE_POOL_NAME:-}" ]; then
+        steps+=(delete_gvisor_node_pool)
+      fi
+      steps+=(delete_cluster)
+      ;;
     *) usage ;;
   esac
 done
 if ${delete_repository_requested}; then
   validate_repository_config
 fi
-
-while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    --revoke-gke-node-permissions) revoke_gke_node_permissions ;;
-    --revoke-atelet-permissions) revoke_atelet_permissions ;;
-    --delete-iam-policy-bindings) delete_iam_policy_bindings ;;
-    --delete-snapshot-bucket) delete_snapshot_bucket ;;
-    --delete-gvisor-node-pool) delete_gvisor_node_pool ;;
-    --delete-cluster) delete_cluster ;;
-    --delete-dashboards) delete_dashboards ;;
-    --delete-repository) delete_repository ;;
-    --all)
-      delete_dashboards
-      delete_iam_policy_bindings
-      revoke_atelet_permissions
-      revoke_gke_node_permissions
-      delete_snapshot_bucket
-      # Deleting the cluster removes its node pools, so --all does not insist
-      # on a pool name a caller (e.g. an installer) may not track.
-      if [ -n "${NODE_POOL_NAME:-}" ]; then
-        delete_gvisor_node_pool
-      else
-        echo "NODE_POOL_NAME not set; skipping node pool deletion (the cluster deletion removes its pools)"
-      fi
-      delete_cluster
-      ;;
-    *) usage ;;
-  esac
-  shift
+for step in "${steps[@]}"; do
+  "${step}"
 done

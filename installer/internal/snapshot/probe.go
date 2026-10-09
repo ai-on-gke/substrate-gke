@@ -170,7 +170,7 @@ func ProbeCluster(st *state.Setup, credentials bool) execx.Spec {
 		Argv:    []string{"bash", "-c", strings.Join(lines, "\n")},
 		SimLines: []string{
 			versionsMarker + "substrate-" + ShortCommit(),
-			imageMarker + "gcr.io/" + st.ProjectID + "/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
+			imageMarker + st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
 			buildMarker + "substrate-" + ShortCommit() + " commit=" + Commit + " built=2026-01-01T00:00:00Z linux/amd64",
 		},
 	}

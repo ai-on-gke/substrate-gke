@@ -740,7 +740,7 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 	}
 	st := app.deps.Setup
 	want := "substrate-" + snapshot.ShortCommit()
-	if st.ProjectID != "acme" || st.InstalledCommit != snapshot.Commit || st.InstalledVersion != want || st.KoDockerRepo != "gcr.io/acme/ate-images" {
+	if st.ProjectID != "acme" || st.InstalledCommit != snapshot.Commit || st.InstalledVersion != want || st.KoDockerRepo != "us-west1-docker.pkg.dev/acme/ate-images" {
 		t.Fatalf("installed cluster not read off the cluster: %+v", st)
 	}
 

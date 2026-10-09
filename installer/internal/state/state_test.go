@@ -216,3 +216,31 @@ func TestUpgradeOrderPositions(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildRepositoryFollowsRegionAndRespectsOverrides(t *testing.T) {
+	s := NewSetup()
+
+	s.ProjectID, s.Zone = "acme", "us-west1-c"
+	if err := s.ApplyProjectDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ zone, repository, want string }{
+		{"us-west1-c", "", "us-west1-docker.pkg.dev/acme/ate-images"},
+		{"europe-west4-a", "", "europe-west4-docker.pkg.dev/acme/ate-images"},
+		{"us-central1", "custom-images", "us-central1-docker.pkg.dev/acme/custom-images"},
+	} {
+		s.Zone, s.ArtifactRegistryRepository = tc.zone, tc.repository
+		if got := s.BuildRepository(); got != tc.want {
+			t.Errorf("BuildRepository = %q, want %q", got, tc.want)
+		}
+	}
+	s.ProjectID = "other"
+	if got := s.BuildRepository(); got != "us-central1-docker.pkg.dev/other/custom-images" {
+		t.Fatal(got)
+	}
+	s.KoDockerRepo = "registry.example.com/shared/images"
+	s.Zone = "europe-west1-b"
+	if got := s.BuildRepository(); got != s.KoDockerRepo {
+		t.Fatalf("override changed: %q", got)
+	}
+}

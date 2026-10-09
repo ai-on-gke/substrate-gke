@@ -31,13 +31,17 @@ if [[ "$1 $2" = "artifacts repositories" && "${TEARDOWN_TEST_FAILURE:-}" = "$3" 
   exit 1
 fi
 case "$1 $2 $3" in
-  "artifacts repositories list") printf '%s\n' "${TEARDOWN_TEST_REPOSITORY:-}" ;;
+  "artifacts repositories describe")
+    if [ -z "${TEARDOWN_TEST_REPOSITORY:-}" ]; then
+      echo "repository not found" >&2
+      exit 1
+    fi ;;
   "artifacts repositories delete"|"monitoring dashboards list"|"projects remove-iam-policy-binding "*|"storage buckets "*|"storage rm "*|"container clusters delete"|"container node-pools delete") ;;
   *) echo "unexpected gcloud call: $*" >&2; exit 1 ;;
 esac
 `
 
-func runTeardown(t *testing.T, args, env []string, wantErr string) []string {
+func runTeardown(t *testing.T, args, env []string, wantErr string) ([]string, string) {
 	t.Helper()
 	script, err := filepath.Abs("../teardown.sh")
 	if err != nil {
@@ -64,18 +68,18 @@ func runTeardown(t *testing.T, args, env []string, wantErr string) []string {
 	}
 	recorded, err := os.ReadFile(log)
 	if os.IsNotExist(err) {
-		return nil
+		return nil, string(out)
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Split(strings.TrimSuffix(string(recorded), "\n"), "\n")
+	return strings.Split(strings.TrimSuffix(string(recorded), "\n"), "\n"), string(out)
 }
 
 func TestTeardown(t *testing.T) {
 	const clusterCall = "container clusters delete test-cluster --location=us-central1-a --project=test-project --quiet"
 	repositoryCalls := []string{
-		`artifacts repositories list --project=test-project --location=europe-west1 --filter=name="projects/test-project/locations/europe-west1/repositories/ate-images" --format=value(name) --quiet`,
+		"artifacts repositories describe ate-images --project=test-project --location=europe-west1 --quiet",
 		"artifacts repositories delete ate-images --project=test-project --location=europe-west1 --quiet",
 	}
 	customCalls := []string{
@@ -90,38 +94,44 @@ func TestTeardown(t *testing.T) {
 	allEnv := slices.Concat(clusterEnv, customEnv, []string{"PROJECT_NUMBER=123456789", "BUCKET_NAME=test-bucket"})
 	allCalls := append([]string{clusterCall}, customCalls...)
 	keepEnv := append(slices.Clone(allEnv), "GCE_REGION=")
+	const lookupWarning = "repository describe denied\nWarning: unable to check Artifact Registry repository"
 
 	for _, tc := range []struct {
-		name    string
-		args    string
-		env     []string
-		want    []string
-		wantErr string
+		name                string
+		args                string
+		env                 []string
+		want                []string
+		wantErr, wantOutput string
 	}{
-		{"default repository", "--delete-repository", nil, repositoryCalls, ""},
-		{"custom repository", "--delete-repository", customEnv, customCalls, ""},
-		{"already deleted", "--delete-repository", []string{"TEARDOWN_TEST_REPOSITORY="}, repositoryCalls[:1], ""},
-		{"lookup denied", "--delete-repository", []string{"TEARDOWN_TEST_FAILURE=list"}, repositoryCalls[:1], "repository list denied"},
-		{"delete denied", "--delete-repository", []string{"TEARDOWN_TEST_FAILURE=delete"}, repositoryCalls, "repository delete denied"},
-		{"all", "--all --delete-repository", allEnv, allCalls, ""},
-		{"keep repository by default", "--all", keepEnv, []string{clusterCall}, ""},
-		{"all lookup denied", "--all --delete-repository", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=list"), allCalls[:2], "repository list denied"},
-		{"all delete denied", "--all --delete-repository", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=delete"), allCalls, "repository delete denied"},
-		{"missing project", "--delete-repository", []string{"PROJECT_ID="}, nil, "PROJECT_ID is not set"},
-		{"missing region", "--delete-repository", []string{"GCE_REGION="}, nil, "GCE_REGION is not set"},
-		{"missing region before all", "--all --delete-repository", []string{"GCE_REGION="}, nil, "GCE_REGION is not set"},
-		{"invalid repository before all", "--all --delete-repository", []string{"ARTIFACT_REGISTRY_REPOSITORY=images/other"}, nil, "ARTIFACT_REGISTRY_REPOSITORY must be"},
-		{"unknown option after all", "--all --unknown", nil, nil, "Usage:"},
-		{"no options", "", nil, nil, "Usage:"},
-		{"cluster without repository config", "--delete-cluster", append(slices.Clone(clusterEnv), "GCE_REGION="), []string{clusterCall}, ""},
+		{"default repository", "--delete-repository", nil, repositoryCalls, "", ""},
+		{"custom repository", "--delete-repository", customEnv, customCalls, "", ""},
+		{"already deleted", "--delete-repository", []string{"TEARDOWN_TEST_REPOSITORY="}, repositoryCalls[:1], "", "repository not found\nWarning: unable to check Artifact Registry repository"},
+		{"lookup denied", "--delete-repository", []string{"TEARDOWN_TEST_FAILURE=describe"}, repositoryCalls[:1], "", lookupWarning},
+		{"delete denied", "--delete-repository", []string{"TEARDOWN_TEST_FAILURE=delete"}, repositoryCalls, "repository delete denied", ""},
+		{"all", "--all --delete-repository", allEnv, allCalls, "", ""},
+		{"all with node pool", "--all", append(slices.Clone(allEnv), "NODE_POOL_NAME=test-pool"), []string{"container node-pools delete test-pool --cluster=test-cluster --location=us-central1-a --project=test-project --quiet", clusterCall}, "", ""},
+		{"keep repository by default", "--all", keepEnv, []string{clusterCall}, "", ""},
+		{"all lookup denied", "--all --delete-repository", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=describe"), allCalls[:2], "", lookupWarning},
+		{"lookup denied before all", "--delete-repository --all", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=describe"), []string{customCalls[0], clusterCall}, "", lookupWarning},
+		{"all delete denied", "--all --delete-repository", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=delete"), allCalls, "repository delete denied", ""},
+		{"missing project", "--delete-repository", []string{"PROJECT_ID="}, nil, "PROJECT_ID is not set", ""},
+		{"missing region", "--delete-repository", []string{"GCE_REGION="}, nil, "GCE_REGION is not set", ""},
+		{"missing region before all", "--all --delete-repository", []string{"GCE_REGION="}, nil, "GCE_REGION is not set", ""},
+		{"invalid repository before all", "--all --delete-repository", []string{"ARTIFACT_REGISTRY_REPOSITORY=images/other"}, nil, "ARTIFACT_REGISTRY_REPOSITORY must be", ""},
+		{"unknown option after all", "--all --unknown", nil, nil, "Usage:", ""},
+		{"no options", "", nil, nil, "Usage:", ""},
+		{"cluster without repository config", "--delete-cluster", append(slices.Clone(clusterEnv), "GCE_REGION="), []string{clusterCall}, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := strings.Fields(tc.args)
-			calls := runTeardown(t, args, tc.env, tc.wantErr)
+			calls, out := runTeardown(t, args, tc.env, tc.wantErr)
+			if !strings.Contains(out, tc.wantOutput) {
+				t.Errorf("output = %q, want %q", out, tc.wantOutput)
+			}
 			// Validation failures must not invoke gcloud at all.
 			if slices.Contains(args, "--all") && len(tc.want) > 0 {
 				calls = slices.DeleteFunc(calls, func(call string) bool {
-					return !strings.HasPrefix(call, "artifacts ") && !strings.HasPrefix(call, "container clusters delete ")
+					return !strings.HasPrefix(call, "artifacts ") && !strings.HasPrefix(call, "container ")
 				})
 			}
 			if !slices.Equal(calls, tc.want) {

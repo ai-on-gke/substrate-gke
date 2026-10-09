@@ -83,7 +83,7 @@ func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
 		}
 	}
 	// The dry run replays a probe of the pin, commit included.
-	if p, err := ParseProbe(ProbeCluster(st, false).SimLines); err != nil || p.Running[0] != "substrate-"+ShortCommit() || p.Prebuilt() || p.Commit != Commit {
+	if p, err := ParseProbe(ProbeCluster(st, false).SimLines); err != nil || p.Running[0] != "substrate-"+ShortCommit() || p.Prebuilt() || p.Commit != Commit || p.KoDockerRepo != "us-west1-docker.pkg.dev/acme/ate-images" {
 		t.Errorf("dry-run probe = %+v, %v", p, err)
 	}
 	for _, credentials := range []bool{true, false} {

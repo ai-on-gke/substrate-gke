@@ -298,6 +298,27 @@ func (s *Setup) MicroVMActive() bool {
 // building them.
 func (s *Setup) Prebuilt() bool { return s.ImageRepo != "" }
 
+// CreatesArtifactRepository reports whether this install provisions its build repository.
+func (s *Setup) CreatesArtifactRepository() bool {
+	return !s.Prebuilt() && s.KoDockerRepo == ""
+}
+
+// BuildRepository resolves the image destination for this install.
+func (s *Setup) BuildRepository() string {
+	if s.KoDockerRepo != "" {
+		return s.KoDockerRepo
+	}
+	return s.Region() + "-docker.pkg.dev/" + s.ProjectID + "/" + s.RepositoryName()
+}
+
+// ImageSummary describes where this install's images come from.
+func (s *Setup) ImageSummary() string {
+	if s.Prebuilt() {
+		return s.ImageRepo + ":" + s.ImageTag
+	}
+	return s.BuildRepository() + " (built from source)"
+}
+
 // Region derives the GCE region from Zone: a zonal location like us-west1-c
 // maps to us-west1, and a regional location is returned unchanged.
 func (s *Setup) Region() string {

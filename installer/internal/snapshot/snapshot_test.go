@@ -1335,7 +1335,7 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
 		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
 		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(b.BuildRepository(st)), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
+		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
@@ -1466,37 +1466,31 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
 				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
 			}
-			if strings.Contains(b.CleanupCommand(st), "--keep-repository") == tc.create || strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {
+			if strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {
 				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st))
 			}
 		})
 	}
 }
 
-func TestCleanupCommandPreservesRepositoryTarget(t *testing.T) {
-	st := testSetup(t)
-	st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
-	st.KoDockerRepo = "registry.example.com/unrelated"
-	root := filepath.Join(t.TempDir(), "user's checkout")
-	b := NewBuilder(root, true)
-	for _, commit := range []string{Commit, strings.Repeat("a", 40)} {
-		b.UseSource(Revision{Repo: RepoURL, Commit: commit})
-		cmd := b.CleanupCommand(st)
-		for _, want := range []string{"--region 'europe-west4'", "--repository 'build-images'"} {
-			if !strings.Contains(cmd, want) {
-				t.Errorf("command missing %q: %s", want, cmd)
+func TestCleanupCommandRepositoryOptions(t *testing.T) {
+	b := NewBuilder(t.TempDir(), true)
+	for _, tc := range []struct{ name, repository, registry, imageRepo, suffix string }{
+		{"default repository", "", "", "", " --delete-repository"},
+		{"explicit default", "ate-images", "", "", " --delete-repository"},
+		{"custom repository", "build-images", "", "", " --repository 'build-images' --delete-repository"},
+		{"custom registry", "build-images", "registry.example.com/shared", "", ""},
+		{"prebuilt images", "build-images", "", ReleaseRepo, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testSetup(t)
+			st.Zone = "europe-west4-a"
+			st.ArtifactRegistryRepository, st.KoDockerRepo, st.ImageRepo = tc.repository, tc.registry, tc.imageRepo
+			want := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) + tc.suffix
+			if got := b.CleanupCommand(st); got != want {
+				t.Errorf("cleanup = %q, want %q", got, want)
 			}
-		}
-		if strings.Contains(cmd, st.KoDockerRepo) {
-			t.Fatal("cleanup target must not come from build registry")
-		}
-	}
-	cmd := NewBuilder(root, false).CleanupCommand(st)
-	if strings.Contains(cmd, "--substrate-root") || strings.Contains(cmd, "--commit") {
-		t.Fatal(cmd)
-	}
-	if err := exec.Command("bash", "-n", "-c", cmd).Run(); err != nil {
-		t.Fatal(err)
+		})
 	}
 }
 
@@ -1563,34 +1557,5 @@ printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_
 				t.Fatalf("preparation calls = %q, want %q", data, want)
 			}
 		})
-	}
-}
-
-func TestBuildRepositoryFollowsRegionAndRespectsOverrides(t *testing.T) {
-	s := state.NewSetup()
-	b := NewBuilder(t.TempDir(), true)
-
-	s.ProjectID, s.Zone = "acme", "us-west1-c"
-	if err := s.ApplyProjectDefaults(); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ zone, repository, want string }{
-		{"us-west1-c", "", "us-west1-docker.pkg.dev/acme/ate-images"},
-		{"europe-west4-a", "", "europe-west4-docker.pkg.dev/acme/ate-images"},
-		{"us-central1", "custom-images", "us-central1-docker.pkg.dev/acme/custom-images"},
-	} {
-		s.Zone, s.ArtifactRegistryRepository = tc.zone, tc.repository
-		if got := b.BuildRepository(s); got != tc.want {
-			t.Errorf("BuildRepository = %q, want %q", got, tc.want)
-		}
-	}
-	s.ProjectID = "other"
-	if got := b.BuildRepository(s); got != "us-central1-docker.pkg.dev/other/custom-images" {
-		t.Fatal(got)
-	}
-	s.KoDockerRepo = "registry.example.com/shared/images"
-	s.Zone = "europe-west1-b"
-	if got := b.BuildRepository(s); got != s.KoDockerRepo {
-		t.Fatalf("override changed: %q", got)
 	}
 }

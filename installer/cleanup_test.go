@@ -101,6 +101,8 @@ echo 12345
 			flags := "--all"
 			if strings.Contains(tc.args, "--delete-repository") && !strings.Contains(tc.args, "--keep-repository") {
 				flags += " --delete-repository"
+			} else if !strings.Contains(string(out), "Image repositories will be kept.") || strings.Contains(string(out), tc.repository) {
+				t.Errorf("keep message names a repository the install may not have created:\n%s", out)
 			}
 			want := "teardown " + flags + "|acme|12345|cluster|" + tc.location + "|snapshots|" + tc.region + "|" + tc.repository + "|\n"
 			if !strings.Contains(calls, want) {
