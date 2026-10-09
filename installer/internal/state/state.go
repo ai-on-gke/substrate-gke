@@ -22,6 +22,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 )
 
 // Step identifies one screen of the wizard.
@@ -344,14 +346,49 @@ func (s *Setup) ImageSummary() string {
 	return s.KoDockerRepo + " (built from source)"
 }
 
-// Region derives the GCE region from Zone: a zonal location like us-west1-c
-// maps to us-west1, and a regional location is returned unchanged.
-func (s *Setup) Region() string {
-	parts := strings.Split(s.Zone, "-")
+// Region derives the GCE region from Zone (see RegionOf).
+func (s *Setup) Region() string { return RegionOf(s.Zone) }
+
+// RegionOf derives the GCE region from a GKE location: a zonal location like
+// us-west1-c maps to us-west1, and a regional location is returned unchanged.
+// It is the one derivation of GCE_REGION, shared by bootstrap's environment
+// and the cluster screen's check of what bootstrap would recreate; the two
+// must agree, or the check approves a cluster bootstrap then deletes.
+func RegionOf(location string) string {
+	parts := strings.Split(location, "-")
 	if len(parts) == 3 && len(parts[2]) == 1 {
 		return parts[0] + "-" + parts[1]
 	}
-	return s.Zone
+	return location
+}
+
+// SelectCluster records an existing cluster as the run's target, and
+// NewCluster a cluster the run will create. Every Cluster* field is written
+// by both, here and only here: a field one of them forgot would carry an
+// abandoned selection's value into the create path, or a stale one into the
+// next selection — the leak these fields are kept apart to prevent. A new
+// field gets its line in both, next to each other.
+func (s *Setup) SelectCluster(c gcp.Cluster) {
+	s.ClusterName = c.Name
+	s.Zone = c.Location
+	s.ClusterIsNew = false
+	s.ClusterKVMReady = c.KVMReady
+	s.ClusterNetwork = c.NetworkName()
+	s.ClusterSubnetwork = c.SubnetworkName()
+	s.ClusterDataplaneV2 = c.DataplaneV2
+	s.ClusterFilestoreAddon = c.FilestoreCSIAddon
+}
+
+// NewCluster records a cluster the run will create, named name, in the
+// location already in Zone (see SelectCluster).
+func (s *Setup) NewCluster(name string) {
+	s.ClusterName = name
+	s.ClusterIsNew = true
+	s.ClusterKVMReady = false
+	s.ClusterNetwork = ""
+	s.ClusterSubnetwork = ""
+	s.ClusterDataplaneV2 = false
+	s.ClusterFilestoreAddon = false
 }
 
 // defaultBucketName derives the snapshot bucket name for a project, cluster,

@@ -14,7 +14,12 @@
 
 package gcp
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 const clusterListJSON = `[
   {
@@ -221,5 +226,34 @@ func TestParseClustersReadsTheFilestoreAddon(t *testing.T) {
 	}
 	if !clusters[0].FilestoreCSIAddon || clusters[1].FilestoreCSIAddon {
 		t.Errorf("FilestoreCSIAddon = %v, %v; want true, false", clusters[0].FilestoreCSIAddon, clusters[1].FilestoreCSIAddon)
+	}
+}
+
+// BootstrapRecreates is a copy of a decision setup-gcp makes, and a copy goes
+// stale silently: if bootstrap stopped recreating clusters, the installer
+// would keep refusing clusters it could now handle; if it started comparing
+// something else, the installer would approve clusters bootstrap then
+// deletes. setup-gcp lives in this repository, so this reads its source and
+// fails on any change to the lines the guard mirrors, which is the prompt to
+// re-derive the guard.
+func TestBootstrapRecreatesMirrorsSetupGCP(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", "setup-gcp", "cmd", "cluster.go"))
+	if err != nil {
+		t.Fatalf("reading setup-gcp's cluster.go: %v", err)
+	}
+	code := string(src)
+	for _, want := range []string{
+		`expectedNetwork := fmt.Sprintf("projects/%s/global/networks/%s", cfg.ProjectID, cfg.Network)`,
+		`!strings.HasSuffix(cluster.NetworkConfig.Network, expectedNetwork)`,
+		`expectedSubnetwork := fmt.Sprintf("projects/%s/regions/%s/subnetworks/%s", cfg.ProjectID, cfg.Region, cfg.Subnetwork)`,
+		`!strings.HasSuffix(cluster.NetworkConfig.Subnetwork, expectedSubnetwork)`,
+		`currentIsV2 != cfg.EnableDataplaneV2`,
+	} {
+		if !strings.Contains(code, want) {
+			t.Errorf("setup-gcp no longer has %s; re-derive Cluster.BootstrapRecreates from createClusterIdempotent", want)
+		}
+	}
+	if n := strings.Count(code, "deleteCluster(ctx, cfg)"); n < 3 {
+		t.Errorf("setup-gcp deletes the cluster on %d mismatches, not the 3 the guard assumes; re-derive Cluster.BootstrapRecreates", n)
 	}
 }

@@ -338,8 +338,12 @@ type clusterScreen struct {
 	// cluster for existing install), "installed" (cluster already runs
 	// Substrate), "partial" (ate-system namespace without atelet),
 	// "teardown-confirm"/"teardown" (deleting the control plane so the
-	// install can continue here), "confirm" (incompatible cluster chosen).
-	mode              string
+	// install can continue here), "confirm" (incompatible cluster chosen),
+	// "recreate" (bootstrap would delete and recreate the cluster).
+	mode string
+	// recreate is why the selection is refused in "recreate" mode, computed
+	// once on entering it.
+	recreate          string
 	nameInput         textinput.Model
 	comp              *execComp
 	parsed            bool
@@ -381,7 +385,9 @@ func (s *clusterScreen) bgProbes() tea.Cmd {
 	var cmds []tea.Cmd
 	for _, c := range s.clusters {
 		key := c.Name + "/" + c.Location
-		if !c.SubstrateReady() || s.bgPending[key] {
+		// A cluster bootstrap would recreate is refused whatever its
+		// install state, so probing it in the background buys nothing.
+		if !c.SubstrateReady() || s.bgPending[key] || s.recreateReason(c) != "" {
 			continue
 		}
 		if _, ok := s.probed[key]; ok {
@@ -455,12 +461,7 @@ func (s *clusterScreen) Hints() []Hint {
 // create-new path or a later pick.
 func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st := s.deps.Setup
-	st.ClusterName = c.Name
-	st.Zone = c.Location
-	st.ClusterIsNew = false
-	st.ClusterKVMReady = c.KVMReady
-	st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2 = c.NetworkName(), c.SubnetworkName(), c.DataplaneV2
-	st.ClusterFilestoreAddon = c.FilestoreCSIAddon
+	st.SelectCluster(c)
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -473,13 +474,29 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 // gcp.Cluster.BootstrapRecreates). The region is the one bootstrap is given,
 // derived from the cluster's location the same way Setup derives GCE_REGION.
 func (s *clusterScreen) recreateReason(c gcp.Cluster) string {
-	region := (&state.Setup{Zone: c.Location}).Region()
-	return c.BootstrapRecreates(s.deps.Setup.ProjectID, region)
+	return c.BootstrapRecreates(s.deps.Setup.ProjectID, state.RegionOf(c.Location))
+}
+
+// refuseRecreate enters "recreate" mode, and reports true, when bootstrap
+// would recreate c.
+func (s *clusterScreen) refuseRecreate(c gcp.Cluster) bool {
+	reason := s.recreateReason(c)
+	if reason == "" {
+		return false
+	}
+	s.mode, s.recreate = "recreate", reason
+	return true
 }
 
 // probe checks the selection for an existing install, from cache when the
 // cluster was already probed this visit.
 func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
+	// Ahead of the probe, not only in decide: a cluster bootstrap would
+	// recreate is refused whatever the probe says, so fetching credentials
+	// and running kubectl against it would be a wait for nothing.
+	if s.refuseRecreate(c) {
+		return nil
+	}
 	if res, ok := s.probed[c.Name+"/"+c.Location]; ok {
 		return s.decide(c, res)
 	}
@@ -494,11 +511,12 @@ func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
 // pre-existing beta-API check.
 func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.Cmd {
 	switch {
-	case s.recreateReason(c) != "":
+	case s.refuseRecreate(c):
 		// First, ahead of the install guard: bootstrap would delete this
 		// cluster whatever else is true of it, so a teardown offered here
-		// would be work thrown away along with the cluster.
-		s.mode = "recreate"
+		// would be work thrown away along with the cluster. probe() has
+		// usually refused it already; this catches the paths that reach
+		// decide without a probe, like "continue without the check".
 		return nil
 	case res.Partial():
 		s.mode = "partial"
@@ -607,11 +625,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 					}
 				}
 				st := s.deps.Setup
-				st.ClusterName = name
-				st.ClusterIsNew = true
-				st.ClusterKVMReady = false
-				st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2 = "", "", false
-				st.ClusterFilestoreAddon = false
+				st.NewCluster(name)
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
@@ -725,7 +739,11 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 		case "b", "esc", "left":
 			return goBack
 		case "enter":
-			if s.loading {
+			// Not while the list failed to load: the create row would be
+			// the only one left, the name prompt is hidden behind the error
+			// panel, and its prefilled name may be a cluster that exists —
+			// one the list would have caught. [r] reloads.
+			if s.loading || s.err != nil {
 				return nil
 			}
 			if s.cursor == len(s.clusters) {
@@ -850,11 +868,19 @@ func (s *clusterScreen) View(w int) string {
 		sel := s.clusters[s.cursor]
 		// Written as paragraphs for the panel to wrap, so it reads at 80
 		// columns beside the sidebar.
+		//
+		// The advice has to hold for both reasons a cluster lands here: a
+		// network in another project, and a subnet outside the cluster's
+		// region in this project. The upgrade track is offered conditionally
+		// because the refusal comes before the install probe, so whether this
+		// cluster already runs Substrate is not known; if it does, the upgrade
+		// track is its way forward, since it never runs bootstrap.
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 74)).Render(
 			theme.Bad.Render("setup-gcp would delete and recreate "+sel.Name+".")+"\n\n"+
 				"Its bootstrap rebuilds an existing cluster whose network differs from what it expects, without asking, and "+
-				s.recreateReason(sel)+".\n\n"+
-				"The installer will not run it against this cluster. Choose a cluster on a network in this project, or create a new one."))
+				s.recreate+".\n\n"+
+				"The installer will not run it against this cluster. Choose one whose network and subnetwork are both in this project and in the cluster's own region, or create a new one.\n\n"+
+				"If this cluster already runs Substrate, upgrade it instead: restart the installer and choose \"Upgrade an installed cluster\", which never runs bootstrap."))
 	case "confirm":
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 74)).Render(
 			theme.Warning.Render("This cluster cannot run Substrate as-is.")+"\n\n"+

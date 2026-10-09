@@ -204,7 +204,7 @@ func TestCreateNewClusterPath(t *testing.T) {
 	press("enter")                            // doctor
 	press("enter", "enter", "enter", "enter") // images: pre-built (the default), then its three fields
 	press("enter", "enter", "enter")          // project fields (pid, zone, bucket)
-	press("5", "enter")                       // "create a new cluster" row (4 clusters + create)
+	press("6", "enter")                       // "create a new cluster" row (5 clusters + create)
 	pump(t, app, key("enter"))                // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
@@ -1146,8 +1146,11 @@ func TestListBackgroundProbesReadyClusters(t *testing.T) {
 }
 
 // A --dry-run walkthrough shows the guard's whole story off the fixture
-// clusters: badges from the background probes, the blocked panel, and a
-// simulated teardown that ends clean instead of replaying "installed".
+// clusters: badges from the background probes, the blocked panel, a
+// simulated teardown that ends clean instead of replaying "installed", the
+// refusal of a cluster bootstrap would recreate, and the warning that
+// provision turns off a cluster's managed Filestore driver. A screen nobody
+// can reach without a GCP project is a screen that regresses unseen.
 func TestDryRunShowsGuardStates(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
@@ -1167,6 +1170,20 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterName != "substrate-installed" {
 		t.Errorf("after dry-run teardown: step=%v cluster=%q, want Provision/substrate-installed",
 			app.mach.Current(), app.deps.Setup.ClusterName)
+	}
+
+	shared := testApp(t)
+	press = pressToCluster(t, shared)
+	press("5", "enter") // shared-vpc-prod
+	if scr := shared.cur.(*clusterScreen); scr.mode != "recreate" {
+		t.Errorf("shared-vpc-prod: mode = %q, want the recreate refusal", scr.mode)
+	}
+
+	poc := testApp(t)
+	press = pressToCluster(t, poc)
+	press("1", "enter") // substrate-poc, ready, managed Filestore driver on
+	if poc.mach.Current() != state.Provision || !strings.Contains(poc.cur.View(120), "managed Filestore CSI driver") {
+		t.Errorf("substrate-poc: step=%v, want Provision with the Filestore warning:\n%s", poc.mach.Current(), poc.cur.View(120))
 	}
 }
 

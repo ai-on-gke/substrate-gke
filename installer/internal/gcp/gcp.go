@@ -91,9 +91,14 @@ func lastSegment(path string) string {
 // whose networkConfig was not listed is not refused: bootstrap skips both
 // comparisons when the cluster reports no network.
 //
-// The comparisons mirror bootstrap's own: it checks that the cluster's path
-// ends with the one it built, so this does the same with the names the
-// installer will pass, and accepts whatever prefix gcloud puts in front.
+// The comparisons mirror bootstrap's own, in this repository's
+// tools/setup-gcp/cmd/cluster.go (createClusterIdempotent): it checks that
+// the cluster's path ends with the one it built, so this does the same with
+// the names the installer will pass, and accepts whatever prefix gcloud puts
+// in front. TestBootstrapRecreatesMirrorsSetupGCP reads that file and fails
+// if the comparisons or the delete change; when it does, re-derive this
+// function from the new code — and if bootstrap has stopped recreating
+// clusters (#2341), the refusal can go.
 func (c Cluster) BootstrapRecreates(projectID, region string) string {
 	if c.Network != "" && !strings.HasSuffix(c.Network, "projects/"+projectID+"/global/networks/"+c.NetworkName()) {
 		return fmt.Sprintf("its network %s belongs to another project (Shared VPC), and setup-gcp only matches networks in %s", c.Network, projectID)
@@ -188,18 +193,28 @@ func (c *Client) ProjectNumber(ctx context.Context, projectID string) (string, e
 // ListClusters lists the project's GKE clusters with their beta-API status.
 func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster, error) {
 	if c.DryRun {
-		// The last two names are cues for CheckInstalled's dry-run sim, so a
-		// --dry-run walkthrough shows the install guard's whole story:
-		// clean, blocked-installed, and partial.
+		// substrate-installed and substrate-partial are cues for
+		// CheckInstalled's dry-run sim, so a --dry-run walkthrough shows the
+		// install guard's whole story: clean, blocked-installed, and partial.
+		// substrate-poc has the managed Filestore driver on, so its provision
+		// and Filestore steps show that warning; shared-vpc-prod is on a
+		// network in another project, which bootstrap would recreate, so it
+		// shows the refusal. It is last, so of the rows only "create a new
+		// cluster" moves.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
-				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true,
+				FilestoreCSIAddon: true},
 			{Name: "legacy-prod", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.33.2-gke.100", NodeCount: 12},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.35.5-gke.1163012", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
 			{Name: "substrate-partial", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.35.5-gke.1163012", NodeCount: 1, BetaAPIs: RequiredBetaAPIs},
+			{Name: "shared-vpc-prod", Location: "us-central1", Status: "RUNNING",
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, DataplaneV2: true,
+				Network:    "projects/network-host/global/networks/shared-vpc",
+				Subnetwork: "projects/network-host/regions/us-central1/subnetworks/shared-sub"},
 		}, nil
 	}
 	out, err := c.run(ctx, "container", "clusters", "list", "--project="+projectID, "--format=json")

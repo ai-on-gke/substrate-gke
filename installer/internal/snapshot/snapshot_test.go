@@ -1043,6 +1043,65 @@ func TestBootstrapIsHandedAnExistingClustersOwnNetwork(t *testing.T) {
 	}
 }
 
+// A run set to create a cluster hands bootstrap the user's network settings,
+// and bootstrap reconciles — and on any network difference recreates — a
+// cluster whose name already exists. So the guard must stop on an existing
+// cluster, let bootstrap run only on gcloud's 404, and fail closed on any
+// other answer. The name reaches it from a free-text prompt, so a name built
+// to break out of the script must stay inert.
+func TestNewClusterGuardOnlyLetsAFreeNameThrough(t *testing.T) {
+	stub := t.TempDir()
+	gcloud := "#!/usr/bin/env bash\n" +
+		"case \"$STUB\" in\n" +
+		"  exists) echo prod; exit 0 ;;\n" +
+		"  missing) echo 'ERROR: (gcloud.container.clusters.describe) ResponseError: code=404, message=Not found' >&2; exit 1 ;;\n" +
+		"  denied) echo 'ERROR: (gcloud.container.clusters.describe) PERMISSION_DENIED' >&2; exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(stub, "gcloud"), []byte(gcloud), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "pwned")
+	for _, tc := range []struct {
+		stub, name string
+		wantRan    bool
+		wantMsg    string
+	}{
+		{"exists", "prod", false, "already exists"},
+		{"missing", "prod", true, ""},
+		{"denied", "prod", false, "Could not confirm"},
+		{"exists", "$(touch " + canary + ")", false, "already exists"},
+	} {
+		st := &state.Setup{ProjectID: "acme", Zone: "us-central1-a", ClusterName: tc.name}
+		cmd := exec.Command("bash", "-c", "set -euo pipefail\n"+newClusterGuard(st)+"\necho BOOTSTRAP-RAN")
+		cmd.Env = append(os.Environ(), "PATH="+stub+":"+os.Getenv("PATH"), "STUB="+tc.stub)
+		out, _ := cmd.CombinedOutput()
+		if ran := strings.Contains(string(out), "BOOTSTRAP-RAN"); ran != tc.wantRan {
+			t.Errorf("%s/%q: bootstrap ran=%v, want %v:\n%s", tc.stub, tc.name, ran, tc.wantRan, out)
+		}
+		if tc.wantMsg != "" && !strings.Contains(string(out), tc.wantMsg) {
+			t.Errorf("%s/%q: output missing %q:\n%s", tc.stub, tc.name, tc.wantMsg, out)
+		}
+	}
+	if _, err := os.Stat(canary); err == nil {
+		t.Error("a cluster name was executed as shell")
+	}
+}
+
+// Only a run that creates a cluster needs the guard; an existing cluster is
+// meant to exist.
+func TestBootstrapGuardsOnlyNewClusters(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	st := testSetup(t)
+	st.ClusterIsNew = true
+	if !strings.Contains(strings.Join(b.Bootstrap(st).Argv, " "), "clusters describe") {
+		t.Error("a new cluster's bootstrap should check the name is free first")
+	}
+	st.ClusterIsNew = false
+	if strings.Contains(strings.Join(b.Bootstrap(st).Argv, " "), "clusters describe") {
+		t.Error("an existing cluster's bootstrap should not check that it does not exist")
+	}
+}
+
 func TestDeploySpecs(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
 	st := testSetup(t)

@@ -92,8 +92,13 @@ func (s *provisionScreen) View(w int) string {
 		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
 			"Creating cluster %s in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.Zone)) + "\n\n")
 	} else {
-		b.WriteString(theme.Subtle.Render(fmt.Sprintf(
-			"Cluster %s already exists; bootstrap is idempotent and only fills in the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
+		// Not "only fills in the bucket, IAM, and dashboards": on an existing
+		// cluster step 2/7 also reconciles the workload pool, the beta APIs,
+		// managed OpenTelemetry and the Filestore add-on, each its own
+		// control-plane update. Wrapped to the content width, or Bubble Tea's
+		// renderer cuts it at the edge.
+		b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render(fmt.Sprintf(
+			"Cluster %s already exists. Bootstrap fills in the bucket, IAM, and dashboards, and updates the cluster only where it differs from what Substrate needs.", st.ClusterName)) + "\n\n")
 	}
 	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
 		// Said here, as it happens, rather than left for the Filestore step
