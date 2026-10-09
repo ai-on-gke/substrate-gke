@@ -242,6 +242,74 @@ func TestAccessTokenFailureIsNotCached(t *testing.T) {
 	}
 }
 
+// With broken ADC, everyone already waiting on the failing fetch shares its
+// error instead of each spawning gcloud again: one submit (warm-up +
+// billing + API + permissions) costs one fetch.
+func TestFailedTokenFetchIsSharedByItsWaiters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("no request should be made without a token")
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	c := &Client{billingBase: srv.URL, serviceUsageBase: srv.URL, crmBase: srv.URL,
+		token: func(context.Context) (string, error) {
+			if fetches.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			return "", errors.New("Reauthentication failed. cannot prompt during non-interactive execution.")
+		}}
+
+	go c.WarmToken(context.Background())
+	<-started
+	errs := make(chan error, 3)
+	go func() { _, err := c.BillingEnabled(context.Background(), "acme"); errs <- err }()
+	go func() { _, err := c.ServiceEnabled(context.Background(), "acme", GKEService); errs <- err }()
+	go func() { _, err := c.MissingPermissions(context.Background(), "acme"); errs <- err }()
+	time.Sleep(50 * time.Millisecond) // let the probes queue on the fetch
+	close(release)
+	for range 3 {
+		if err := <-errs; err == nil || !strings.Contains(err.Error(), "Reauthentication failed") {
+			t.Errorf("each probe should report the shared fetch's error, got %v", err)
+		}
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("a failing fetch was run %d times for one submit, want 1", n)
+	}
+}
+
+// tokenMu is never held while gcloud runs, so ResetToken and invalidateToken
+// return at once even while a fetch is stuck (the UI calls ResetToken).
+func TestTokenLockIsNotHeldDuringAFetch(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	c := &Client{token: func(context.Context) (string, error) {
+		close(started)
+		<-release
+		return "tok", nil
+	}}
+	defer close(release)
+	go c.WarmToken(context.Background())
+	<-started
+	done := make(chan struct{})
+	go func() {
+		c.ResetToken()
+		c.invalidateToken("tok")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ResetToken blocked behind a running token fetch")
+	}
+	// A caller whose context ends stops waiting, too.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := c.accessToken(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("accessToken with an expired ctx = %v, want DeadlineExceeded", err)
+	}
+}
+
 // A 401 means the cached token is no good (gcloud can hand back its own
 // token near expiry): the call drops it, fetches a fresh one and retries
 // once. A second 401 is reported, not retried forever.

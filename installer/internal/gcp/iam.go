@@ -160,15 +160,50 @@ const maxAPIResponse = 1 << 20
 // backstop.
 const tokenTTL = 5 * time.Minute
 
+// tokenFetch is one `print-access-token` run, shared by every caller that
+// wants a token while it is under way.
+type tokenFetch struct {
+	done  chan struct{} // closed once token and err are set
+	token string
+	err   error
+}
+
 // accessToken returns the application-default access token, asking gcloud
-// (or the token override) at most once per tokenTTL. Concurrent callers
-// share one fetch. A failed fetch is not cached.
+// (or the token override) at most once per tokenTTL.
+//
+// It is a singleflight: a caller that finds no cached token starts one
+// fetch, and every caller arriving while it runs waits for that same fetch
+// and gets its result, error included. tokenMu is never held while gcloud
+// runs, so ResetToken and invalidateToken return at once. A failed fetch is
+// not cached for later callers; the next user action (ResetToken) or call
+// tries again. Each caller stops waiting when its own ctx ends; the fetch
+// itself runs on under cmdTimeout and still serves the rest.
 func (c *Client) accessToken(ctx context.Context) (string, error) {
 	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
 	if c.cachedToken != "" && time.Now().Before(c.tokenExpiry) {
-		return c.cachedToken, nil
+		token := c.cachedToken
+		c.tokenMu.Unlock()
+		return token, nil
 	}
+	f := c.tokenFetch
+	if f == nil {
+		f = &tokenFetch{done: make(chan struct{})}
+		c.tokenFetch = f
+		go c.runTokenFetch(f)
+	}
+	c.tokenMu.Unlock()
+
+	select {
+	case <-f.done:
+		return f.token, f.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// runTokenFetch runs f, caches its token on success and wakes its waiters.
+// It runs detached from any one caller's context, since several share it.
+func (c *Client) runTokenFetch(f *tokenFetch) {
 	fetch := c.token
 	if fetch == nil {
 		fetch = func(ctx context.Context) (string, error) {
@@ -176,13 +211,20 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 			return string(out), err
 		}
 	}
-	token, err := fetch(ctx)
-	if err != nil {
-		return "", err
+	token, err := fetch(context.Background())
+	token = strings.TrimSpace(token)
+
+	c.tokenMu.Lock()
+	if c.tokenFetch == f {
+		c.tokenFetch = nil
 	}
-	c.cachedToken = strings.TrimSpace(token)
-	c.tokenExpiry = time.Now().Add(tokenTTL)
-	return c.cachedToken, nil
+	if err == nil {
+		c.cachedToken = token
+		c.tokenExpiry = time.Now().Add(tokenTTL)
+	}
+	f.token, f.err = token, err
+	c.tokenMu.Unlock()
+	close(f.done)
 }
 
 // ResetToken forgets the cached access token, so the next REST call asks
