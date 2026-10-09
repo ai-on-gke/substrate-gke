@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
@@ -518,15 +519,23 @@ func HasEnvoyDockerfile(root string) bool {
 // context the throwaway KUBECONFIG from credentialLines does not have.
 // Empty means "use the current context" to both. exec.Cmd keeps the last
 // duplicate, so this overrides the inherited value.
+//
+// NETWORK, SUBNETWORK and ENABLE_DATAPLANE_V2 are sent for every run, and for
+// an existing cluster they are its own (see Setup.BootstrapNetwork): bootstrap
+// deletes and recreates an existing cluster whose settings differ from them.
+// ENABLE_DATAPLANE_V2 in particular has to be explicit, because bootstrap
+// registers no flag for it and inherits create cluster's default of true.
 func (b *Builder) env(st *state.Setup) []string {
+	network, subnetwork, dataplaneV2 := st.BootstrapNetwork()
 	env := []string{
 		"PROJECT_ID=" + st.ProjectID,
 		"PROJECT_NUMBER=" + st.ProjectNumber,
 		"GCE_REGION=" + st.Region(),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
-		"NETWORK=" + st.Network,
-		"SUBNETWORK=" + st.Subnetwork,
+		"NETWORK=" + network,
+		"SUBNETWORK=" + subnetwork,
+		"ENABLE_DATAPLANE_V2=" + strconv.FormatBool(dataplaneV2),
 		"GVISOR_NODE_MACHINE_TYPE=" + st.MachineType,
 		"BUCKET_NAME=" + st.BucketName,
 		"KUBECTL_CONTEXT=",
@@ -699,11 +708,18 @@ func (b *Builder) fetchSimLines() []string {
 // run against an existing cluster. It still runs inside the checkout, because
 // it is the first step and the install checklist expects the fetch to happen
 // here; `go -C` then switches to the setup-gcp module.
+//
+// For a cluster the run is to create, it first confirms the cluster does not
+// exist (see newClusterGuard).
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
+	command := "go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"
+	if st.ClusterIsNew {
+		command = newClusterGuard(st) + "\n" + command
+	}
 	return execx.Spec{
 		Label:   "setup-gcp bootstrap",
 		Display: "go -C " + SetupGCPPath + " run . bootstrap",
-		Argv:    b.inTree("go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"),
+		Argv:    b.inTree(command),
 		Env:     b.env(st),
 		SimLines: append(b.fetchSimLines(),
 			"Step 1/7: Enabling required APIs...",
@@ -716,6 +732,34 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 			"Bootstrap completed successfully.",
 		),
 	}
+}
+
+// newClusterGuard is shell that stops before bootstrap when the cluster the
+// run was told to create already exists. Bootstrap does not distinguish:
+// given a name that exists, it reconciles that cluster, and it deletes and
+// recreates it on any difference in network, subnetwork or Dataplane V2
+// (agent-substrate/substrate#2341). A new cluster is handed the user's
+// network settings rather than the cluster's own, so any such difference is
+// likely, and the name prompt can carry a name that exists — a prefilled
+// default from an earlier run, or one typed while the list could not load.
+//
+// It fails closed: only gcloud's 404 counts as "free". Any other failure to
+// describe the cluster (auth, quota, network) stops the run with gcloud's
+// own message rather than guessing.
+func newClusterGuard(st *state.Setup) string {
+	name, project, location := ShellQuote(st.ClusterName), ShellQuote(st.ProjectID), ShellQuote(st.Zone)
+	return strings.Join([]string{
+		fmt.Sprintf(`if out=$(gcloud container clusters describe %s --project=%s --location=%s --format="value(name)" 2>&1); then`, name, project, location),
+		// printf with quoted arguments, never the names inside the format:
+		// the name comes from a free-text prompt.
+		fmt.Sprintf(`    printf 'Cluster %%s already exists in %%s, but this run was set to create it. Go back to the cluster step and select it from the list instead.\n' %s %s >&2`, name, location),
+		`    exit 1`,
+		`fi`,
+		`case "${out}" in`,
+		`    *code=404*) ;;`,
+		fmt.Sprintf(`    *) printf 'Could not confirm that cluster %%s does not exist yet: %%s\n' %s "${out}" >&2; exit 1 ;;`, name),
+		`esac`,
+	}, "\n")
 }
 
 // DeployAteSystem installs the Substrate control plane with the upstream

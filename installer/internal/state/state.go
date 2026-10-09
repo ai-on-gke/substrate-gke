@@ -22,6 +22,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 )
 
 // Step identifies one screen of the wizard.
@@ -240,6 +242,25 @@ type Setup struct {
 	ClusterIsNew    bool
 	ClusterKVMReady bool
 
+	// ClusterNetwork, ClusterSubnetwork and ClusterDataplaneV2 describe the
+	// existing cluster the run connects to, as gcloud listed it. Bootstrap is
+	// given these rather than Network and Subnetwork, which are the user's
+	// choices for a cluster the run creates: its reconcile path deletes and
+	// recreates an existing cluster whose network, subnetwork or datapath
+	// differ from what it was given (agent-substrate/substrate#2341), and the
+	// defaults match few real clusters. Kept apart so backing out of an
+	// existing cluster cannot leak its network into the create path.
+	ClusterNetwork     string
+	ClusterSubnetwork  string
+	ClusterDataplaneV2 bool
+
+	// ClusterFilestoreAddon records that the existing cluster had GKE's
+	// managed Filestore CSI driver on. Provision's bootstrap turns it off
+	// (agent-substrate/substrate#2357), before the user has decided whether
+	// the optional Filestore step installs Substrate's replacement, so both
+	// screens say so.
+	ClusterFilestoreAddon bool
+
 	BucketName   string
 	KoDockerRepo string
 
@@ -292,6 +313,27 @@ func (s *Setup) MicroVMActive() bool {
 	return s != nil && s.MicroVM() && s.MicroVMDeployed
 }
 
+// BootstrapNetwork returns the network, subnetwork and Dataplane V2 setting to
+// hand setup-gcp's bootstrap. For a cluster the run creates, the user's
+// choices, with Dataplane V2 on as upstream has always defaulted it. For an
+// existing cluster, the cluster's own, so bootstrap's comparison finds nothing
+// to recreate; a network gcloud did not list falls back to the user's, which
+// bootstrap then does not compare, since it skips the check when the cluster
+// reports none.
+func (s *Setup) BootstrapNetwork() (network, subnetwork string, dataplaneV2 bool) {
+	if s.ClusterIsNew {
+		return s.Network, s.Subnetwork, true
+	}
+	network, subnetwork = s.Network, s.Subnetwork
+	if s.ClusterNetwork != "" {
+		network = s.ClusterNetwork
+	}
+	if s.ClusterSubnetwork != "" {
+		subnetwork = s.ClusterSubnetwork
+	}
+	return network, subnetwork, s.ClusterDataplaneV2
+}
+
 // Prebuilt reports whether the install pulls published images rather than
 // building them.
 func (s *Setup) Prebuilt() bool { return s.ImageRepo != "" }
@@ -304,14 +346,49 @@ func (s *Setup) ImageSummary() string {
 	return s.KoDockerRepo + " (built from source)"
 }
 
-// Region derives the GCE region from Zone: a zonal location like us-west1-c
-// maps to us-west1, and a regional location is returned unchanged.
-func (s *Setup) Region() string {
-	parts := strings.Split(s.Zone, "-")
+// Region derives the GCE region from Zone (see RegionOf).
+func (s *Setup) Region() string { return RegionOf(s.Zone) }
+
+// RegionOf derives the GCE region from a GKE location: a zonal location like
+// us-west1-c maps to us-west1, and a regional location is returned unchanged.
+// It is the one derivation of GCE_REGION, shared by bootstrap's environment
+// and the cluster screen's check of what bootstrap would recreate; the two
+// must agree, or the check approves a cluster bootstrap then deletes.
+func RegionOf(location string) string {
+	parts := strings.Split(location, "-")
 	if len(parts) == 3 && len(parts[2]) == 1 {
 		return parts[0] + "-" + parts[1]
 	}
-	return s.Zone
+	return location
+}
+
+// SelectCluster records an existing cluster as the run's target, and
+// NewCluster a cluster the run will create. Every Cluster* field is written
+// by both, here and only here: a field one of them forgot would carry an
+// abandoned selection's value into the create path, or a stale one into the
+// next selection — the leak these fields are kept apart to prevent. A new
+// field gets its line in both, next to each other.
+func (s *Setup) SelectCluster(c gcp.Cluster) {
+	s.ClusterName = c.Name
+	s.Zone = c.Location
+	s.ClusterIsNew = false
+	s.ClusterKVMReady = c.KVMReady
+	s.ClusterNetwork = c.NetworkName()
+	s.ClusterSubnetwork = c.SubnetworkName()
+	s.ClusterDataplaneV2 = c.DataplaneV2
+	s.ClusterFilestoreAddon = c.FilestoreCSIAddon
+}
+
+// NewCluster records a cluster the run will create, named name, in the
+// location already in Zone (see SelectCluster).
+func (s *Setup) NewCluster(name string) {
+	s.ClusterName = name
+	s.ClusterIsNew = true
+	s.ClusterKVMReady = false
+	s.ClusterNetwork = ""
+	s.ClusterSubnetwork = ""
+	s.ClusterDataplaneV2 = false
+	s.ClusterFilestoreAddon = false
 }
 
 // defaultBucketName derives the snapshot bucket name for a project, cluster,

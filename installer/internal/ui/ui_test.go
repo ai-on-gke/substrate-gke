@@ -204,7 +204,7 @@ func TestCreateNewClusterPath(t *testing.T) {
 	press("enter")                            // doctor
 	press("enter", "enter", "enter", "enter") // images: pre-built (the default), then its three fields
 	press("enter", "enter", "enter")          // project fields (pid, zone, bucket)
-	press("5", "enter")                       // "create a new cluster" row (4 clusters + create)
+	press("6", "enter")                       // "create a new cluster" row (5 clusters + create)
 	pump(t, app, key("enter"))                // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
@@ -1146,8 +1146,11 @@ func TestListBackgroundProbesReadyClusters(t *testing.T) {
 }
 
 // A --dry-run walkthrough shows the guard's whole story off the fixture
-// clusters: badges from the background probes, the blocked panel, and a
-// simulated teardown that ends clean instead of replaying "installed".
+// clusters: badges from the background probes, the blocked panel, a
+// simulated teardown that ends clean instead of replaying "installed", the
+// refusal of a cluster bootstrap would recreate, and the warning that
+// provision turns off a cluster's managed Filestore driver. A screen nobody
+// can reach without a GCP project is a screen that regresses unseen.
 func TestDryRunShowsGuardStates(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
@@ -1167,6 +1170,141 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterName != "substrate-installed" {
 		t.Errorf("after dry-run teardown: step=%v cluster=%q, want Provision/substrate-installed",
 			app.mach.Current(), app.deps.Setup.ClusterName)
+	}
+
+	shared := testApp(t)
+	press = pressToCluster(t, shared)
+	press("5", "enter") // shared-vpc-prod
+	if scr := shared.cur.(*clusterScreen); scr.mode != "recreate" {
+		t.Errorf("shared-vpc-prod: mode = %q, want the recreate refusal", scr.mode)
+	}
+
+	poc := testApp(t)
+	press = pressToCluster(t, poc)
+	press("1", "enter") // substrate-poc, ready, managed Filestore driver on
+	if poc.mach.Current() != state.Provision || !strings.Contains(poc.cur.View(120), "managed Filestore CSI driver") {
+		t.Errorf("substrate-poc: step=%v, want Provision with the Filestore warning:\n%s", poc.mach.Current(), poc.cur.View(120))
+	}
+}
+
+// networkScreen is a cluster screen showing one hand-written cluster, driven
+// directly so a test controls its network configuration.
+func networkScreen(t *testing.T, c gcp.Cluster) (*clusterScreen, func(tea.Msg)) {
+	t.Helper()
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  execx.DryRun{Delay: time.Millisecond},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	deps.Setup.ProjectID = "acme"
+	s := newClusterScreen(deps)
+	drive := func(msg tea.Msg) {
+		t.Helper()
+		for queue := []tea.Msg{msg}; len(queue) > 0; {
+			m := queue[0]
+			queue = queue[1:]
+			queue = append(queue, runCmd(s.Update(m))...)
+		}
+	}
+	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{c}})
+	s.cursor = 0
+	return s, drive
+}
+
+// Bootstrap deletes and recreates an existing cluster whose network differs
+// from the one it expects, and for a Shared VPC cluster nothing the installer
+// can pass will match: bootstrap builds the expected path from this project.
+// Handing it such a cluster costs the user the cluster, so there must be no
+// way through — not even the 'y' every other warning on this screen accepts.
+func TestAClusterBootstrapWouldRecreateIsRefused(t *testing.T) {
+	s, drive := networkScreen(t, gcp.Cluster{
+		Name: "shared", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, DataplaneV2: true,
+		Network:    "projects/host/global/networks/shared-vpc",
+		Subnetwork: "projects/host/regions/us-central1/subnetworks/shared-sub",
+	})
+	drive(key("enter"))
+	if s.mode != "recreate" {
+		t.Fatalf("mode = %q, want the recreate refusal", s.mode)
+	}
+	if view := s.View(120); !strings.Contains(view, "would delete and recreate shared") || !strings.Contains(view, "another project") {
+		t.Errorf("the refusal should say what bootstrap would do and why:\n%s", view)
+	}
+	drive(key("y"))
+	if s.mode != "recreate" || s.deps.Setup.ClusterName == "shared" {
+		t.Errorf("'y' got through: mode=%q cluster=%q", s.mode, s.deps.Setup.ClusterName)
+	}
+	drive(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.mode != "list" {
+		t.Errorf("after esc: mode = %q, want list", s.mode)
+	}
+}
+
+// The ordinary existing cluster — this project's network, a subnet GKE named
+// for it, Dataplane V2 on — must go through, carrying its own network into
+// Setup for bootstrap. Refusing it, or carrying the defaults, is what this
+// guard exists to prevent from opposite directions.
+func TestChoosingAnExistingClusterRecordsItsOwnNetwork(t *testing.T) {
+	s, drive := networkScreen(t, gcp.Cluster{
+		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, DataplaneV2: true,
+		Network:    "projects/acme/global/networks/default",
+		Subnetwork: "projects/acme/regions/us-central1/subnetworks/gke-prod-subnet-55edbf1e",
+	})
+	drive(key("enter"))
+	st := s.deps.Setup
+	if st.ClusterName != "prod" || st.ClusterIsNew {
+		t.Fatalf("prod was not chosen: cluster=%q new=%v mode=%q", st.ClusterName, st.ClusterIsNew, s.mode)
+	}
+	if st.ClusterNetwork != "default" || st.ClusterSubnetwork != "gke-prod-subnet-55edbf1e" || !st.ClusterDataplaneV2 {
+		t.Errorf("recorded network=%q subnetwork=%q dpv2=%v, want the cluster's own",
+			st.ClusterNetwork, st.ClusterSubnetwork, st.ClusterDataplaneV2)
+	}
+}
+
+// Provision's bootstrap turns off GKE's managed Filestore CSI driver on an
+// existing cluster (agent-substrate/substrate#2357), before the user has
+// chosen whether the optional Filestore step installs Substrate's. Workloads
+// on Filestore volumes lose their driver at that moment, so the user has to
+// hear it then — and hear again, at the Filestore step, that skipping leaves
+// the cluster with none. A new cluster has no such workloads and gets neither.
+func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  execx.DryRun{Delay: time.Millisecond},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	st := deps.Setup
+	st.ProjectID, st.ClusterName, st.ClusterIsNew, st.ClusterFilestoreAddon = "acme", "prod", false, true
+
+	if view := newProvisionScreen(deps).View(120); !strings.Contains(view, "turns off GKE's managed Filestore CSI driver") {
+		t.Errorf("provision should warn that the managed Filestore driver is turned off:\n%s", view)
+	}
+	if view := newFilestoreScreen(deps).View(120); !strings.Contains(view, "already turned off") || !strings.Contains(view, "no Filestore CSI driver") {
+		t.Errorf("the Filestore step should say the driver is already off and skipping leaves none:\n%s", view)
+	}
+
+	st.ClusterIsNew = true
+	if view := newProvisionScreen(deps).View(120); strings.Contains(view, "Filestore") {
+		t.Errorf("a new cluster should get no Filestore warning:\n%s", view)
+	}
+	if view := newFilestoreScreen(deps).View(120); strings.Contains(view, "already turned off") {
+		t.Errorf("a new cluster's Filestore step should not claim the driver was turned off:\n%s", view)
+	}
+}
+
+// The flag reaches Setup from the cluster listing at selection, and does not
+// survive into the create path.
+func TestChoosingAClusterRecordsItsFilestoreAddon(t *testing.T) {
+	s, drive := networkScreen(t, gcp.Cluster{
+		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, FilestoreCSIAddon: true,
+	})
+	drive(key("enter"))
+	if !s.deps.Setup.ClusterFilestoreAddon {
+		t.Error("choosing a cluster with the managed Filestore driver did not record it")
 	}
 }
 

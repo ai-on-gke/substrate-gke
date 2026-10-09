@@ -47,6 +47,66 @@ type Cluster struct {
 	// KVMReady reports whether any node pool in the cluster has /dev/kvm
 	// available (nested virtualization enabled or a bare-metal machine type).
 	KVMReady bool
+	// Network and Subnetwork are the cluster's networkConfig paths, as gcloud
+	// lists them ("projects/P/global/networks/N",
+	// "projects/P/regions/R/subnetworks/S"), and DataplaneV2 whether its
+	// datapath is ADVANCED_DATAPATH. Empty and false when gcloud listed no
+	// networkConfig. See BootstrapRecreates for why they matter.
+	Network     string
+	Subnetwork  string
+	DataplaneV2 bool
+	// FilestoreCSIAddon reports whether GKE's managed Filestore CSI driver is
+	// enabled. Bootstrap turns it off on an existing cluster
+	// (agent-substrate/substrate#2357), so the installer warns before that
+	// happens to a cluster whose workloads may be using it.
+	FilestoreCSIAddon bool
+}
+
+// NetworkName and SubnetworkName are the last segments of the cluster's
+// network paths: the short names setup-gcp's NETWORK and SUBNETWORK take.
+func (c Cluster) NetworkName() string    { return lastSegment(c.Network) }
+func (c Cluster) SubnetworkName() string { return lastSegment(c.Subnetwork) }
+
+func lastSegment(path string) string {
+	return path[strings.LastIndex(path, "/")+1:]
+}
+
+// BootstrapRecreates reports why setup-gcp's bootstrap would delete and
+// recreate this cluster even when it is given the cluster's own network
+// names, or "" when it would not.
+//
+// Bootstrap's reconcile path deletes an existing cluster and creates a new
+// one, without asking, when its network, subnetwork or Dataplane V2 setting
+// differs from what it was configured with (agent-substrate/substrate#2341).
+// The installer configures it with the cluster's own names and datapath, so
+// for most clusters it finds nothing to change. But it builds the expected
+// paths from PROJECT_ID and GCE_REGION, not from anything the installer can
+// pass, so two cases can never match:
+//
+//   - a network that lives in another project, which is what Shared VPC is;
+//   - a subnetwork outside the region the installer derives from the
+//     cluster's location.
+//
+// Those clusters are refused rather than handed to bootstrap. A cluster
+// whose networkConfig was not listed is not refused: bootstrap skips both
+// comparisons when the cluster reports no network.
+//
+// The comparisons mirror bootstrap's own, in this repository's
+// tools/setup-gcp/cmd/cluster.go (createClusterIdempotent): it checks that
+// the cluster's path ends with the one it built, so this does the same with
+// the names the installer will pass, and accepts whatever prefix gcloud puts
+// in front. TestBootstrapRecreatesMirrorsSetupGCP reads that file and fails
+// if the comparisons or the delete change; when it does, re-derive this
+// function from the new code — and if bootstrap has stopped recreating
+// clusters (#2341), the refusal can go.
+func (c Cluster) BootstrapRecreates(projectID, region string) string {
+	if c.Network != "" && !strings.HasSuffix(c.Network, "projects/"+projectID+"/global/networks/"+c.NetworkName()) {
+		return fmt.Sprintf("its network %s belongs to another project (Shared VPC), and setup-gcp only matches networks in %s", c.Network, projectID)
+	}
+	if c.Subnetwork != "" && !strings.HasSuffix(c.Subnetwork, "projects/"+projectID+"/regions/"+region+"/subnetworks/"+c.SubnetworkName()) {
+		return fmt.Sprintf("its subnetwork %s is not in project %s, region %s, the only place setup-gcp looks", c.Subnetwork, projectID, region)
+	}
+	return ""
 }
 
 // SubstrateReady reports whether the cluster serves the beta APIs Substrate
@@ -133,18 +193,28 @@ func (c *Client) ProjectNumber(ctx context.Context, projectID string) (string, e
 // ListClusters lists the project's GKE clusters with their beta-API status.
 func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster, error) {
 	if c.DryRun {
-		// The last two names are cues for CheckInstalled's dry-run sim, so a
-		// --dry-run walkthrough shows the install guard's whole story:
-		// clean, blocked-installed, and partial.
+		// substrate-installed and substrate-partial are cues for
+		// CheckInstalled's dry-run sim, so a --dry-run walkthrough shows the
+		// install guard's whole story: clean, blocked-installed, and partial.
+		// substrate-poc has the managed Filestore driver on, so its provision
+		// and Filestore steps show that warning; shared-vpc-prod is on a
+		// network in another project, which bootstrap would recreate, so it
+		// shows the refusal. It is last, so of the rows only "create a new
+		// cluster" moves.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
-				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true,
+				FilestoreCSIAddon: true},
 			{Name: "legacy-prod", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.33.2-gke.100", NodeCount: 12},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.35.5-gke.1163012", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
 			{Name: "substrate-partial", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.35.5-gke.1163012", NodeCount: 1, BetaAPIs: RequiredBetaAPIs},
+			{Name: "shared-vpc-prod", Location: "us-central1", Status: "RUNNING",
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, DataplaneV2: true,
+				Network:    "projects/network-host/global/networks/shared-vpc",
+				Subnetwork: "projects/network-host/regions/us-central1/subnetworks/shared-sub"},
 		}, nil
 	}
 	out, err := c.run(ctx, "container", "clusters", "list", "--project="+projectID, "--format=json")
@@ -223,7 +293,17 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 		EnableK8sBetaApis    struct {
 			EnabledApis []string `json:"enabledApis"`
 		} `json:"enableK8sBetaApis"`
-		NodePools []rawNodePool `json:"nodePools"`
+		NodePools     []rawNodePool `json:"nodePools"`
+		NetworkConfig struct {
+			Network          string `json:"network"`
+			Subnetwork       string `json:"subnetwork"`
+			DatapathProvider string `json:"datapathProvider"`
+		} `json:"networkConfig"`
+		AddonsConfig struct {
+			GcpFilestoreCsiDriverConfig struct {
+				Enabled bool `json:"enabled"`
+			} `json:"gcpFilestoreCsiDriverConfig"`
+		} `json:"addonsConfig"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing cluster list: %w", err)
@@ -238,6 +318,11 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			NodeCount:     r.CurrentNodeCount,
 			BetaAPIs:      r.EnableK8sBetaApis.EnabledApis,
 			KVMReady:      kvmReady(r.NodePools),
+			Network:       r.NetworkConfig.Network,
+			Subnetwork:    r.NetworkConfig.Subnetwork,
+			DataplaneV2:   r.NetworkConfig.DatapathProvider == "ADVANCED_DATAPATH",
+
+			FilestoreCSIAddon: r.AddonsConfig.GcpFilestoreCsiDriverConfig.Enabled,
 		})
 	}
 	return clusters, nil

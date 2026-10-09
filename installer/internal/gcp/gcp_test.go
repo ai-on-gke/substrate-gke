@@ -14,7 +14,12 @@
 
 package gcp
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 const clusterListJSON = `[
   {
@@ -148,5 +153,107 @@ func TestParseClusterKVMReady(t *testing.T) {
 	notReady, err := ParseClusterKVMReady([]byte(`{"nodePools":[{"config":{"machineType":"c3-standard-4"}}]}`))
 	if err != nil || notReady {
 		t.Fatalf("expected KVMReady=false, got ready=%v err=%v", notReady, err)
+	}
+}
+
+// The installer hands bootstrap a cluster's own network names, which only
+// works if they are read from the same listing, path and all. A field that
+// stopped being read would leave every cluster looking like it has no network,
+// and bootstrap would be handed the defaults again.
+func TestParseClustersReadsTheNetwork(t *testing.T) {
+	clusters, err := ParseClusters([]byte(`[{
+	  "name": "prod", "location": "us-central1-a",
+	  "networkConfig": {
+	    "network": "projects/acme/global/networks/default",
+	    "subnetwork": "projects/acme/regions/us-central1/subnetworks/gke-prod-subnet-55edbf1e",
+	    "datapathProvider": "ADVANCED_DATAPATH"
+	  }
+	}, {"name": "legacy", "location": "us-central1-a",
+	  "networkConfig": {"datapathProvider": "LEGACY_DATAPATH"}}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod := clusters[0]
+	if prod.NetworkName() != "default" || prod.SubnetworkName() != "gke-prod-subnet-55edbf1e" || !prod.DataplaneV2 {
+		t.Errorf("prod: network=%q subnetwork=%q dpv2=%v", prod.NetworkName(), prod.SubnetworkName(), prod.DataplaneV2)
+	}
+	if clusters[1].DataplaneV2 {
+		t.Error("a LEGACY_DATAPATH cluster must not read as Dataplane V2")
+	}
+}
+
+// Bootstrap builds the network paths it expects from PROJECT_ID and
+// GCE_REGION, so for some clusters no value the installer can pass will
+// match, and bootstrap would delete them. Those have to be caught before
+// bootstrap runs; and the ordinary case — the cluster's own project and
+// region, under any subnet name — must not be, or the guard turns away the
+// clusters it exists to protect.
+func TestBootstrapRecreatesOnlyClustersNoSettingCanMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		c       Cluster
+		refused bool
+	}{
+		{"own project and region, GKE-made subnet", Cluster{
+			Network:    "projects/acme/global/networks/default",
+			Subnetwork: "projects/acme/regions/us-central1/subnetworks/gke-prod-subnet-55edbf1e"}, false},
+		{"no networkConfig listed", Cluster{}, false},
+		{"full URLs, as some APIs spell them", Cluster{
+			Network:    "https://www.googleapis.com/compute/v1/projects/acme/global/networks/default",
+			Subnetwork: "https://www.googleapis.com/compute/v1/projects/acme/regions/us-central1/subnetworks/default"}, false},
+		{"Shared VPC network in the host project", Cluster{
+			Network:    "projects/host/global/networks/shared",
+			Subnetwork: "projects/host/regions/us-central1/subnetworks/shared-sub"}, true},
+		{"subnet in another region", Cluster{
+			Network:    "projects/acme/global/networks/default",
+			Subnetwork: "projects/acme/regions/europe-west3/subnetworks/default"}, true},
+	} {
+		if got := tc.c.BootstrapRecreates("acme", "us-central1") != ""; got != tc.refused {
+			t.Errorf("%s: refused=%v, want %v (%q)", tc.name, got, tc.refused, tc.c.BootstrapRecreates("acme", "us-central1"))
+		}
+	}
+}
+
+// Whether the managed Filestore driver is on decides whether the installer
+// warns that provision will turn it off; read from the same listing, or the
+// warning silently never fires.
+func TestParseClustersReadsTheFilestoreAddon(t *testing.T) {
+	clusters, err := ParseClusters([]byte(`[
+	  {"name": "on", "addonsConfig": {"gcpFilestoreCsiDriverConfig": {"enabled": true}}},
+	  {"name": "off", "addonsConfig": {}}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clusters[0].FilestoreCSIAddon || clusters[1].FilestoreCSIAddon {
+		t.Errorf("FilestoreCSIAddon = %v, %v; want true, false", clusters[0].FilestoreCSIAddon, clusters[1].FilestoreCSIAddon)
+	}
+}
+
+// BootstrapRecreates is a copy of a decision setup-gcp makes, and a copy goes
+// stale silently: if bootstrap stopped recreating clusters, the installer
+// would keep refusing clusters it could now handle; if it started comparing
+// something else, the installer would approve clusters bootstrap then
+// deletes. setup-gcp lives in this repository, so this reads its source and
+// fails on any change to the lines the guard mirrors, which is the prompt to
+// re-derive the guard.
+func TestBootstrapRecreatesMirrorsSetupGCP(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", "setup-gcp", "cmd", "cluster.go"))
+	if err != nil {
+		t.Fatalf("reading setup-gcp's cluster.go: %v", err)
+	}
+	code := string(src)
+	for _, want := range []string{
+		`expectedNetwork := fmt.Sprintf("projects/%s/global/networks/%s", cfg.ProjectID, cfg.Network)`,
+		`!strings.HasSuffix(cluster.NetworkConfig.Network, expectedNetwork)`,
+		`expectedSubnetwork := fmt.Sprintf("projects/%s/regions/%s/subnetworks/%s", cfg.ProjectID, cfg.Region, cfg.Subnetwork)`,
+		`!strings.HasSuffix(cluster.NetworkConfig.Subnetwork, expectedSubnetwork)`,
+		`currentIsV2 != cfg.EnableDataplaneV2`,
+	} {
+		if !strings.Contains(code, want) {
+			t.Errorf("setup-gcp no longer has %s; re-derive Cluster.BootstrapRecreates from createClusterIdempotent", want)
+		}
+	}
+	if n := strings.Count(code, "deleteCluster(ctx, cfg)"); n < 3 {
+		t.Errorf("setup-gcp deletes the cluster on %d mismatches, not the 3 the guard assumes; re-derive Cluster.BootstrapRecreates", n)
 	}
 }
