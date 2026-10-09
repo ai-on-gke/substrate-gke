@@ -217,12 +217,13 @@ func (s *projectScreen) submit() tea.Cmd {
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
 	s.checkingDocker = registry != ""
-	// Each submit re-reads ADC: after a PERMISSION_DENIED panel the user
-	// may have run `gcloud auth application-default login` as someone
-	// else. The probes in this submit still share one fetch.
-	s.deps.GCP.ResetToken()
 	return func() tea.Msg {
 		msg := projValidMsg{owner: s}
+		// Each submit re-reads ADC: after a PERMISSION_DENIED panel the
+		// user may have run `gcloud auth application-default login` as
+		// someone else. The probes in this submit still share one fetch.
+		// This runs here in the Cmd, never on the Update goroutine.
+		s.deps.GCP.ResetToken()
 		// The token does not depend on the project: fetch it while
 		// `projects describe` runs, so the probes below find it cached
 		// instead of paying a second cold gcloud spawn after it.

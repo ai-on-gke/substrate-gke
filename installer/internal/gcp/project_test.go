@@ -310,6 +310,36 @@ func TestTokenLockIsNotHeldDuringAFetch(t *testing.T) {
 	}
 }
 
+// A submit that ended early (a malformed project ID fails `projects
+// describe` in a second) can leave its warm-up still fetching. The next
+// submit's ResetToken adopts that fetch instead of discarding it, so its
+// probes join it rather than spawning gcloud again.
+func TestResetTokenAdoptsAFetchInFlight(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"billingEnabled": true}`))
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	c := &Client{billingBase: srv.URL, token: func(context.Context) (string, error) {
+		if fetches.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return "tok", nil
+	}}
+	go c.WarmToken(context.Background()) // submit 1's warm-up
+	<-started
+	c.ResetToken() // submit 2 begins while it is still fetching
+	go func() { time.Sleep(20 * time.Millisecond); close(release) }()
+	if on, err := c.BillingEnabled(context.Background(), "acme"); err != nil || !on {
+		t.Fatalf("BillingEnabled = (%v, %v)", on, err)
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("submit 2 spawned its own fetch: %d fetches, want 1", n)
+	}
+}
+
 // A 401 means the cached token is no good (gcloud can hand back its own
 // token near expiry): the call drops it, fetches a fresh one and retries
 // once. A second 401 is reported, not retried forever.

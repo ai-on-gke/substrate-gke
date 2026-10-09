@@ -231,6 +231,12 @@ func (c *Client) runTokenFetch(f *tokenFetch) {
 // gcloud again. Call it at the start of each user action (a submit): the
 // calls within that action still share one fetch, but a new action sees a
 // re-run `gcloud auth application-default login` right away.
+//
+// It never waits: tokenMu is not held while gcloud runs. A fetch already
+// under way is adopted, not abandoned. It can only be the previous action's
+// warm-up, still running because that action ended early (e.g. a malformed
+// project ID fails `projects describe` in a second), so its token is as
+// fresh as a new fetch's and joining it saves a spawn.
 func (c *Client) ResetToken() {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
