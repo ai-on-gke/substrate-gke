@@ -47,7 +47,9 @@ type prefillMsg struct {
 }
 
 type projValidMsg struct {
-	owner  *projectScreen
+	owner *projectScreen
+	// seq is the submit this answers; see projectScreen.validateSeq.
+	seq    int
 	number string
 	err    error
 	// billingOff and apiOff are set when the project provably has no
@@ -109,7 +111,20 @@ type projectScreen struct {
 	// billingCheck asks whether a project has billing. It is the gcp
 	// client's BillingEnabled; tests swap in fixed answers.
 	billingCheck func(ctx context.Context, projectID string) (bool, error)
+	// projectNumber resolves the project ID, the first call a submit makes.
+	// It is the gcp client's ProjectNumber; tests swap in one that blocks.
+	projectNumber func(ctx context.Context, projectID string) (string, error)
+	// validateCancel abandons a running submit's checks (esc, or leaving
+	// the screen), and validateSeq tells its result from an abandoned
+	// one's, which must not advance the wizard.
+	validateCancel context.CancelFunc
+	validateSeq    int
 }
+
+// submitTimeout bounds a submit's checks as a whole. A healthy run takes a
+// few seconds; with the network down each gcloud call would otherwise wait
+// its own cmdTimeout, one after the other.
+const submitTimeout = 30 * time.Second
 
 // enableCheckTimeout bounds the billing check after a failed enable. The
 // enable often failed because the network is down, and the panel it
@@ -157,7 +172,8 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			)
 		}
 	}
-	scr := &projectScreen{deps: deps, fields: fields, billingCheck: deps.GCP.BillingEnabled}
+	scr := &projectScreen{deps: deps, fields: fields,
+		billingCheck: deps.GCP.BillingEnabled, projectNumber: deps.GCP.ProjectNumber}
 	scr.fields[0].input.Focus()
 	return scr
 }
@@ -172,22 +188,21 @@ func (s *projectScreen) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// CapturesText is false while the enable, or the billing check after a
-// failed one, runs: no field takes input then, and the app's own keys
-// ([v] log, / commands, ? help) must get through.
-func (s *projectScreen) CapturesText() bool { return s.enabling == nil && !s.checkingEnable }
+// CapturesText is false while the enable, the billing check after a
+// failed one, or a submit's checks run: no field takes input then, and the
+// app's own keys ([v] log, / commands, ? help) must get through.
+func (s *projectScreen) CapturesText() bool {
+	return s.enabling == nil && !s.checkingEnable && !s.validating
+}
 
 func (s *projectScreen) Hints() []Hint {
 	if s.enabling != nil {
 		return []Hint{{"esc", "stop waiting"}}
 	}
 	// The bar only advertises keys Update acts on: during the billing check
-	// that is esc alone, and while the project validates, nothing.
-	if s.checkingEnable {
+	// or a submit's checks that is esc alone.
+	if s.checkingEnable || s.validating {
 		return []Hint{{"esc", "stop waiting"}}
-	}
-	if s.validating {
-		return nil
 	}
 	if s.enableFor != "" {
 		return []Hint{{"e", "enable the GKE API"}, {"enter", "check again"}, {"esc", "back"}}
@@ -217,8 +232,17 @@ func (s *projectScreen) submit() tea.Cmd {
 	acked := s.permAcked
 	registry := s.dockerRegistry(pid)
 	s.checkingDocker = registry != ""
+	// One deadline for the whole submit, cancellable with esc: with the
+	// network down, each call below would otherwise wait its own
+	// cmdTimeout in turn while every key is swallowed.
+	s.validateSeq++
+	seq := s.validateSeq
+	ctx, cancel := context.WithTimeout(context.Background(), submitTimeout)
+	s.validateCancel = cancel
+	projectNumber := s.projectNumber
 	return func() tea.Msg {
-		msg := projValidMsg{owner: s}
+		defer cancel()
+		msg := projValidMsg{owner: s, seq: seq}
 		// Each submit re-reads ADC: after a PERMISSION_DENIED panel the
 		// user may have run `gcloud auth application-default login` as
 		// someone else. The probes in this submit still share one fetch.
@@ -228,12 +252,15 @@ func (s *projectScreen) submit() tea.Cmd {
 		// `projects describe` runs, so the probes below find it cached
 		// instead of paying a second cold gcloud spawn after it.
 		go s.deps.GCP.WarmToken(context.Background())
-		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
+		msg.number, msg.err = projectNumber(ctx, pid)
+		if msg.err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			msg.err = fmt.Errorf("timed out after %v looking up project %s: %w", submitTimeout, pid, msg.err)
+		}
 		// The cluster step lists clusters next, and that fails outright on
 		// a project without billing or without the GKE API. Catch both
 		// here, where the fix is still one command away.
 		if msg.err == nil {
-			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(context.Background(), s.deps.GCP, pid)
+			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(ctx, s.deps.GCP, pid)
 		}
 		// No billing or no API blocks the step, and Update then shows
 		// that alone, so the checks below would be paid for and thrown
@@ -242,17 +269,31 @@ func (s *projectScreen) submit() tea.Cmd {
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
 		if !blocked && !acked {
-			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(context.Background(), pid)
+			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(ctx, pid)
 		}
 		if !blocked && registry != "" {
 			for _, c := range doctor.DockerChecks(registry) {
-				if res := c.Run(context.Background()); res.Status == doctor.Fail {
+				if res := c.Run(ctx); res.Status == doctor.Fail {
 					msg.docker = append(msg.docker, failedCheck{c.Name, res})
 				}
 			}
 		}
 		return msg
 	}
+}
+
+// abandonValidation stops waiting for a submit's checks (esc): they are
+// cancelled, their late result is dropped, and the fields are live again.
+// esc again then goes back, as usual.
+func (s *projectScreen) abandonValidation() {
+	if s.validateCancel != nil {
+		s.validateCancel()
+		s.validateCancel = nil
+	}
+	s.validateSeq++
+	s.validating, s.checkingDocker = false, false
+	pid := strings.TrimSpace(s.fields[0].input.Value())
+	s.errText = fmt.Sprintf("Stopped validating %s. Press [enter] to check again, or [esc] to go back.", pid)
 }
 
 // dockerRegistry is the registry the install will push to with docker, or ""
@@ -517,14 +558,17 @@ func (s *projectScreen) enableChecked(m enableCheckedMsg) {
 	}
 }
 
-// Stop cancels an enable, or the billing check after one, still running
-// when the wizard leaves the screen.
+// Stop cancels an enable, the billing check after one, or a submit's
+// checks, still running when the wizard leaves the screen.
 func (s *projectScreen) Stop() {
 	if s.enabling != nil {
 		s.enabling.stop()
 	}
 	if s.checkCancel != nil {
 		s.checkCancel()
+	}
+	if s.validateCancel != nil {
+		s.validateCancel()
 	}
 }
 
@@ -555,8 +599,14 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		return nil
 
 	case projValidMsg:
-		if m.owner != s {
+		// A result for a submit that was abandoned (esc) or superseded
+		// must not advance the wizard or replace the panel.
+		if m.owner != s || m.seq != s.validateSeq {
 			return nil
+		}
+		if s.validateCancel != nil {
+			s.validateCancel()
+			s.validateCancel = nil
 		}
 		s.validating = false
 		pid := strings.TrimSpace(s.fields[0].input.Value())
@@ -609,6 +659,10 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if s.validating {
+			// esc stops waiting for the checks; a second esc goes back.
+			if m.String() == "esc" {
+				s.abandonValidation()
+			}
 			return nil
 		}
 		if s.enabling != nil {

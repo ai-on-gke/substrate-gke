@@ -821,8 +821,82 @@ func TestProjectScreenHintsDuringChecks(t *testing.T) {
 	scr.abandonCheck()
 
 	scr.submit()
-	if hints := scr.Hints(); len(hints) != 0 {
-		t.Errorf("while validating hints = %v, want none", hints)
+	if hints := scr.Hints(); len(hints) != 1 || hints[0] != (Hint{"esc", "stop waiting"}) {
+		t.Errorf("while validating hints = %v, want only [esc] stop waiting", hints)
+	}
+	scr.Stop()
+}
+
+// A submit's checks are bounded as a whole and can be abandoned, like the
+// billing check: with the network down every gcloud call would otherwise
+// wait its own timeout in turn while every key is swallowed. esc stops
+// waiting at once (a second esc goes back), v / ? reach the app meanwhile,
+// and the abandoned submit's late result must not advance the wizard.
+func TestProjectScreenSubmitIsBoundedAndCancellable(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	scr := newProjectScreen(app.deps)
+	app.cur = scr
+	ctxs := make(chan context.Context, 1)
+	scr.projectNumber = func(ctx context.Context, _ string) (string, error) {
+		ctxs <- ctx
+		<-ctx.Done()
+		// A healthy answer that would advance the wizard if this late
+		// result were not dropped.
+		return "42", nil
+	}
+	scr.fields[0].input.SetValue("acme")
+	cmd := scr.submit()
+	if scr.CapturesText() {
+		t.Error("while validating the app's keys must get through")
+	}
+	if hints := scr.Hints(); len(hints) != 1 || hints[0].Key != "esc" {
+		t.Errorf("while validating hints = %v, want only [esc]", hints)
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	ctx := <-ctxs
+	if dl, ok := ctx.Deadline(); !ok || time.Until(dl) > submitTimeout {
+		t.Errorf("the submit must be bounded by %v, deadline set=%v", submitTimeout, ok)
+	}
+
+	app.Update(key("v"))
+	if app.over != overlayLog {
+		t.Error("v while validating should open the log overlay")
+	}
+	app.Update(key("v")) // close it
+
+	start := time.Now()
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if time.Since(start) > 100*time.Millisecond {
+		t.Errorf("esc took %v; it must not wait for the checks", time.Since(start))
+	}
+	if scr.validating || !strings.Contains(scr.errText, "Stopped validating acme") {
+		t.Fatalf("esc should stop validating at once; validating=%v err=%q", scr.validating, scr.errText)
+	}
+	if ctx.Err() == nil {
+		t.Error("esc should cancel the submit's context")
+	}
+	if !scr.CapturesText() {
+		t.Error("after esc the fields should take input again")
+	}
+
+	select {
+	case late := <-done:
+		if cmd := scr.Update(late); cmd != nil {
+			t.Error("an abandoned submit's late result must not advance the wizard")
+		}
+		if !strings.Contains(scr.errText, "Stopped validating acme") {
+			t.Errorf("a late result replaced the panel: %q", scr.errText)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled submit did not return")
+	}
+
+	// A second esc goes back, as on the plain screen.
+	if cmd := scr.Update(tea.KeyMsg{Type: tea.KeyEsc}); cmd == nil {
+		t.Error("esc with nothing running should go back")
 	}
 }
 
