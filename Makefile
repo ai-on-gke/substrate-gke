@@ -23,7 +23,6 @@ run:
 teardown:
 	./tools/cleanup-gcp --project "$(PROJECT_ID)" --cluster "$(CLUSTER_NAME)" --location "$(CLUSTER_LOCATION)" --bucket "$(BUCKET_NAME)" \
 		$(if $(GCE_REGION),--region "$(GCE_REGION)") $(if $(ARTIFACT_REGISTRY_REPOSITORY),--repository "$(ARTIFACT_REGISTRY_REPOSITORY)") \
-		$(if $(SUBSTRATE_COMMIT),--commit "$(SUBSTRATE_COMMIT)") $(if $(SUBSTRATE_ROOT),--substrate-root "$(SUBSTRATE_ROOT)") \
 		$(if $(filter true,$(DELETE_REPOSITORY)),--delete-repository) \
 		$(if $(filter true,$(KEEP_REPOSITORY)),--keep-repository)
 
@@ -38,14 +37,18 @@ dry-run:
 build:
 	cd installer && go build -o ../bin/substrate-gke-installer .
 
+# Go modules in this repository. tools/setup-gcp is its own module so the
+# installer does not pull in the GCP client libraries.
+MODULES := installer tools/setup-gcp
+
 test:
-	cd installer && go test ./...
+	for m in $(MODULES); do (cd $$m && go test ./...) || exit 1; done
 
 fmt:
-	cd installer && gofmt -w .
+	for m in $(MODULES); do (cd $$m && gofmt -w .) || exit 1; done
 
 verify:
-	cd installer && test -z "$$(gofmt -l .)" && go vet ./...
+	for m in $(MODULES); do (cd $$m && test -z "$$(gofmt -l .)" && go vet ./...) || exit 1; done
 
 # Regenerate the README screenshots from the dry-run wizard. Needs freeze:
 # go install github.com/charmbracelet/freeze@latest

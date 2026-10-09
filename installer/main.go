@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -42,6 +43,7 @@ func main() {
 		substrateRoot = flag.String("substrate-root", "", "use an existing substrate checkout instead of fetching the pinned one")
 		fetchTree     = flag.String("fetch-substrate", "", "fetch a substrate checkout into this directory and exit (the pinned commit, or --commit)")
 		fetchCommit   = flag.String("commit", "", "with --fetch-substrate: the commit to fetch instead of the pinned one")
+		setupGCP      = flag.String("setup-gcp", "", "path to this repository's tools/setup-gcp (default: found above the working directory or the executable)")
 	)
 	flag.Parse()
 
@@ -78,6 +80,19 @@ func main() {
 		return
 	}
 
+	// Bootstrap runs setup-gcp from this repository. Resolve it before the
+	// wizard starts, so a missing copy fails here rather than mid-install.
+	cwd, _ := os.Getwd()
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	setupGCPDir, err := snapshot.FindSetupGCP(*setupGCP, cwd, exeDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
 	logger, err := execx.NewLogger("")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning: could not create log file:", err)
@@ -104,6 +119,7 @@ func main() {
 		DryRun:  *dryRun,
 		LogPath: logPath,
 	}
+	deps.Builder.SetupGCP = setupGCPDir
 	if dir, err := snapshot.DefaultUpgradeDir(); err == nil {
 		deps.UpgradeDir = dir
 	} else {

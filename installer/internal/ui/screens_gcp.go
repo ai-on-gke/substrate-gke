@@ -103,17 +103,14 @@ func newProjectScreen(deps *Deps) *projectScreen {
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
 		if !st.Prebuilt() {
-			placeholder := "gcr.io/<project>/ate-images"
-			if deps.Builder.SupportsArtifactRegistry() {
-				placeholder = "<region>-docker.pkg.dev/<project>/ate-images"
-			}
+			placeholder := "<region>-docker.pkg.dev/<project>/ate-images"
 			fields = append(fields,
 				newField("Image registry (leave empty for default)", st.KoDockerRepo, placeholder, func(s *state.Setup, v string) { s.KoDockerRepo = v }),
 			)
 		}
 	}
 	repositoryField := -1
-	if st.Track == state.TrackAdvanced && deps.Builder.SupportsArtifactRegistry() && !st.Prebuilt() {
+	if st.Track == state.TrackAdvanced && !st.Prebuilt() {
 		repositoryField = len(fields)
 		fields = append(fields, newField("Artifact Registry repository (leave empty for default)", st.ArtifactRegistryRepository, "ate-images", func(s *state.Setup, v string) { s.ArtifactRegistryRepository = v }))
 	}

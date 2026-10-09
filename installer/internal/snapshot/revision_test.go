@@ -177,27 +177,83 @@ func TestVerifyCommitRunsOutsideAGitRepository(t *testing.T) {
 	}
 }
 
-func TestVerifyCommitDetectsSourceFeatures(t *testing.T) {
+// A tree with the envoy-dataplane Dockerfile makes a source install run
+// docker, so the wizard has to know before it provisions anything. Substrate
+// 0.1 has no such file and 0.2 does; nothing else tells the two apart.
+func TestVerifyCommitReportsTheEnvoyDockerfile(t *testing.T) {
 	remote, run := testRemote(t)
-	check := func(want sourceFeatures) {
-		t.Helper()
-		got, err := verifyCommit(context.Background(), remote, run("rev-parse", "HEAD"), false)
-		if err != nil || got != want {
-			t.Fatalf("features = %+v, %v; want %+v", got, err, want)
+	before := run("rev-parse", "HEAD")
+	path := filepath.Join(remote, EnvoyDockerfile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", EnvoyDockerfile)
+	run("commit", "--quiet", "-m", "envoy")
+	after := run("rev-parse", "HEAD")
+
+	for _, tc := range []struct {
+		sha  string
+		want bool
+	}{{before, false}, {after, true}} {
+		got, err := verifyCommit(context.Background(), remote, tc.sha, false)
+		if err != nil || got != tc.want {
+			t.Errorf("verifyCommit(%s) = %v, %v; want %v", shorten(tc.sha), got, err, tc.want)
 		}
 	}
-	check(sourceFeatures{})
-	for _, path := range []string{EnvoyDockerfile, artifactRepositoryPath} {
-		file := filepath.Join(remote, path)
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-			t.Fatal(err)
+}
+
+// ate-setup declared --image-repo in cmd/root.go until v0.4.0 moved it to
+// config/setting.go, and root.go may go away entirely. Any of those trees
+// installs pre-built images. One whose ate-setup never names the flag does
+// not, and one without ate-setup at all is not judged.
+func TestVerifyCommitFindsTheImageFlags(t *testing.T) {
+	const (
+		root    = "cmd/ate-setup/internal/cmd/root.go"
+		setting = "cmd/ate-setup/internal/config/setting.go"
+		flag    = `Flag: "image-repo",` + "\n"
+	)
+	remote, run := testRemote(t)
+	// commit makes the tree hold exactly files, and returns its SHA.
+	commit := func(files map[string]string) string {
+		t.Helper()
+		run("rm", "-r", "--quiet", "--ignore-unmatch", "cmd")
+		for path, content := range files {
+			full := filepath.Join(remote, path)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run("add", path)
 		}
-		if err := os.WriteFile(file, nil, 0o644); err != nil {
-			t.Fatal(err)
+		run("commit", "--quiet", "--allow-empty", "-m", "tree")
+		return run("rev-parse", "HEAD")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		ok    bool
+	}{
+		{"declared in root.go", map[string]string{root: flag}, true},
+		{"declared in setting.go", map[string]string{root: "package cmd\n", setting: flag}, true},
+		{"setting.go only", map[string]string{setting: flag}, true},
+		{"no ate-setup", map[string]string{}, true},
+		{"root.go without it", map[string]string{root: "package cmd\n"}, false},
+		{"setting.go without it", map[string]string{setting: "package config\n"}, false},
+	} {
+		sha := commit(tc.files)
+		_, err := verifyCommit(context.Background(), remote, sha, true)
+		if tc.ok && err != nil {
+			t.Errorf("%s: verifyCommit = %v, want nil", tc.name, err)
 		}
-		run("add", path)
-		run("commit", "--quiet", "-m", "add feature")
-		check(sourceFeatures{envoy: true, artifactRegistry: path == artifactRepositoryPath})
+		if !tc.ok && err == nil {
+			t.Errorf("%s: verifyCommit accepted a tree without --%s", tc.name, imageFlagsName)
+		}
 	}
 }
 

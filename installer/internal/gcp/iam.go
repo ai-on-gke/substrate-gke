@@ -35,7 +35,8 @@ type RequiredPermission struct {
 // BootstrapPermissions samples one permission from each thing `setup-gcp
 // bootstrap` does: enable APIs, create the cluster, create the bucket, bind
 // project IAM, and create the dashboards. Holding these does not prove the
-// whole install will succeed, but missing one proves a step will fail.
+// whole install will succeed, but missing one proves a step will fail. Keep
+// this in step with tools/setup-gcp/cmd/bootstrap.go in this repository.
 var BootstrapPermissions = []RequiredPermission{
 	{"serviceusage.services.enable", "roles/serviceusage.serviceUsageAdmin"},
 	{"container.clusters.create", "roles/container.admin"},

@@ -301,7 +301,7 @@ func TestFetchPreambleQuotesPathsSafely(t *testing.T) {
 		// Run just the assignments, then ask the shell what it resolved.
 		prelude, _, ok := strings.Cut(script, "\nif [ ")
 		if !ok {
-			prelude, _, _ = strings.Cut(script, "\ngo run ")
+			prelude, _, _ = strings.Cut(script, "\ngo -C ")
 			prelude = strings.Replace(prelude, "cd ", "SUBSTRATE_DIR=", 1)
 		}
 		out, err := exec.Command("bash", "-c", prelude+"\nprintf '%s' \"${SUBSTRATE_DIR}\"").Output()
@@ -938,6 +938,7 @@ func TestFetchTreeChecksOutTheCommit(t *testing.T) {
 
 func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
+	b.SetupGCP = "/src/substrate-gke/tools/setup-gcp"
 	spec := b.Bootstrap(testSetup(t))
 
 	for _, want := range []string{
@@ -947,7 +948,7 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 		"CLUSTER_LOCATION=us-west1-c",
 		"GCE_REGION=us-west1",
 		"BUCKET_NAME=ate-snapshots-acme-substrate-test-us-west1-c",
-		"KO_DOCKER_REPO=gcr.io/acme/ate-images",
+		"KO_DOCKER_REPO=us-west1-docker.pkg.dev/acme/ate-images",
 		"NO_DEV_ENV=1",
 		"VERSION=substrate-" + ShortCommit(),
 	} {
@@ -955,8 +956,57 @@ func TestBuilderEnvCarriesTheDevEnvContract(t *testing.T) {
 			t.Errorf("Bootstrap env missing %q", want)
 		}
 	}
-	if !strings.Contains(spec.Argv[2], "go run ./tools/setup-gcp bootstrap") {
+	// setup-gcp runs from this repository, not from the Substrate checkout,
+	// but only after the checkout is fetched.
+	script := spec.Argv[2]
+	run := "go -C '/src/substrate-gke/tools/setup-gcp' run . bootstrap"
+	if !strings.Contains(script, run) {
 		t.Errorf("unexpected argv: %v", spec.Argv)
+	}
+	if strings.Contains(script, "./tools/setup-gcp") {
+		t.Errorf("Bootstrap must not run the checkout's tools/setup-gcp: %v", spec.Argv)
+	}
+	if strings.Index(script, `cd "${SUBSTRATE_DIR}"`) > strings.Index(script, run) {
+		t.Errorf("Bootstrap must fetch the checkout before running setup-gcp: %v", spec.Argv)
+	}
+}
+
+func TestFindSetupGCP(t *testing.T) {
+	repo := t.TempDir()
+	tool := filepath.Join(repo, SetupGCPPath)
+	if err := os.MkdirAll(tool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"go.mod", "main.go"} {
+		if err := os.WriteFile(filepath.Join(tool, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installer := filepath.Join(repo, "installer")
+	if err := os.MkdirAll(installer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// From installer/ (go run . / make run) and from bin/ (make build), with
+	// an unrelated first start such as a go-build temp dir.
+	for _, starts := range [][]string{
+		{installer},
+		{t.TempDir(), filepath.Join(repo, "bin")},
+	} {
+		got, err := FindSetupGCP("", starts...)
+		if err != nil || got != tool {
+			t.Errorf("FindSetupGCP(%v) = %q, %v; want %q", starts, got, err, tool)
+		}
+	}
+
+	if got, err := FindSetupGCP(tool); err != nil || got != tool {
+		t.Errorf("explicit FindSetupGCP = %q, %v; want %q", got, err, tool)
+	}
+	if _, err := FindSetupGCP(installer); err == nil {
+		t.Error("explicit path without the module must fail")
+	}
+	if _, err := FindSetupGCP("", t.TempDir()); err == nil {
+		t.Error("search outside a checkout must fail")
 	}
 }
 
@@ -1016,6 +1066,25 @@ func TestPrebuiltVersionDropsADigestQualifiedTag(t *testing.T) {
 	}
 }
 
+// ate-setup refuses to deploy the control plane without a credential provider,
+// so the deploy passes the bundled one unless the caller chose another.
+func TestDeployAteSystemCredentialProvider(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+
+	t.Setenv("ATE_CREDENTIAL_PROVIDER", "")
+	env := b.DeployAteSystem(prebuiltSetup(t)).Env
+	if want := `ATE_CREDENTIAL_PROVIDER={"name":"k8s.io"}`; !slices.Contains(env, want) {
+		t.Errorf("deploy env missing %q: %v", want, env)
+	}
+
+	t.Setenv("ATE_CREDENTIAL_PROVIDER", `{"enabled":false}`)
+	for _, e := range b.DeployAteSystem(prebuiltSetup(t)).Env {
+		if strings.HasPrefix(e, "ATE_CREDENTIAL_PROVIDER=") {
+			t.Errorf("deploy env overrides the caller's ATE_CREDENTIAL_PROVIDER with %q", e)
+		}
+	}
+}
+
 // The tag becomes the node label and the atelet DaemonSet suffix, so ate-setup
 // refuses one that is not a valid label value. Catching it at the prompt beats
 // finding out once the cluster is half installed.
@@ -1068,7 +1137,7 @@ func prebuiltSetup(t *testing.T) *state.Setup {
 // atelet actually is — a checkout's commit stamp would overwrite it with a lie.
 func TestPrebuiltEnvDropsTheBuildVariables(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
-	b.UseSource(Revision{Repo: RepoURL, Commit: Commit, ArtifactRegistry: true})
+	b.UseSource(Revision{Repo: RepoURL, Commit: Commit})
 	env := b.DeployAteSystem(prebuiltSetup(t)).Env
 
 	for _, unwanted := range []string{"KO_DOCKER_REPO", "KO_DEFAULTPLATFORMS"} {
@@ -1194,6 +1263,7 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "cache", "substrate-x"), true)
 	b.UseSource(Revision{Repo: origin, Commit: newSHA})
 	st := testSetup(t)
+	st.KoDockerRepo = "registry.example.com/installed-images"
 	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = origin, oldSHA, "substrate-"+shorten(oldSHA)
 
 	// A path with a space and a $ in it: the script must quote it
@@ -1302,7 +1372,7 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 		t.Errorf("installed exports:\n%s", installed)
 	}
 	next := b.NewExports(st)
-	if !strings.Contains(next, "export KO_DOCKER_REPO='gcr.io/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
+	if !strings.Contains(next, "export KO_DOCKER_REPO='us-west1-docker.pkg.dev/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
 		t.Errorf("new exports:\n%s", next)
 	}
 }
@@ -1361,13 +1431,13 @@ func TestBuildsWithDockerReadsAUserSuppliedTree(t *testing.T) {
 
 func TestArtifactRegistryBootstrap(t *testing.T) {
 	for _, tc := range []struct {
-		name, override, registry    string
-		supported, prebuilt, create bool
+		name, override, registry  string
+		managed, prebuilt, create bool
 	}{
 		{"default source registry", "", "europe-west4-docker.pkg.dev/acme/build-images", true, false, true},
 		{"custom source registry", "registry.example.com/shared", "registry.example.com/shared", true, false, false},
 		{"prebuilt images", "", "", true, true, false},
-		{"legacy source", "", "gcr.io/acme/ate-images", false, false, false},
+		{"local source checkout", "", "europe-west4-docker.pkg.dev/acme/build-images", false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CREATE_ARTIFACT_REPOSITORY", fmt.Sprint(!tc.create))
@@ -1377,8 +1447,9 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if tc.prebuilt {
 				st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
 			}
-			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
-			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), ArtifactRegistry: tc.supported})
+			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), tc.managed)
+			b.SetupGCP = "/src/substrate-gke/tools/setup-gcp"
+			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40)})
 			spec := b.Bootstrap(st)
 			for _, want := range []string{"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(tc.create), "ARTIFACT_REGISTRY_REPOSITORY=build-images", "GCE_REGION=europe-west4"} {
 				if !slices.Contains(spec.Env, want) {
@@ -1402,26 +1473,7 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 	}
 }
 
-func TestArtifactRegistryUsesLocalCheckout(t *testing.T) {
-	root := fakeCheckout(t)
-	b := NewBuilder(root, false)
-	b.UseSource(Revision{ArtifactRegistry: true})
-	if b.SupportsArtifactRegistry() {
-		t.Fatal("remote metadata overrode local checkout")
-	}
-	file := filepath.Join(root, artifactRepositoryPath)
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(file, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !b.SupportsArtifactRegistry() {
-		t.Fatal("local repository support not detected")
-	}
-}
-
-func TestCleanupCommandUsesInstallationSource(t *testing.T) {
+func TestCleanupCommandPreservesRepositoryTarget(t *testing.T) {
 	st := testSetup(t)
 	st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
 	st.KoDockerRepo = "registry.example.com/unrelated"
@@ -1430,7 +1482,7 @@ func TestCleanupCommandUsesInstallationSource(t *testing.T) {
 	for _, commit := range []string{Commit, strings.Repeat("a", 40)} {
 		b.UseSource(Revision{Repo: RepoURL, Commit: commit})
 		cmd := b.CleanupCommand(st)
-		for _, want := range []string{"--commit " + ShellQuote(commit), "--region 'europe-west4'", "--repository 'build-images'"} {
+		for _, want := range []string{"--region 'europe-west4'", "--repository 'build-images'"} {
 			if !strings.Contains(cmd, want) {
 				t.Errorf("command missing %q: %s", want, cmd)
 			}
@@ -1440,7 +1492,7 @@ func TestCleanupCommandUsesInstallationSource(t *testing.T) {
 		}
 	}
 	cmd := NewBuilder(root, false).CleanupCommand(st)
-	if !strings.Contains(cmd, "--substrate-root "+ShellQuote(root)) || strings.Contains(cmd, "--commit") {
+	if strings.Contains(cmd, "--substrate-root") || strings.Contains(cmd, "--commit") {
 		t.Fatal(cmd)
 	}
 	if err := exec.Command("bash", "-n", "-c", cmd).Run(); err != nil {
@@ -1452,13 +1504,12 @@ func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
 	for _, tc := range []struct {
 		name, zone, repository, registry string
-		supported, envoy, prebuilt       bool
+		envoy, prebuilt                  bool
 	}{
-		{name: "zonal cluster", zone: "us-west1-c", supported: true, envoy: true},
-		{name: "regional cluster with custom repository", zone: "europe-west4", repository: "build-images", supported: true},
-		{name: "explicit registry", zone: "us-west1-c", registry: "registry.example.com/shared", supported: true, envoy: true},
-		{name: "prebuilt target", zone: "us-west1-c", supported: true, envoy: true, prebuilt: true},
-		{name: "legacy revision", zone: "us-west1-c"},
+		{name: "zonal cluster", zone: "us-west1-c", envoy: true},
+		{name: "regional cluster with custom repository", zone: "europe-west4", repository: "build-images"},
+		{name: "explicit registry", zone: "us-west1-c", registry: "registry.example.com/shared", envoy: true},
+		{name: "prebuilt target", zone: "us-west1-c", envoy: true, prebuilt: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := testSetup(t)
@@ -1470,7 +1521,8 @@ func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
 				st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.3.0"
 			}
 			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
-			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), ArtifactRegistry: tc.supported, EnvoyDataplane: tc.envoy})
+			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: tc.envoy})
+			b.SetupGCP = filepath.Join(t.TempDir(), "installer's tools/setup-gcp")
 			installed, next := t.TempDir(), filepath.Join(t.TempDir(), "new tree's checkout")
 			if err := os.Mkdir(next, 0o755); err != nil {
 				t.Fatal(err)
@@ -1499,10 +1551,10 @@ printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_
 				t.Fatal(err)
 			}
 			var want string
-			if tc.supported && !tc.prebuilt && tc.registry == "" {
+			if !tc.prebuilt && tc.registry == "" {
 				registry := st.Region() + "-docker.pkg.dev/acme/" + st.RepositoryName()
 				want = "gcloud|" + next + "|services enable artifactregistry.googleapis.com --project acme|" + registry + "\n" +
-					"go|" + next + "|run ./tools/setup-gcp create repository --project-id acme --region " + st.Region() + " --name " + st.RepositoryName() + "|" + registry + "\n"
+					"go|" + next + "|-C " + b.SetupGCP + " run . create repository --project-id acme --region " + st.Region() + " --name " + st.RepositoryName() + "|" + registry + "\n"
 				if tc.envoy {
 					want += "gcloud|" + next + "|auth configure-docker " + st.Region() + "-docker.pkg.dev|" + registry + "\n"
 				}
@@ -1517,7 +1569,7 @@ printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_
 func TestBuildRepositoryFollowsRegionAndRespectsOverrides(t *testing.T) {
 	s := state.NewSetup()
 	b := NewBuilder(t.TempDir(), true)
-	b.UseSource(Revision{ArtifactRegistry: true})
+
 	s.ProjectID, s.Zone = "acme", "us-west1-c"
 	if err := s.ApplyProjectDefaults(); err != nil {
 		t.Fatal(err)

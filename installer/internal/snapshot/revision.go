@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 )
@@ -41,8 +40,6 @@ type Revision struct {
 	// which ate-setup builds with docker buildx rather than ko. Set by
 	// Resolve; a revision it did not verify reports false.
 	EnvoyDataplane bool
-	// ArtifactRegistry reports setup-gcp repository provisioning support.
-	ArtifactRegistry bool
 }
 
 const resolveTimeout = 60 * time.Second
@@ -75,12 +72,11 @@ func Resolve(ctx context.Context, repo, ref string, needImageFlags bool) (Revisi
 	if err != nil {
 		return Revision{}, err
 	}
-	features, err := verifyCommit(ctx, repo, rev.Commit, needImageFlags)
+	envoy, err := verifyCommit(ctx, repo, rev.Commit, needImageFlags)
 	if err != nil {
 		return Revision{}, err
 	}
-	rev.EnvoyDataplane = features.envoy
-	rev.ArtifactRegistry = features.artifactRegistry
+	rev.EnvoyDataplane = envoy
 	return rev, nil
 }
 
@@ -203,12 +199,13 @@ func lsRemote(ctx context.Context, repo string, refs ...string) (string, error) 
 	return sha, nil
 }
 
-// imageFlagsPath is where ate-setup declares --image-repo, and imageFlagsName
-// is the declaration to look for. A tree from before those flags existed takes
-// an install that passes them all the way through bootstrap — cluster, bucket,
-// IAM — and then dies at the deploy with "flag provided but not defined".
+// imageFlagsDir is ate-setup's source, and imageFlagsName the flag that has to
+// appear somewhere in it. A tree from before the flag existed takes an install
+// that passes it all the way through bootstrap — cluster, bucket, IAM — and
+// then dies at the deploy with "flag provided but not defined". The whole
+// directory is searched because upstream has moved the declaration before.
 const (
-	imageFlagsPath = "cmd/ate-setup/internal/cmd/root.go"
+	imageFlagsDir  = "cmd/ate-setup"
 	imageFlagsName = "image-repo"
 )
 
@@ -218,12 +215,6 @@ const (
 // added it; a tree without it builds every image with ko, which needs no
 // docker at all.
 const EnvoyDockerfile = "cmd/dataplane/envoy/Dockerfile"
-
-const artifactRepositoryPath = "tools/setup-gcp/cmd/repository.go"
-
-type sourceFeatures struct {
-	envoy, artifactRegistry bool
-}
 
 // verifyCommit checks the remote will actually serve a SHA, since naming a
 // commit and being served it are different things: no ref points at an
@@ -237,41 +228,43 @@ type sourceFeatures struct {
 // --filter=blob:none makes it cheap, and leaves a tree the flag check can read
 // a single blob out of on demand.
 //
-// Feature detection uses paths available in the blobless fetch.
-func verifyCommit(ctx context.Context, repo, sha string, needImageFlags bool) (features sourceFeatures, err error) {
+// It also reports whether the tree has EnvoyDockerfile. That asks only about
+// a path, which the trees a blobless fetch brings down already answer.
+func verifyCommit(ctx context.Context, repo, sha string, needImageFlags bool) (envoy bool, err error) {
 	dir, err := os.MkdirTemp("", "substrate-gke-verify-")
 	if err != nil {
-		return features, err
+		return false, err
 	}
 	defer os.RemoveAll(dir)
 	if _, err := git(ctx, "init", "--quiet", "--bare", dir); err != nil {
-		return features, err
+		return false, err
 	}
 	if _, err := git(ctx, "--git-dir", dir, "fetch", "--quiet", "--depth", "1", "--filter=blob:none", repo, sha); err != nil {
-		return features, fmt.Errorf("%s does not have commit %s: %w", repo, shorten(sha), err)
+		return false, fmt.Errorf("%s does not have commit %s: %w", repo, shorten(sha), err)
 	}
 	// ls-tree rather than `cat-file -e`, which would go back to the remote
 	// for the blob the filter left out just to say that it exists.
-	out, err := git(ctx, "--git-dir", dir, "ls-tree", "--name-only", "FETCH_HEAD", "--", EnvoyDockerfile, artifactRepositoryPath)
-	if err != nil {
-		return features, err
-	}
-	paths := strings.Fields(out)
-	features.envoy = slices.Contains(paths, EnvoyDockerfile)
-	features.artifactRegistry = slices.Contains(paths, artifactRepositoryPath)
+	out, err := git(ctx, "--git-dir", dir, "ls-tree", "--name-only", "FETCH_HEAD", "--", EnvoyDockerfile)
+	envoy = err == nil && strings.TrimSpace(out) == EnvoyDockerfile
 	if !needImageFlags {
-		return features, nil
+		return envoy, nil
 	}
-	// A tree that has moved the file elsewhere is left alone: that is upstream
-	// restructuring, and refusing the install over it would be a guess. Only a
-	// file that is there and does not declare the flag is an answer.
-	out, err = git(ctx, "--git-dir", dir, "cat-file", "-p", "FETCH_HEAD:"+imageFlagsPath)
-	if err == nil && !strings.Contains(out, imageFlagsName) {
-		return features, fmt.Errorf(
+	// A tree without imageFlagsDir is left alone: that is upstream
+	// restructuring, and refusing the install over it would be a guess. So is
+	// a grep that fails for any reason other than finding nothing. grep fetches
+	// the blobs the filter left out in one batch.
+	out, err = git(ctx, "--git-dir", dir, "ls-tree", "-d", "--name-only", "FETCH_HEAD", "--", imageFlagsDir)
+	if err != nil || strings.TrimSpace(out) != imageFlagsDir {
+		return envoy, nil
+	}
+	_, err = git(ctx, "--git-dir", dir, "grep", "-q", "-e", imageFlagsName, "FETCH_HEAD", "--", imageFlagsDir+"/*.go")
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, fmt.Errorf(
 			"substrate %s predates ate-setup's --%s, so it cannot install pre-built images; name a newer commit, or build from source instead",
 			shorten(sha), imageFlagsName)
 	}
-	return features, nil
+	return envoy, nil
 }
 
 func git(ctx context.Context, args ...string) (string, error) {
@@ -287,13 +280,22 @@ func git(ctx context.Context, args ...string) (string, error) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			if detail := lastLine(string(ee.Stderr)); detail != "" {
-				return "", errors.New(detail)
+				return "", &gitError{detail, err}
 			}
 		}
 		return "", fmt.Errorf("git %s failed: %w", args[0], err)
 	}
 	return string(out), nil
 }
+
+// gitError reports what git said, and keeps its exit status for errors.As.
+type gitError struct {
+	msg string
+	err error
+}
+
+func (e *gitError) Error() string { return e.msg }
+func (e *gitError) Unwrap() error { return e.err }
 
 // lastLine picks the final non-empty line of git's stderr, which is the part
 // that says what actually went wrong.

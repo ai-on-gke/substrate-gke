@@ -67,7 +67,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
-| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet |
+| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
@@ -181,11 +181,11 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** *(default)* | **Build from source** |
 |---|---|---|
 | **You provide** | Registry, tag, and commit — all pre-filled, all overridable | A revision: branch, tag, or full commit SHA |
-| **Default value** | `v0.2.0-gke.0` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to the head of upstream's [`release-0.2`](https://github.com/agent-substrate/substrate/tree/release-0.2) branch | Repo's current HEAD, resolved live via `git ls-remote` |
+| **Default value** | `v0.4.0-gke.0` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to upstream's [`v0.4.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.4.0) tag | Repo's current HEAD, resolved live via `git ls-remote` |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Just getting Substrate running | A branch or commit with no published images |
 
-For source builds using the default registry, supported revisions create `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster; older revisions keep the GCR default. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
+For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
 > [!IMPORTANT]
 > If you point at a custom registry/tag, **move the commit with it.** Only the release registry is guaranteed to match its tags — images from anywhere else need the commit they were built from, or they'll run behind manifests from a different Substrate. The wizard warns you as soon as the registry or tag changes.
@@ -221,6 +221,8 @@ cd installer && go run . --substrate-root=/path/to/substrate
 ```
 
 A checkout you supply this way is used as-is and never modified or deleted.
+
+GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repository's [`tools/setup-gcp`](tools/setup-gcp/README.md), not a copy from the Substrate tree, whatever revision you chose. The tool moved here from upstream ([agent-substrate/substrate#2304](https://github.com/agent-substrate/substrate/issues/2304)). The installer finds it above its working directory or its executable; pass `--setup-gcp=/path/to/tools/setup-gcp` if you run the installer from somewhere else.
 
 <details>
 <summary><strong>Failure and retry behavior</strong> (click to expand)</summary>
@@ -258,7 +260,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then runs upstream's `hack/teardown.sh`. The printed command includes the installation's `--commit` (or `--substrate-root`), `--region`, and `--repository`; without them, cleanup uses the release pin, the cluster's region, and `ate-images`. Repositories are kept by default. The installer's command adds `--delete-repository` when it provisioned one; replace it with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` together with `SUBSTRATE_COMMIT=<sha>` (or `SUBSTRATE_ROOT=<path>`) for a version that supports repository deletion. It's safe to re-run after a partial failure.
+The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud` and ignores any `.ate-dev-env.sh` in the working directory. The printed command includes the installation's `--region` and `--repository`. Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one. Replace it with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` to delete the repository. It's safe to re-run after a partial failure.
 
 To remove **only** the Substrate control plane and keep the cluster:
 
@@ -271,8 +273,8 @@ APIs enabled by the install are left enabled — they cost nothing while unused.
 ## Development
 
 ```bash
-make test         # unit tests, including a scripted dry-run walk of the wizard
-make verify       # gofmt + go vet
+make test         # unit tests for installer/ and tools/setup-gcp/, including a scripted dry-run walk of the wizard
+make verify       # gofmt + go vet for both modules
 make screenshots  # regenerate the README screenshots from the dry-run wizard
 ```
 

@@ -135,8 +135,8 @@ func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) 
 	if b.CreatesArtifactRepository(st) {
 		commands := []string{
 			"gcloud services enable artifactregistry.googleapis.com --project " + ShellQuote(st.ProjectID),
-			fmt.Sprintf("go run ./tools/setup-gcp create repository --project-id %s --region %s --name %s",
-				ShellQuote(st.ProjectID), ShellQuote(st.Region()), ShellQuote(st.RepositoryName())),
+			fmt.Sprintf("go -C %s run . create repository --project-id %s --region %s --name %s",
+				ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID), ShellQuote(st.Region()), ShellQuote(st.RepositoryName())),
 		}
 		if b.BuildsWithDocker(st) {
 			commands = append(commands, "gcloud auth configure-docker "+ShellQuote(st.Region()+"-docker.pkg.dev"))

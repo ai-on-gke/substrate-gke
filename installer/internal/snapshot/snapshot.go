@@ -55,16 +55,13 @@ const (
 	// only falls back here for --dry-run, which resolves nothing.
 	//
 	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the head of upstream's
-	// release-0.2 branch, ReleaseVersion being the GKE build of it. That is
-	// the v0.2.0 tag plus the envoy-dataplane pin pre-built installs need
-	// (agent-substrate/substrate#1990), which is why it is not the tag itself.
+	// what the released images are built from: the commit upstream's v0.4.0
+	// tag names, which is also the head of its release-0.4 branch,
+	// ReleaseVersion being the GKE build of it.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	// TODO: When this pin supports Artifact Registry, update the default
-	// features in NewBuilder and submitRelease.
-	Commit = "23863bea16cb14df8a34deb635346d40cac38785"
+	Commit = "756c2a53741121e728f4cc3066c8a19e575b4919"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -87,7 +84,7 @@ const (
 	// never has to fall back to building from source. It asks such a team for
 	// a manifest revision as well, since only this registry is published
 	// alongside a tree known to match.
-	ReleaseVersion = "v0.2.0-gke.0"
+	ReleaseVersion = "v0.4.0-gke.0"
 )
 
 // ShortCommit is Commit abbreviated for display.
@@ -414,11 +411,14 @@ type Builder struct {
 	// Version stamps the images ko builds (the checkout is detached at an
 	// exact commit, so `git describe` has no tag to report).
 	Version string
+	// SetupGCP is the absolute path of this repository's setup-gcp module,
+	// which Bootstrap runs. See FindSetupGCP.
+	SetupGCP string
 	// repo and commit are the tree to fetch. They start at the pin and move
 	// only when the wizard's images step picks something else.
 	repo, commit string
-	// features records capabilities detected in the chosen revision.
-	features sourceFeatures
+	// envoy records whether the chosen revision builds envoy-dataplane.
+	envoy bool
 	// lock, while open, is the shared flock marking Root as in use by this
 	// process. Taken by Lock, released by Cleanup (or process exit).
 	lock *os.File
@@ -442,8 +442,7 @@ func NewBuilder(root string, managed bool) *Builder {
 // build produces are never mistaken for another's. A tree the user supplied
 // with --substrate-root is theirs, and is left exactly where it is.
 func (b *Builder) UseSource(rev Revision) {
-	b.repo, b.commit = rev.Repo, rev.Commit
-	b.features = sourceFeatures{envoy: rev.EnvoyDataplane, artifactRegistry: rev.ArtifactRegistry}
+	b.repo, b.commit, b.envoy = rev.Repo, rev.Commit, rev.EnvoyDataplane
 	if !b.Managed {
 		return
 	}
@@ -462,7 +461,7 @@ func (b *Builder) UseSource(rev Revision) {
 	}
 }
 
-// CleanupCommand preserves the source and repository configuration used by this install.
+// CleanupCommand preserves the cluster and repository targets used by this install.
 func (b *Builder) CleanupCommand(st *state.Setup) string {
 	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) +
 		" --region " + ShellQuote(st.Region()) + " --repository " + ShellQuote(st.RepositoryName())
@@ -471,10 +470,7 @@ func (b *Builder) CleanupCommand(st *state.Setup) string {
 	} else {
 		command += " --keep-repository"
 	}
-	if b.Managed {
-		return command + " --commit " + ShellQuote(b.commit)
-	}
-	return command + " --substrate-root " + ShellQuote(b.Root)
+	return command
 }
 
 // BuildsWithDocker reports whether deploying the control plane runs `docker
@@ -501,21 +497,12 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 		// the images step recorded.
 		return HasEnvoyDockerfile(b.Root)
 	}
-	return b.features.envoy
-}
-
-// SupportsArtifactRegistry reports whether this checkout can provision an image repository.
-func (b *Builder) SupportsArtifactRegistry() bool {
-	if !b.Managed {
-		_, err := os.Stat(filepath.Join(b.Root, artifactRepositoryPath))
-		return err == nil
-	}
-	return b.features.artifactRegistry
+	return b.envoy
 }
 
 // CreatesArtifactRepository reports whether this install provisions its build repository.
 func (b *Builder) CreatesArtifactRepository(st *state.Setup) bool {
-	return !st.Prebuilt() && st.KoDockerRepo == "" && b.SupportsArtifactRegistry()
+	return !st.Prebuilt() && st.KoDockerRepo == ""
 }
 
 // BuildRepository resolves the image destination for this checkout.
@@ -523,10 +510,7 @@ func (b *Builder) BuildRepository(st *state.Setup) string {
 	if st.KoDockerRepo != "" {
 		return st.KoDockerRepo
 	}
-	if b.SupportsArtifactRegistry() {
-		return st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/" + st.RepositoryName()
-	}
-	return "gcr.io/" + st.ProjectID + "/ate-images"
+	return st.Region() + "-docker.pkg.dev/" + st.ProjectID + "/" + st.RepositoryName()
 }
 
 // ImageSummary describes where this install's images come from.
@@ -742,7 +726,8 @@ func (b *Builder) fetchSimLines() []string {
 	return []string{CachedLine + shorten(b.commit)}
 }
 
-// Bootstrap provisions GCP resources through the selected upstream checkout.
+// Bootstrap provisions GCP resources through this repository's setup-gcp,
+// after fetching the selected Substrate checkout.
 func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	phases := []string{"Enabling required APIs..."}
 	if b.CreatesArtifactRepository(st) {
@@ -762,8 +747,8 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	}
 	return execx.Spec{
 		Label:    "setup-gcp bootstrap",
-		Display:  "go run ./tools/setup-gcp bootstrap",
-		Argv:     b.inTree("go run ./tools/setup-gcp bootstrap"),
+		Display:  "go -C " + SetupGCPPath + " run . bootstrap",
+		Argv:     b.inTree("go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"),
 		Env:      b.env(st),
 		SimLines: append(lines, "Bootstrap completed successfully."),
 	}
@@ -798,13 +783,38 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
-		Env:     b.env(st),
+		Env:     append(b.env(st), credentialProviderEnv()...),
 		SimLines: append(sim,
+			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
 			`deployment "ate-api-server" successfully rolled out`,
 			`daemon set "atelet" successfully rolled out`,
 		),
 	}
+}
+
+// defaultCredentialProvider is the egress credential provider the control
+// plane is deployed with: the bundled Kubernetes Secrets provider, as in
+// upstream's quickstart. `ate-setup deploy ate-system` requires one from
+// v0.4.0 on; older trees ignore the variable.
+const defaultCredentialProvider = `{"name":"k8s.io"}`
+
+// CredentialProvider is the provider the control plane is deployed with: the
+// caller's ATE_CREDENTIAL_PROVIDER, else defaultCredentialProvider.
+func CredentialProvider() string {
+	if v := os.Getenv("ATE_CREDENTIAL_PROVIDER"); v != "" {
+		return v
+	}
+	return defaultCredentialProvider
+}
+
+// credentialProviderEnv passes defaultCredentialProvider, unless the caller
+// already exports ATE_CREDENTIAL_PROVIDER.
+func credentialProviderEnv() []string {
+	if os.Getenv("ATE_CREDENTIAL_PROVIDER") != "" {
+		return nil
+	}
+	return []string{"ATE_CREDENTIAL_PROVIDER=" + defaultCredentialProvider}
 }
 
 // craneDigest prints an image reference's registry digest. It must stay in
@@ -854,13 +864,13 @@ var restoreDemoTemplates = []string{
 // the counter demo). When the Micro-VM sandbox runtime is selected and staged,
 // it runs `ate-setup deploy demo counter-microvm` if the checkout has it (see
 // counterMicroVMDemoDir), exactly as the gVisor demo runs ate-setup. Older
-// trees, the pinned Commit among them, fall back to hack/install-ate.sh
+// trees, such as v0.1.0, fall back to hack/install-ate.sh
 // --deploy-demo-counter-microvm (the demo step from hack/run-microvm-demo.sh),
 // which those trees keep for good.
 //
-// TODO: When v0.2.0 release images are published, bump Commit past v0.2.0
-// and drop the install-ate.sh fallback (deprecated upstream), the template
-// rewrite, and the jq/make entries in doctor.MicroVMTools.
+// TODO: Drop the install-ate.sh fallback (deprecated upstream), the template
+// rewrite, and the jq/make entries in doctor.MicroVMTools. Commit is past
+// v0.2.0, so they only serve older commits typed into the images step.
 func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	display, argv := imageArgs(st)
 	if st.MicroVMActive() {

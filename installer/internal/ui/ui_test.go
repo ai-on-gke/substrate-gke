@@ -368,12 +368,12 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("2", "enter")
 	press("enter")
 	// Project screen in Advanced track:
-	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo
+	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network, 5:Subnetwork, 6:Repo, 7:RepositoryName
 	press("enter", "enter")
 	for _, r := range "my-custom-bucket" {
 		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	press("enter", "enter", "enter", "enter", "enter") // submit from field 6
+	press("enter", "enter", "enter", "enter", "enter", "enter") // submit from field 7
 
 	// Cluster screen: pick row 2 (legacy-prod)
 	press("2", "enter")
@@ -390,7 +390,7 @@ func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 	labels := func(prebuilt bool) []string {
 		app := testApp(t)
 		app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-		app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit, ArtifactRegistry: true})
+		app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit})
 		app.deps.Setup.Track = state.TrackAdvanced
 		if prebuilt {
 			app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
@@ -429,19 +429,18 @@ func TestProjectRequestsRepositoryPermissionsOnlyWhenCreating(t *testing.T) {
 	})}
 	for _, tc := range []struct {
 		name, savedRegistry, typedRegistry string
-		supported, prebuilt, want          bool
+		prebuilt, want                     bool
 	}{
-		{"default source", "", "", true, false, true},
-		{"typed custom registry", "", "registry.example.com/images", true, false, false},
-		{"cleared custom registry", "registry.example.com/images", "", true, false, true},
-		{"prebuilt images", "", "", true, true, false},
-		{"legacy source", "", "", false, false, false},
+		{"default source", "", "", false, true},
+		{"typed custom registry", "", "registry.example.com/images", false, false},
+		{"cleared custom registry", "registry.example.com/images", "", false, true},
+		{"prebuilt images", "", "", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app := testApp(t)
 			app.deps.GCP.DryRun = false
 			app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-			app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit, ArtifactRegistry: tc.supported})
+			app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit})
 			st := app.deps.Setup
 			st.Track, st.ProjectID, st.KoDockerRepo = state.TrackAdvanced, "acme", tc.savedRegistry
 			if tc.prebuilt {
@@ -528,10 +527,10 @@ func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {
 	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
 	scr = newProjectScreen(app.deps)
 	st = scr.inputSetup("acme")
-	if got := scr.dockerRegistry(&st); got != "gcr.io/acme/ate-images" {
-		t.Errorf("dockerRegistry = %q, want the default registry", got)
+	if got := scr.dockerRegistry(&st); got != "" {
+		t.Errorf("default registry must wait for cluster selection, got %q", got)
 	}
-	scr.fields[len(scr.fields)-1].input.SetValue("us-docker.pkg.dev/acme/ate")
+	scr.fields[scr.repositoryField-1].input.SetValue("us-docker.pkg.dev/acme/ate")
 	st = scr.inputSetup("acme")
 	if got := scr.dockerRegistry(&st); got != "us-docker.pkg.dev/acme/ate" {
 		t.Errorf("dockerRegistry = %q, want the typed registry", got)
@@ -1979,7 +1978,7 @@ func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 	app := testApp(t)
 	app.deps.DryRun = false
 	app.deps.Builder = snapshot.NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
-	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true, ArtifactRegistry: true})
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
 	st := app.deps.Setup
 	st.ProjectID, st.Zone = "acme", "us-west1-c"
 	scr := newProjectScreen(app.deps)
@@ -2032,7 +2031,7 @@ func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 func TestProjectValidatesRepositoryBeforeCloudChecks(t *testing.T) {
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-	app.deps.Builder.UseSource(snapshot.Revision{ArtifactRegistry: true})
+
 	app.deps.Setup.Track, app.deps.Setup.ProjectID = state.TrackAdvanced, "acme"
 	scr := newProjectScreen(app.deps)
 	for _, f := range scr.fields {
