@@ -15,6 +15,7 @@
 package steps
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
@@ -30,7 +31,7 @@ func feed(items []ChecklistItem, lines []string) int {
 }
 
 func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
-	items := Bootstrap()
+	items := Bootstrap(true, false)
 	// Item 0 is the substrate fetch, so the seven bootstrap phases sit at 1..7.
 	lines := []string{
 		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
@@ -50,7 +51,7 @@ func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 
 // A warm cache prints a different line; it must still light up the fetch item.
 func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
-	if got := feed(Bootstrap(), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
+	if got := feed(Bootstrap(true, false), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
 		t.Fatalf("active = %d, want 0 (fetch step)", got)
 	}
 }
@@ -152,5 +153,25 @@ func TestFilestoreCSIChecklistTracksDeployOutputWithoutAddonDisable(t *testing.T
 	}
 	if got := feed(items, lines); got != 3 {
 		t.Fatalf("active = %d, want 3 (apply phase)", got)
+	}
+}
+
+// Upstream logs "Creating GKE Cluster" for step 2 whatever the cluster, but on
+// an existing one it creates nothing. The label has to say what is actually
+// happening — above all when it is a ten-minute control-plane update, which a
+// "create" label makes look like the install is rebuilding the user's cluster.
+func TestBootstrapLabelsTheClusterStepForTheSituation(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		isNew, enableBetas bool
+		want               string
+	}{
+		{"new cluster", true, false, "Create the GKE cluster"},
+		{"existing, missing the beta APIs", false, true, "Turn on the beta PodCertificate APIs"},
+		{"existing and ready", false, false, "Check the existing GKE cluster"},
+	} {
+		if got := Bootstrap(tc.isNew, tc.enableBetas)[2].Label; !strings.HasPrefix(got, tc.want) {
+			t.Errorf("%s: step 2 = %q, want it to start %q", tc.name, got, tc.want)
+		}
 	}
 }

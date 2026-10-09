@@ -65,7 +65,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`. A build from source that needs Docker re-checks it here against your registry |
-| 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
+| 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, and monitoring dashboards. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
@@ -89,7 +89,15 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 
 - **Setup check runs first** because the next step (images) is the first one to reach the network.
 - **Images comes before the project step** because the answer decides what that step needs — a pre-built install pushes nothing, so it's never asked for a registry.
-- **Connecting an existing cluster** probes it to confirm Substrate isn't already running there, guarding against mixed-version installs. Substrate needs the `PodCertificate` Kubernetes beta APIs, which GKE only enables **at cluster creation** — clusters created without them can't be fixed afterward. That's why creating a fresh cluster is the recommended path.
+- **Connecting an existing cluster** probes it to confirm Substrate isn't already running there, guarding against mixed-version installs. It also badges whether the cluster meets Substrate's [cluster requirements](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate#cluster-requirements): GKE 1.36 or newer, serving the `PodCertificate` APIs. GKE 1.37 serves them as `v1`, which Substrate uses; below 1.37 they are beta APIs that GKE serves only for clusters that opted in. Node pools count as well as the control plane — the kubelet is what serves pod certificates, and GKE lets pools trail the control plane:
+
+  | Release | Remedy |
+  |---|---|
+  | **1.37+, and every pool on 1.37+** | Nothing to fix. Bootstrap still turns the beta APIs on, which costs a control-plane update of about ten minutes but changes nothing Substrate depends on. |
+  | **1.36, or any pool below 1.37, without the beta APIs** | Provision enables them in place (about ten minutes per control-plane update; bootstrap may make several). But the kubelet serves pod certificate projection only on nodes created *after* it, so those pools have to be replaced — and before Substrate is turned on, since its own control plane mounts pod certificates. Provision ends on a list of them, in place of the "turn on Substrate" prompt: add a new pool of the same shape, move workloads to it, delete the old one. On a later run the APIs are already on and the cluster badges ready, but provision still lists pools below 1.37 to check, since the installer can't tell whether they were replaced. Upgrading a pool to the version it already runs doesn't help; GKE skips it without replacing any node. |
+  | **below 1.36** | Not fixable in place: [1.36 is the oldest release Substrate is supported on](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate#cluster-requirements), and below 1.35 GKE rejects the enablement outright because `PodCertificateRequest` didn't reach `v1beta1` until then. The control plane has to be upgraded first. |
+
+  New clusters are created at 1.37 on the Rapid channel, the only one that carries 1.37 right now, so none of this applies to them. Advanced setup can pick a different version and channel, like 1.36 on Regular; the installer checks with GKE that the channel offers the version before going on.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
 - **Sandbox runtime comes right before the demo** so steps 1–8 finish setting up the cluster, storage, and node pools first, and step 10 immediately deploys the matching demo (`counter` or `counter-microvm`).
 
@@ -294,5 +302,5 @@ Bump `ReleaseVersion` and `Commit` together when a newer release is published �
 |---|---|
 | `ate-setup` | CLI that installs/upgrades/deletes the Substrate control plane on a cluster |
 | `atenet`, `atelet` | Substrate control-plane components installed alongside the API server and controller |
-| `PodCertificate` beta APIs | Kubernetes beta APIs Substrate requires; GKE only enables them at cluster creation time |
+| `PodCertificate` APIs | The `certificates.k8s.io` APIs Substrate requires: `clustertrustbundles` and `podcertificaterequests`. Substrate uses `v1` where it's served (GKE 1.37+) and falls back to `v1beta1`. Below 1.37 the `v1beta1` APIs are beta, and GKE serves them only for clusters that enabled them — at creation, or later with `gcloud container clusters update --enable-kubernetes-unstable-apis` |
 | Pinned commit | The exact commit of `agent-substrate/substrate` this installer's manifests and default images are built from |
