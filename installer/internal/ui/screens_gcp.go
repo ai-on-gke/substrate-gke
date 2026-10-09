@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -97,17 +98,29 @@ type projectScreen struct {
 	// enabling is the running `gcloud services enable`, nil otherwise.
 	enabling *execComp
 	// checkingEnable is set while a failed enable's cause is looked into;
-	// see enableChecked.
+	// see enableChecked. checkCancel abandons that check (esc, or leaving
+	// the screen), checkSeq tells its result from an abandoned one's, and
+	// checkPending is the failure being looked into, shown from gcloud's
+	// text alone if the check is abandoned.
 	checkingEnable bool
+	checkCancel    context.CancelFunc
+	checkSeq       int
+	checkPending   enableCheckedMsg
 	// billingCheck asks whether a project has billing. It is the gcp
 	// client's BillingEnabled; tests swap in fixed answers.
 	billingCheck func(ctx context.Context, projectID string) (bool, error)
 }
 
+// enableCheckTimeout bounds the billing check after a failed enable. The
+// enable often failed because the network is down, and the panel it
+// delays used to appear at once.
+const enableCheckTimeout = 10 * time.Second
+
 // enableCheckedMsg carries a failed enable and what a fresh billing probe
 // then said about the project.
 type enableCheckedMsg struct {
 	owner     *projectScreen
+	seq       int
 	projectID string
 	cause     string
 	billingOn bool
@@ -159,9 +172,10 @@ func (s *projectScreen) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// CapturesText is false while the enable runs: no field takes input then,
-// and the app's own keys ([v] log, / commands, ? help) must get through.
-func (s *projectScreen) CapturesText() bool { return s.enabling == nil }
+// CapturesText is false while the enable, or the billing check after a
+// failed one, runs: no field takes input then, and the app's own keys
+// ([v] log, / commands, ? help) must get through.
+func (s *projectScreen) CapturesText() bool { return s.enabling == nil && !s.checkingEnable }
 
 func (s *projectScreen) Hints() []Hint {
 	if s.enabling != nil {
@@ -439,11 +453,27 @@ func (s *projectScreen) enableDone() tea.Cmd {
 	}
 	pid := s.enableFor
 	s.validating, s.checkingEnable = true, true
+	s.checkSeq++
+	ctx, cancel := context.WithTimeout(context.Background(), enableCheckTimeout)
+	s.checkCancel = cancel
+	pending := enableCheckedMsg{owner: s, seq: s.checkSeq, projectID: pid, cause: cause}
+	s.checkPending = pending
 	check := s.billingCheck
 	return func() tea.Msg {
-		on, err := check(context.Background(), pid)
-		return enableCheckedMsg{owner: s, projectID: pid, cause: cause, billingOn: on, err: err}
+		defer cancel()
+		m := pending
+		m.billingOn, m.err = check(ctx, pid)
+		return m
 	}
+}
+
+// abandonCheck stops waiting for the billing check (esc): the failure is
+// shown at once from gcloud's text alone, as when the probe cannot answer,
+// and the check's late result is dropped.
+func (s *projectScreen) abandonCheck() {
+	m := s.checkPending
+	m.err = context.Canceled
+	s.enableChecked(m)
 }
 
 // enableChecked shows a failed enable once the billing probe has answered.
@@ -459,6 +489,10 @@ func (s *projectScreen) enableDone() tea.Cmd {
 //     dropping the fallback would show a generic panel for it.
 func (s *projectScreen) enableChecked(m enableCheckedMsg) {
 	s.validating, s.checkingEnable = false, false
+	if s.checkCancel != nil {
+		s.checkCancel()
+		s.checkCancel = nil
+	}
 	if m.err == nil && !m.billingOn {
 		s.enableFor = ""
 		s.errText = billingProblem(m.projectID, true)
@@ -474,10 +508,14 @@ func (s *projectScreen) enableChecked(m enableCheckedMsg) {
 	}
 }
 
-// Stop cancels an enable still running when the wizard leaves the screen.
+// Stop cancels an enable, or the billing check after one, still running
+// when the wizard leaves the screen.
 func (s *projectScreen) Stop() {
 	if s.enabling != nil {
 		s.enabling.stop()
+	}
+	if s.checkCancel != nil {
+		s.checkCancel()
 	}
 }
 
@@ -501,7 +539,8 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		return nil
 
 	case enableCheckedMsg:
-		if m.owner == s {
+		// A result for a check that was abandoned (esc) comes too late.
+		if m.owner == s && s.checkingEnable && m.seq == s.checkSeq {
 			s.enableChecked(m)
 		}
 		return nil
@@ -552,6 +591,14 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		return goNext
 
 	case tea.KeyMsg:
+		if s.checkingEnable {
+			// esc stops waiting for the billing check and shows the
+			// failure from gcloud's text; nothing else is live.
+			if m.String() == "esc" {
+				s.abandonCheck()
+			}
+			return nil
+		}
 		if s.validating {
 			return nil
 		}

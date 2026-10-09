@@ -807,6 +807,100 @@ func TestProjectScreenEnableFailureHintFollowsTheCause(t *testing.T) {
 	}
 }
 
+// startHungCheck drives a failing enable up to the billing check, whose
+// billingCheck blocks until its context ends, and returns the check's
+// command unrun along with the context the check was handed.
+func startHungCheck(t *testing.T, app *App, failLine string) (*projectScreen, tea.Cmd, <-chan context.Context) {
+	t.Helper()
+	var argv [][]string
+	app.deps.Runner = enableRunner{inner: execx.DryRun{Delay: time.Millisecond}, fail: true, failLine: failLine, argv: &argv}
+	scr := newProjectScreen(app.deps)
+	app.cur = scr
+	ctxs := make(chan context.Context, 1)
+	scr.billingCheck = func(ctx context.Context, _ string) (bool, error) {
+		ctxs <- ctx
+		<-ctx.Done()
+		// A definite "billing off", which would replace the panel if a
+		// late answer were not dropped.
+		return false, nil
+	}
+	scr.fields[0].input.SetValue("acme")
+	scr.Update(projValidMsg{owner: scr, number: "42", apiOff: true})
+	queue := runCmd(scr.Update(key("e")))
+	deadline := time.Now().Add(10 * time.Second)
+	for !scr.checkingEnable {
+		if len(queue) == 0 || time.Now().After(deadline) {
+			t.Fatal("the failed enable never started the billing check")
+		}
+		msg := queue[0]
+		queue = queue[1:]
+		cmd := scr.Update(msg)
+		if scr.checkingEnable {
+			return scr, cmd, ctxs
+		}
+		queue = append(queue, runCmd(cmd)...)
+	}
+	t.Fatal("unreachable")
+	return nil, nil, nil
+}
+
+// The billing check after a failed enable is bounded and can be abandoned:
+// the enable often failed because the network is down, and before the
+// check its panel appeared at once. esc shows the failure from gcloud's
+// text straight away and drops the check's late answer; meanwhile v, / and
+// ? reach the app as during the enable.
+func TestProjectScreenBillingCheckIsBoundedAndCancellable(t *testing.T) {
+	const permLine = "ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [container.googleapis.com]"
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	scr, check, ctxs := startHungCheck(t, app, permLine)
+	if scr.CapturesText() {
+		t.Error("during the check the app's keys must get through")
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- check() }()
+	ctx := <-ctxs
+	dl, ok := ctx.Deadline()
+	if !ok || time.Until(dl) > enableCheckTimeout {
+		t.Errorf("the check must be bounded by %v, deadline set=%v in %v", enableCheckTimeout, ok, time.Until(dl))
+	}
+
+	app.Update(key("v"))
+	if app.over != overlayLog {
+		t.Error("v during the check should open the log overlay")
+	}
+	app.Update(key("v")) // close it
+
+	start := time.Now()
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if time.Since(start) > 100*time.Millisecond {
+		t.Errorf("esc took %v; it must not wait for the check", time.Since(start))
+	}
+	if scr.checkingEnable || scr.validating {
+		t.Fatal("esc should end the check")
+	}
+	if !strings.Contains(scr.errText, "roles/serviceusage.serviceUsageAdmin") || scr.enableFor != "acme" {
+		t.Errorf("esc should show the failure from gcloud's text (permission, [e] kept); err=%q enableFor=%q", scr.errText, scr.enableFor)
+	}
+	if ctx.Err() == nil {
+		t.Error("esc should cancel the check's context")
+	}
+
+	// The abandoned check's answer ("billing off") arrives late and must
+	// not replace the panel.
+	select {
+	case late := <-done:
+		shown := scr.errText
+		scr.Update(late)
+		if scr.errText != shown {
+			t.Errorf("a late check result replaced the panel: %q", scr.errText)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled check did not return")
+	}
+}
+
 // The offer is for the project as validated: editing the fields withdraws
 // it, and e types again.
 func TestProjectScreenEditWithdrawsTheEnableOffer(t *testing.T) {
