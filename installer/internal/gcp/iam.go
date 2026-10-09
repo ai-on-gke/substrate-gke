@@ -180,7 +180,7 @@ type tokenFetch struct {
 // It is a singleflight: a caller that finds no cached token starts one
 // fetch, and every caller arriving while it runs waits for that same fetch
 // and gets its result, error included. tokenMu is never held while gcloud
-// runs, so ResetToken and invalidateToken return at once. A failed fetch is
+// runs, so ResetToken and rejectToken return at once. A failed fetch is
 // not cached for later callers; the next user action (ResetToken) or call
 // tries again. Each caller stops waiting when its own ctx ends; the fetch
 // itself runs on under cmdTimeout and still serves the rest.
@@ -254,8 +254,8 @@ func (c *Client) ResetToken() {
 // that need it, so the fetch (a cold gcloud spawn) can overlap other work.
 // The token does not depend on the project, so it can start before the
 // project is even resolved. REST calls made while it runs wait for it
-// rather than fetching again. A failed fetch is not cached: those calls try
-// again and report the real error. No-op under DryRun.
+// rather than fetching again, and share its error if it fails; only calls
+// made after a failure fetch again. No-op under DryRun.
 func (c *Client) WarmToken(ctx context.Context) {
 	if c.DryRun {
 		return
