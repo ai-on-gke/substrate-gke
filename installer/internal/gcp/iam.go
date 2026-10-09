@@ -92,8 +92,11 @@ func (c *Client) MissingPermissions(ctx context.Context, projectID string) ([]Re
 // reason ("API has not been used in project…", "permission denied").
 //
 // A 401 means the token is no good (gcloud can hand back its own cached
-// token close to expiry), so callAPI drops it, fetches a fresh one and
-// retries once.
+// token close to expiry), so callAPI marks it rejected, gets a fresh one
+// and retries once, but only if the fresh token differs. gcloud refreshes
+// only what it thinks has expired, so a revoked or scope-limited token comes
+// back unchanged, and retrying with it cannot succeed. Concurrent callers
+// that hit the same 401 share one refetch (see accessToken and rejectToken).
 func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) ([]byte, error) {
 	token, err := c.accessToken(ctx)
 	if err != nil {
@@ -101,11 +104,14 @@ func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) (
 	}
 	status, respBody, err := c.send(ctx, method, url, body, token)
 	if err == nil && status == http.StatusUnauthorized {
-		c.invalidateToken(token)
-		if token, err = c.accessToken(ctx); err != nil {
-			return nil, err
+		c.rejectToken(token)
+		fresh, ferr := c.accessToken(ctx)
+		if ferr != nil {
+			return nil, ferr
 		}
-		status, respBody, err = c.send(ctx, method, url, body, token)
+		if fresh != token {
+			status, respBody, err = c.send(ctx, method, url, body, fresh)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -241,6 +247,7 @@ func (c *Client) ResetToken() {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	c.cachedToken = ""
+	c.rejectedToken = ""
 }
 
 // WarmToken fetches the access token into the cache ahead of the REST calls
@@ -256,12 +263,22 @@ func (c *Client) WarmToken(ctx context.Context) {
 	c.accessToken(ctx) //nolint:errcheck // the REST calls report it
 }
 
-// invalidateToken forgets token if it is still the cached one. A concurrent
-// caller may already have replaced it with a fresh token, which must stay.
-func (c *Client) invalidateToken(token string) {
+// rejectToken records that token just got a 401. The first caller to report
+// it drops it from the cache, so the next accessToken refetches; callers
+// reporting the same token after that leave the cache alone. If gcloud
+// handed the same token back, it is cached again and they get it at once,
+// with no spawn, see that it is unchanged, and skip the retry. So however
+// many concurrent probes hit a 401 with one token, the action pays for one
+// refetch. ResetToken forgets the rejection with the token.
+func (c *Client) rejectToken(token string) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
-	if c.cachedToken == strings.TrimSpace(token) {
+	token = strings.TrimSpace(token)
+	if c.rejectedToken == token {
+		return
+	}
+	c.rejectedToken = token
+	if c.cachedToken == token {
 		c.cachedToken = ""
 	}
 }

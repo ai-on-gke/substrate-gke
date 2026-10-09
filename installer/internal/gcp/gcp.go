@@ -86,11 +86,13 @@ type Client struct {
 	// tokenMu guards the access token accessToken caches, so one submit's
 	// REST probes, run concurrently, share a single gcloud spawn.
 	// tokenFetch is the fetch under way, if any; it is never run with
-	// tokenMu held.
-	tokenMu     sync.Mutex
-	cachedToken string
-	tokenExpiry time.Time
-	tokenFetch  *tokenFetch
+	// tokenMu held. rejectedToken is the last token a 401 rejected, until
+	// the next ResetToken; see rejectToken.
+	tokenMu       sync.Mutex
+	cachedToken   string
+	tokenExpiry   time.Time
+	tokenFetch    *tokenFetch
+	rejectedToken string
 }
 
 const cmdTimeout = 60 * time.Second

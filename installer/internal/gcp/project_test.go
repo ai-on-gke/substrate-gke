@@ -279,7 +279,7 @@ func TestFailedTokenFetchIsSharedByItsWaiters(t *testing.T) {
 	}
 }
 
-// tokenMu is never held while gcloud runs, so ResetToken and invalidateToken
+// tokenMu is never held while gcloud runs, so ResetToken and rejectToken
 // return at once even while a fetch is stuck (the UI calls ResetToken).
 func TestTokenLockIsNotHeldDuringAFetch(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
@@ -294,7 +294,7 @@ func TestTokenLockIsNotHeldDuringAFetch(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		c.ResetToken()
-		c.invalidateToken("tok")
+		c.rejectToken("tok")
 		close(done)
 	}()
 	select {
@@ -375,14 +375,19 @@ func TestCallAPIRefetchesTheTokenOn401(t *testing.T) {
 		t.Errorf("the refetched token should be cached, fetches = %d", fetches)
 	}
 
-	// A token that stays bad: one retry, then the 401 is the answer.
+	// A token gcloud keeps handing back unchanged: one refetch, which
+	// returns the same token, so no retry is sent and the 401 is the answer.
 	requests.Store(0)
-	bad := &Client{billingBase: srv.URL, token: func(context.Context) (string, error) { return "bad", nil }}
+	var badFetches atomic.Int32
+	bad := &Client{billingBase: srv.URL, token: func(context.Context) (string, error) {
+		badFetches.Add(1)
+		return "bad", nil
+	}}
 	if _, err := bad.BillingEnabled(context.Background(), "acme"); err == nil || !strings.Contains(err.Error(), "UNAUTHENTICATED") {
 		t.Errorf("a persistent 401 should be reported, got %v", err)
 	}
-	if n := requests.Load(); n != 2 {
-		t.Errorf("a persistent 401 made %d requests, want 2 (one retry)", n)
+	if n, f := requests.Load(), badFetches.Load(); n != 1 || f != 2 {
+		t.Errorf("an unchanged rejected token made %d requests and %d fetches, want 1 and 2", n, f)
 	}
 }
 
@@ -435,17 +440,61 @@ func TestWarmTokenIsSharedWithTheProbes(t *testing.T) {
 	dry.WarmToken(context.Background())
 }
 
-// invalidateToken only drops the token it was told about: a concurrent
-// caller's fresher token must survive another caller's stale 401.
-func TestInvalidateTokenKeepsAFresherToken(t *testing.T) {
+// rejectToken only drops the token it was told about: a concurrent caller's
+// fresher token must survive another caller's stale 401.
+func TestRejectTokenKeepsAFresherToken(t *testing.T) {
 	c := &Client{token: func(context.Context) (string, error) { return "fresh", nil }}
 	c.accessToken(context.Background())
-	c.invalidateToken("stale")
+	c.rejectToken("stale")
 	c.tokenMu.Lock()
 	got := c.cachedToken
 	c.tokenMu.Unlock()
 	if got != "fresh" {
 		t.Errorf("cachedToken = %q, want the fresher token kept", got)
+	}
+}
+
+// gcloud refreshes only what it thinks has expired, so a revoked token comes
+// back unchanged. Concurrent probes that all get a 401 with it must not each
+// refetch and retry: the action pays one refetch, and no retry is sent with
+// a token known to be rejected.
+func TestRevokedTokenCostsOneRefetchAndNoRetries(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, `{"error": {"status": "UNAUTHENTICATED", "message": "Request had invalid authentication credentials."}}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	c := &Client{billingBase: srv.URL, serviceUsageBase: srv.URL, crmBase: srv.URL,
+		token: func(context.Context) (string, error) {
+			fetches.Add(1)
+			time.Sleep(10 * time.Millisecond)
+			return "revoked", nil
+		}}
+
+	errs := make(chan error, 3)
+	go func() { _, err := c.BillingEnabled(context.Background(), "acme"); errs <- err }()
+	go func() { _, err := c.ServiceEnabled(context.Background(), "acme", GKEService); errs <- err }()
+	go func() { _, err := c.MissingPermissions(context.Background(), "acme"); errs <- err }()
+	for range 3 {
+		if err := <-errs; err == nil || !strings.Contains(err.Error(), "UNAUTHENTICATED") {
+			t.Errorf("each probe should report the 401, got %v", err)
+		}
+	}
+	if n := fetches.Load(); n != 2 {
+		t.Errorf("fetches = %d, want 2 (the first, and one refetch for all three 401s)", n)
+	}
+	if n := requests.Load(); n != 3 {
+		t.Errorf("requests = %d, want 3 (no retry with an unchanged rejected token)", n)
+	}
+
+	// The next user action forgets the rejection: it fetches afresh and,
+	// on the same 401, gets its own one refetch.
+	c.ResetToken()
+	c.BillingEnabled(context.Background(), "acme")
+	if n := fetches.Load(); n != 4 {
+		t.Errorf("after ResetToken: fetches = %d, want 4", n)
 	}
 }
 
