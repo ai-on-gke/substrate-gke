@@ -326,31 +326,39 @@ func TestParseClustersReadsPoolVersions(t *testing.T) {
 // versions that decide whether a late enablement leaves nodes unable to mount
 // — and GKE lets pools trail their control plane. Reading the control plane
 // instead tells a 1.37 cluster with 1.36 pools that nothing is needed, and its
-// first Substrate pod on an old node hangs on "unimplemented".
-func TestPoolsWithoutProjectionReadsThePoolsNotTheControlPlane(t *testing.T) {
+// first Substrate pod on an old node hangs on "unimplemented". And when the
+// beta APIs are already on, the verdict is unsure rather than absent: the
+// listing cannot say whether the nodes predate them.
+func TestPoolReplacementReadsThePoolsNotTheControlPlane(t *testing.T) {
+	old := []PoolVersion{{"old", "1.36.4-gke.1"}, {"new", "1.37.1-gke.1"}}
 	for _, tc := range []struct {
-		name      string
-		c         Cluster
-		wantPools []string
-		wantAny   bool
+		name string
+		c    Cluster
+		want PoolReplacement
 	}{
 		{"1.37 control plane, 1.36 pool",
-			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"old", "1.36.4-gke.1"}, {"new", "1.37.1-gke.1"}}},
-			[]string{"old"}, true},
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: old},
+			PoolReplacement{Needed: true, Names: []string{"old"}}},
+		{"the same, with the beta APIs already on",
+			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: old, BetaAPIs: RequiredBetaAPIs},
+			PoolReplacement{Needed: true, Names: []string{"old"}, Unsure: true}},
 		{"every pool on 1.37",
 			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"a", "1.37.1-gke.1"}}},
-			nil, false},
+			PoolReplacement{}},
 		{"unreadable pool version counts as needing it",
 			Cluster{MasterVersion: "1.37.1-gke.1", PoolVersions: []PoolVersion{{"odd", ""}}},
-			[]string{"odd"}, true},
+			PoolReplacement{Needed: true, Names: []string{"odd"}}},
+		{"unreadable control plane over 1.37 pools needs no pool replaced",
+			Cluster{MasterVersion: "???", PoolVersions: []PoolVersion{{"a", "1.37.1-gke.1"}}},
+			PoolReplacement{}},
 		{"no pools listed falls back to the control plane",
-			Cluster{MasterVersion: "1.36.4-gke.1"}, nil, true},
+			Cluster{MasterVersion: "1.36.4-gke.1"}, PoolReplacement{Needed: true}},
 		{"no pools listed on 1.37",
-			Cluster{MasterVersion: "1.37.1-gke.1"}, nil, false},
+			Cluster{MasterVersion: "1.37.1-gke.1"}, PoolReplacement{}},
 	} {
-		pools, any := tc.c.PoolsWithoutProjection()
-		if !slices.Equal(pools, tc.wantPools) || any != tc.wantAny {
-			t.Errorf("%s: got %v, %v; want %v, %v", tc.name, pools, any, tc.wantPools, tc.wantAny)
+		got := tc.c.PoolReplacement()
+		if got.Needed != tc.want.Needed || got.Unsure != tc.want.Unsure || !slices.Equal(got.Names, tc.want.Names) {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
 }

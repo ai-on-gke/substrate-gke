@@ -514,11 +514,12 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st.ClusterIsNew = false
 	st.ClusterKVMReady = c.KVMReady
 	st.EnableBetaAPIs = c.MissingBetaAPIs()
-	st.NodePoolsToReplace, st.ReplaceUnnamedPools = nil, false
-	if st.EnableBetaAPIs {
-		pools, any := c.PoolsWithoutProjection()
-		st.NodePoolsToReplace, st.ReplaceUnnamedPools = pools, any && len(pools) == 0
-	}
+	st.BetaAPIsOptional = c.ServesPodCertificatesAsGA()
+	// Recorded for a ready cluster too, not only one that is about to get
+	// the APIs: a ready cluster with old pools is most often a re-run after
+	// an earlier one turned the APIs on, and its pools still need replacing
+	// if the user has not done it yet. ReplacePools.Unsure says so.
+	st.ReplacePools = c.PoolReplacement()
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -692,7 +693,8 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				st.ClusterIsNew = true
 				st.ClusterKVMReady = false
 				st.EnableBetaAPIs = false
-				st.NodePoolsToReplace, st.ReplaceUnnamedPools = nil, false
+				st.BetaAPIsOptional = false
+				st.ReplacePools = gcp.PoolReplacement{}
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
@@ -975,15 +977,21 @@ func (s *clusterScreen) View(w int) string {
 			paras = []string{
 				"[y] has provision turn them on in place, a control-plane update of about ten minutes.",
 			}
-			// Some pool is below 1.37 here, or the cluster would serve the
-			// APIs as GA and be ready: decide only whether they can be named.
-			switch pools, _ := sel.PoolsWithoutProjection(); {
-			case len(pools) > 0:
+			// Usually some pool is below 1.37 here, or the cluster would serve
+			// the APIs as GA and be ready. The exception is a control plane
+			// whose version could not be read over pools that are all fine:
+			// not ready, since the control plane might not serve v1, but
+			// there is no pool to replace and none is recorded, so the panel
+			// must not promise provision will list any.
+			switch r := sel.PoolReplacement(); {
+			case len(r.Names) > 0:
 				phrase := "1 node pool runs"
-				if len(pools) > 1 {
-					phrase = fmt.Sprintf("%d node pools run", len(pools))
+				if len(r.Names) > 1 {
+					phrase = fmt.Sprintf("%d node pools run", len(r.Names))
 				}
 				paras = append(paras, fmt.Sprintf("%s below %s and must be replaced before Substrate starts; provision shows how.", phrase, gcp.PodCertificateGARelease))
+			case !r.Needed:
+				paras = append(paras, "Its node pools all run "+gcp.PodCertificateGARelease.String()+" or newer and need nothing; only the control plane's version ("+sel.MasterVersion+") could not be read.")
 			default:
 				paras = append(paras, "Its nodes run below "+gcp.PodCertificateGARelease.String()+", so its node pools must be replaced before Substrate starts; provision shows how.")
 			}
@@ -997,7 +1005,7 @@ func (s *clusterScreen) View(w int) string {
 		// Wrapped to the content width rather than broken by hand: at 80
 		// columns the hand-broken lines ran past the edge and were cut.
 		b.WriteString("\n" + theme.Subtle.Width(max(w-2, 20)).Render(
-			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer. Below "+gcp.PodCertificateGARelease.String()+" it also needs the beta PodCertificate APIs, "+
+			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer. Below "+gcp.PodCertificateGARelease.String()+", in the control plane or any node pool, it also needs the beta PodCertificate APIs, "+
 				"which GKE serves only for clusters that opted in; provision turns them on for a cluster without them, "+
 				"and its pools below "+gcp.PodCertificateGARelease.String()+" must then be replaced. New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
 	}

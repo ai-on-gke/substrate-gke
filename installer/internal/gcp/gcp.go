@@ -136,11 +136,30 @@ type Cluster struct {
 // PoolVersion is one node pool's name and the version its kubelets run.
 type PoolVersion struct{ Name, Version string }
 
-// PoolsWithoutProjection returns the node pools whose kubelets will not serve
-// pod certificate projection to a pod scheduled on them after the beta APIs
-// are turned on in place, which is to say every pool below
-// PodCertificateGARelease: the feature is gated through 1.36 and a kubelet
-// that was already running never picks it up.
+// PoolReplacement is which of a cluster's node pools may not serve pod
+// certificate projection, and so may have to be replaced before Substrate is
+// turned on. One value, so the verdict and its two qualifications travel
+// together and every consumer reads the same thing.
+type PoolReplacement struct {
+	// Needed reports whether any pool is below PodCertificateGARelease (or,
+	// with no pools listed, whether the control plane is).
+	Needed bool
+	// Names are those pools, when gcloud listed pools by version; empty
+	// when Needed rests on the control plane's version alone.
+	Names []string
+	// Unsure reports that the beta APIs are already on, so whether these
+	// pools' nodes predate them — and so cannot mount — is not something the
+	// listing can tell. The usual way here is a re-run after an earlier one
+	// turned the APIs on and the user left to replace the pools: dropping the
+	// advice then would hang Substrate's pods on the nodes they never
+	// replaced.
+	Unsure bool
+}
+
+// PoolReplacement reports which node pools' kubelets may not serve pod
+// certificate projection: every pool below PodCertificateGARelease, where the
+// feature is gated through 1.36 and a kubelet already running when the beta
+// APIs were turned on never picks it up.
 //
 // It reads the pools' versions, not the control plane's, because the kubelet
 // is what implements the projection and GKE lets node pools run a minor or
@@ -149,16 +168,21 @@ type PoolVersion struct{ Name, Version string }
 // PodCertificateGA: a spurious "replace this pool" costs minutes, a missing
 // one costs an install that hangs on a mount. With no pools listed it falls
 // back to the control plane's version and names no pools.
-func (c Cluster) PoolsWithoutProjection() (pools []string, any bool) {
+func (c Cluster) PoolReplacement() PoolReplacement {
+	var r PoolReplacement
 	if len(c.PoolVersions) == 0 {
-		return nil, !c.PodCertificateGA()
+		r.Needed = !c.PodCertificateGA()
 	}
 	for _, p := range c.PoolVersions {
 		if !(Cluster{MasterVersion: p.Version}).PodCertificateGA() {
-			pools = append(pools, p.Name)
+			r.Names = append(r.Names, p.Name)
 		}
 	}
-	return pools, len(pools) > 0
+	if len(r.Names) > 0 {
+		r.Needed = true
+	}
+	r.Unsure = r.Needed && !c.MissingBetaAPIs()
+	return r
 }
 
 // SupportedRelease reports whether this cluster's release is one Substrate is
@@ -220,8 +244,7 @@ func (c Cluster) MissingBetaAPIs() bool {
 // gate. The pools are read rather than assumed because GKE lets them trail the
 // control plane.
 func (c Cluster) ServesPodCertificatesAsGA() bool {
-	_, stale := c.PoolsWithoutProjection()
-	return c.PodCertificateGA() && !stale
+	return c.PodCertificateGA() && !c.PoolReplacement().Needed
 }
 
 // SubstrateReady reports whether the cluster can run Substrate: a supported

@@ -1237,32 +1237,97 @@ func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 // The panels a cluster without the beta APIs leads to have to be readable in
 // a small terminal, beside the sidebar. At 80×24 the first version was clamped
 // after its first lines, hiding every remedy and the commands, and wrapped API
-// names mid-word. The confirmation's last line and the replacement block's
-// last command line are what get cut first, so those are what is checked,
-// and a split pool name is checked for directly.
+// names mid-word; then the replacement block lost its last command line once a
+// cluster had a third pool. The confirmation's bottom border and the block's
+// last command line are what get cut first, so those are what is checked, for
+// one to eight pools and both the certain and the advisory wording, and a
+// split pool name is checked for directly.
+//
+// One walk per size, not one per check: a walk costs ~6 s, and the screens
+// under test are reachable from one another with a few keys.
 func TestConfirmAndReplacementPanelsFitSmallTerminals(t *testing.T) {
+	pools := []string{"default-pool", "gpu-pool", "highmem-pool", "batch-workers", "spot-pool", "ingress-nodes", "kvm-pool-2", "system-pool"}
 	for _, size := range [][2]int{{80, 24}, {100, 30}, {120, 40}} {
+		app := testApp(t)
+		press := pressToCluster(t, app)
+		pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 		for _, row := range []string{"2", "3"} { // the two confirmations
-			app := testApp(t)
-			press := pressToCluster(t, app)
-			pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 			press(row, "enter")
 			if view := app.View(); !strings.Contains(view, "╰") {
 				t.Errorf("%dx%d, row %s: the confirmation is clamped before its end:\n%s", size[0], size[1], row, view)
 			}
+			press("n") // back to the list
 		}
 
-		app := testApp(t)
-		press := pressToCluster(t, app)
-		pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 		press("3", "enter", "y") // ml-staging, through provision
-		view := app.View()
-		if strings.Count(view, "--location 'us-central1'") < 2 {
-			t.Errorf("%dx%d: the replacement commands are clamped:\n%s", size[0], size[1], view)
+		st := app.deps.Setup
+		for n := 1; n <= len(pools); n++ {
+			for _, unsure := range []bool{false, true} {
+				st.ReplacePools = gcp.PoolReplacement{Needed: true, Names: pools[:n], Unsure: unsure}
+				view := app.View()
+				if strings.Count(view, "--location 'us-central1'") < 2 {
+					t.Errorf("%dx%d, %d pools, unsure=%v: the commands are clamped:\n%s", size[0], size[1], n, unsure, view)
+				}
+				for _, p := range pools[:n] {
+					if !strings.Contains(view, p) {
+						t.Errorf("%dx%d, %d pools: %q is split or missing:\n%s", size[0], size[1], n, p, view)
+					}
+				}
+			}
 		}
-		if !strings.Contains(view, "• default-pool") || !strings.Contains(view, "• gpu-pool") {
-			t.Errorf("%dx%d: a pool name is split or missing:\n%s", size[0], size[1], view)
-		}
+	}
+}
+
+// The advisory wording is what keeps a re-run from losing the replacement:
+// after an earlier run turned the APIs on, ml-staging badges ready and goes
+// straight through, and nothing else would tell the user its old pools still
+// need replacing before Substrate's pods land on them.
+func TestARerunStillTellsTheUserToCheckOldPools(t *testing.T) {
+	s, drive, _ := drivenClusterScreen(t)
+	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
+		Name: "ml-staging", Location: "us-central1", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000", NodeCount: 6,
+		BetaAPIs:     gcp.RequiredBetaAPIs, // turned on by the earlier run
+		PoolVersions: []gcp.PoolVersion{{Name: "default-pool", Version: "1.36.4-gke.1247000"}},
+	}}})
+	s.cursor = 0
+	drive(key("enter"))
+	r := s.deps.Setup.ReplacePools
+	if s.deps.Setup.ClusterName != "ml-staging" || !r.Needed || !r.Unsure || !slices.Equal(r.Names, []string{"default-pool"}) {
+		t.Fatalf("re-run: cluster=%q pools=%+v, want ml-staging chosen with default-pool to check", s.deps.Setup.ClusterName, r)
+	}
+}
+
+// A cluster on 1.37 throughout badges ready and goes straight to provision,
+// where bootstrap turns the beta APIs on anyway. Announcing that as if the
+// cluster needed it, with nothing on the cluster screen to prepare the user,
+// reads as the installer contradicting itself.
+func TestProvisionSaysWhenTheBetaAPIsAreNotNeeded(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("4", "enter") // substrate-ga: 1.37 throughout, no beta APIs
+	if view := flat(app.cur.View(120)); !strings.Contains(view, "needs no beta APIs, but bootstrap turns them on for every cluster") {
+		t.Errorf("provision should say the update is not needed for this cluster:\n%s", view)
+	}
+}
+
+// An unreadable control-plane version over pools that are all on 1.37 is not
+// ready — the control plane might not serve v1 — but there is no pool to
+// replace, and none is recorded. The confirmation must not promise that
+// provision will list some.
+func TestAnUnreadableControlPlaneOverGoodPoolsPromisesNoReplacement(t *testing.T) {
+	s, drive, _ := drivenClusterScreen(t)
+	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
+		Name: "odd", Location: "us-west1-c", Status: "RUNNING", MasterVersion: "???", NodeCount: 2,
+		PoolVersions: []gcp.PoolVersion{{Name: "a", Version: "1.37.1-gke.1000000"}},
+	}}})
+	s.cursor = 0
+	drive(key("enter"))
+	if s.mode != "confirm" {
+		t.Fatalf("mode = %q, want the confirmation", s.mode)
+	}
+	view := flat(s.View(120))
+	if strings.Contains(view, "must be replaced") || !strings.Contains(view, "need nothing") {
+		t.Errorf("the confirmation should say the pools are fine:\n%s", view)
 	}
 }
 
@@ -1397,19 +1462,31 @@ func TestProvisionSaysWhenItTurnsOnTheBetaAPIs(t *testing.T) {
 	if app.mach.Current() != state.Provision || !app.deps.Setup.EnableBetaAPIs {
 		t.Fatalf("step=%v EnableBetaAPIs=%v, want Provision/true", app.mach.Current(), app.deps.Setup.EnableBetaAPIs)
 	}
+	// substrate-ga needs no beta APIs, so its header is the "done anyway"
+	// one (TestProvisionSaysWhenTheBetaAPIsAreNotNeeded); the checklist
+	// still names the update, because bootstrap still makes it.
 	view := flat(app.cur.View(120))
-	if !strings.Contains(view, "Turning on the beta PodCertificate APIs for substrate-ga") ||
-		!strings.Contains(view, "Turn on the beta PodCertificate APIs (control-plane update)") {
-		t.Errorf("provision should say it is turning the APIs on, in its header and its checklist:\n%s", view)
+	if !strings.Contains(view, "Turn on the beta PodCertificate APIs (control-plane update)") {
+		t.Errorf("provision's checklist should name the beta-API update:\n%s", view)
 	}
-	if strings.Contains(view, "only fills in the bucket") || strings.Contains(view, "Replace these pools") {
+	if strings.Contains(view, "only fills in the bucket") || strings.Contains(view, "pools before Substrate starts") {
 		t.Errorf("provision on 1.37 pools: wrong header or a replacement nobody needs:\n%s", view)
+	}
+
+	// A cluster that does need them gets the header that says so. Rendered
+	// directly: driven through provision, a cluster with old pools ends on
+	// the replacement block, which takes the header's place.
+	needs := &Deps{Setup: state.NewSetup(), Runner: execx.DryRun{Delay: time.Millisecond},
+		GCP: &gcp.Client{DryRun: true}, Builder: snapshot.NewBuilder(t.TempDir(), false)}
+	needs.Setup.ClusterName, needs.Setup.EnableBetaAPIs = "ml-staging", true
+	if view := flat(newProvisionScreen(needs).View(120)); !strings.Contains(view, "Turning on the beta PodCertificate APIs for ml-staging") {
+		t.Errorf("provision should say it is turning the APIs on for a cluster that needs them:\n%s", view)
 	}
 
 	old := testApp(t)
 	press = pressToCluster(t, old)
 	press("3", "enter", "y") // ml-staging: 1.36 pools
-	if got := strings.Join(old.deps.Setup.NodePoolsToReplace, ","); got != "default-pool,gpu-pool" {
+	if got := strings.Join(old.deps.Setup.ReplacePools.Names, ","); got != "default-pool,gpu-pool" {
 		t.Errorf("pools to replace = %q, want default-pool,gpu-pool", got)
 	}
 	if view := flat(old.View()); !strings.Contains(view, "Replace these pools before Substrate starts") ||
@@ -1420,9 +1497,9 @@ func TestProvisionSaysWhenItTurnsOnTheBetaAPIs(t *testing.T) {
 	ready := testApp(t)
 	press = pressToCluster(t, ready)
 	press("1", "enter") // substrate-poc: ready
-	if ready.mach.Current() != state.Provision || ready.deps.Setup.EnableBetaAPIs || len(ready.deps.Setup.NodePoolsToReplace) > 0 {
-		t.Errorf("a ready cluster: step=%v EnableBetaAPIs=%v pools=%v, want Provision/false/none",
-			ready.mach.Current(), ready.deps.Setup.EnableBetaAPIs, ready.deps.Setup.NodePoolsToReplace)
+	if ready.mach.Current() != state.Provision || ready.deps.Setup.EnableBetaAPIs {
+		t.Errorf("a ready cluster: step=%v EnableBetaAPIs=%v, want Provision/false",
+			ready.mach.Current(), ready.deps.Setup.EnableBetaAPIs)
 	}
 }
 
@@ -1562,7 +1639,7 @@ func TestA137ControlPlaneWithOldPoolsStillNeedsTheRepair(t *testing.T) {
 		t.Errorf("the confirmation should name one old pool:\n%s", view)
 	}
 	drive(key("y"))
-	if got := strings.Join(s.deps.Setup.NodePoolsToReplace, ","); got != "old-pool" {
+	if got := strings.Join(s.deps.Setup.ReplacePools.Names, ","); got != "old-pool" {
 		t.Errorf("pools to replace = %q, want old-pool", got)
 	}
 }
@@ -1583,9 +1660,12 @@ func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
 		t.Fatalf("mode = %q, want the below-the-floor confirmation", s.mode)
 	}
 	drive(key("y"))
-	if st := s.deps.Setup; st.ClusterName != "old-with-apis" || st.EnableBetaAPIs || len(st.NodePoolsToReplace) > 0 || st.ReplaceUnnamedPools {
-		t.Errorf("chose %q with EnableBetaAPIs=%v pools=%v unnamed=%v, want nothing to enable or replace",
-			st.ClusterName, st.EnableBetaAPIs, st.NodePoolsToReplace, st.ReplaceUnnamedPools)
+	// Nothing to enable. The pools are still worth checking, but only as
+	// advice: the APIs were on already, so whether its nodes predate them is
+	// not something the listing can say.
+	if st := s.deps.Setup; st.ClusterName != "old-with-apis" || st.EnableBetaAPIs || (st.ReplacePools.Needed && !st.ReplacePools.Unsure) {
+		t.Errorf("chose %q with EnableBetaAPIs=%v pools=%+v, want nothing to enable and any pool advice unsure",
+			st.ClusterName, st.EnableBetaAPIs, st.ReplacePools)
 	}
 }
 

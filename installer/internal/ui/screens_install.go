@@ -53,7 +53,7 @@ func (s *provisionScreen) logComp() *execComp { return s.comp }
 
 func (s *provisionScreen) Hints() []Hint {
 	switch {
-	case s.comp.ok() && (len(s.deps.Setup.NodePoolsToReplace) > 0 || s.deps.Setup.ReplaceUnnamedPools):
+	case s.comp.ok() && s.deps.Setup.ReplacePools.Needed && !s.deps.Setup.ReplacePools.Unsure:
 		return []Hint{{"enter", "pools replaced, turn on Substrate"}}
 	case s.comp.ok():
 		return []Hint{{"enter", "continue"}}
@@ -91,7 +91,7 @@ func (s *provisionScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Provision GCP resources") + "\n")
-	if s.comp.ok() && (len(st.NodePoolsToReplace) > 0 || st.ReplaceUnnamedPools) {
+	if s.comp.ok() && st.ReplacePools.Needed {
 		// In place of the header and the log rather than under them: the
 		// checklist and its tail fill the window, and the clamp would cut
 		// exactly this. The log is still one [v] away.
@@ -106,6 +106,12 @@ func (s *provisionScreen) View(w int) string {
 	case st.ClusterIsNew:
 		b.WriteString(sub.Render(fmt.Sprintf(
 			"Creating cluster %s in %s — expect 8–12 minutes. All steps are idempotent.", st.ClusterName, st.Zone)) + "\n\n")
+	case st.EnableBetaAPIs && st.BetaAPIsOptional:
+		// The cluster badged ready and went straight here, so nothing has
+		// prepared the user for an update: say it is not needed, and why it
+		// happens anyway.
+		b.WriteString(sub.Render(fmt.Sprintf(
+			"%s serves the PodCertificate APIs as v1 and needs no beta APIs, but bootstrap turns them on for every cluster: about ten minutes, and it may make other control-plane updates of the same length. Then the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
 	case st.EnableBetaAPIs:
 		// The cluster screen has just told the user this update is coming,
 		// and it is rarely the only one. Bootstrap reconciles Workload
@@ -138,22 +144,36 @@ func (s *provisionScreen) View(w int) string {
 // The installer does not do it itself because moving the cluster's
 // workloads between pools is the user's call to make.
 //
-// Plain text rather than a bordered panel, one pool name per line, and
-// commands broken at flags: it has to fit beside the sidebar at 80×24, about
-// 45 columns by 17 rows, without the wrapper splitting a name or a flag.
+// Plain text rather than a bordered panel, the pool names wrapped together,
+// and commands broken at flags: it has to fit beside the sidebar at 80×24,
+// about 45 columns by 17 rows, however many pools there are, and without the
+// wrapper splitting a name or a flag. A name per line cost a row per pool and
+// pushed the commands off the bottom from the third pool on.
+//
+// When the beta APIs were already on (ReplacePools.Unsure), the listing
+// cannot say whether these nodes predate them, so the advice is conditional
+// rather than dropped: the usual case is a re-run by a user who left to
+// replace the pools and has not yet.
 func (s *provisionScreen) replacePoolsView(w int) string {
 	st := s.deps.Setup
+	width := max(w-2, 20)
 	cluster, location := snapshot.ShellQuote(st.ClusterName), snapshot.ShellQuote(st.Zone)
+	title, why := "Replace these pools before Substrate starts:",
+		"Their nodes predate the beta APIs and cannot mount pod certificates. For each, add a pool of the same machine type and size, then delete the old one:"
+	if st.ReplacePools.Unsure {
+		title, why = "Check these pools before Substrate starts:",
+			"The beta APIs were on before this run, so the installer cannot tell if these nodes predate them. Any that do cannot mount pod certificates; replace such a pool:"
+	}
+	names := st.ReplacePools.Names
+	if len(names) == 0 {
+		names = []string{"every pool below " + gcp.PodCertificateGARelease.String()}
+	}
 	var b strings.Builder
-	b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("Replace these pools before Substrate starts:") + "\n")
-	if len(st.NodePoolsToReplace) == 0 {
-		b.WriteString("  • every pool below " + gcp.PodCertificateGARelease.String() + "\n")
+	b.WriteString(theme.Warning.Width(width).Render(title) + "\n")
+	for _, line := range wrapNames(names, width-2) {
+		b.WriteString("  " + line + "\n")
 	}
-	for _, p := range st.NodePoolsToReplace {
-		b.WriteString("  • " + p + "\n")
-	}
-	b.WriteString("\n" + lipgloss.NewStyle().Width(max(w-2, 20)).Render(
-		"Their nodes predate the beta APIs, so Substrate's pods cannot mount pod certificates on them. For each, add a pool of the same machine type and size, then delete the old one:") + "\n\n")
+	b.WriteString("\n" + lipgloss.NewStyle().Width(width).Render(why) + "\n\n")
 	b.WriteString(theme.Fainted.Render(
 		"gcloud container node-pools create \\\n" +
 			"  NEW --cluster " + cluster + " \\\n" +
@@ -163,6 +183,33 @@ func (s *provisionScreen) replacePoolsView(w int) string {
 			"  OLD --cluster " + cluster + " \\\n" +
 			"  --location " + location))
 	return b.String()
+}
+
+// wrapNames joins names with ", " into lines no wider than width, breaking
+// only between names. A name wider than width gets a line of its own rather
+// than being split, which would make it look like two pools.
+func wrapNames(names []string, width int) []string {
+	var lines []string
+	line := ""
+	for i, n := range names {
+		item := n
+		if i < len(names)-1 {
+			item += ","
+		}
+		switch {
+		case line == "":
+			line = item
+		case lipgloss.Width(line)+1+lipgloss.Width(item) <= width:
+			line += " " + item
+		default:
+			lines = append(lines, line)
+			line = item
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // ─── Turn on Substrate (control plane) ─────────────────────────────────────
