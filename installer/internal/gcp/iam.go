@@ -139,6 +139,12 @@ func (c *Client) callAPI(ctx context.Context, method, url string, body []byte) (
 // send makes one HTTP request with token and returns the status and up to
 // maxAPIResponse+1 bytes of the body.
 func (c *Client) send(ctx context.Context, method, url string, body []byte, token string) (int, []byte, error) {
+	if !c.begin() {
+		return 0, nil, errClosed
+	}
+	defer c.end()
+	ctx, stop := c.bound(ctx)
+	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 	var reqBody io.Reader
@@ -235,17 +241,23 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 }
 
 // runTokenFetch runs f, caches its token on success and wakes its waiters.
-// It runs detached from any one caller's context, since several share it.
+// It runs under the Client's lifetime rather than any one caller's
+// context, since several share it; Close cancels it.
 func (c *Client) runTokenFetch(f *tokenFetch) {
-	fetch := c.token
-	if fetch == nil {
-		fetch = func(ctx context.Context) (string, error) {
-			out, err := c.run(ctx, "auth", "application-default", "print-access-token")
-			return string(out), err
+	var token string
+	err := errClosed
+	if c.begin() {
+		fetch := c.token
+		if fetch == nil {
+			fetch = func(ctx context.Context) (string, error) {
+				out, err := c.run(ctx, "auth", "application-default", "print-access-token")
+				return string(out), err
+			}
 		}
+		token, err = fetch(c.base())
+		token = strings.TrimSpace(token)
+		c.end()
 	}
-	token, err := fetch(context.Background())
-	token = strings.TrimSpace(token)
 
 	c.tokenMu.Lock()
 	if c.tokenFetch == f {

@@ -134,7 +134,12 @@ func main() {
 	}
 
 	app := ui.NewApp(deps)
-	if _, err := tea.NewProgram(app, tea.WithAltScreen()).Run(); err != nil {
+	_, err = tea.NewProgram(app, tea.WithAltScreen()).Run()
+	// Kill any gcloud the TUI left running (a token fetch, a probe) rather
+	// than leave it orphaned; before the error check, since os.Exit skips
+	// deferred calls.
+	deps.GCP.Close()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

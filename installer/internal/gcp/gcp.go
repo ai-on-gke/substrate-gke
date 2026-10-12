@@ -19,6 +19,7 @@ package gcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -348,11 +349,87 @@ type Client struct {
 	tokenFetch    *tokenFetch
 	rejectedToken string
 	tokenGen      uint64
+
+	// The Client's lifetime: base is cancelled by Close, and every gcloud
+	// run and REST request derives from it, so quitting kills gcloud
+	// children rather than leaving them orphaned. lifeMu guards closed
+	// and orders inflight.Add before Close's Wait.
+	baseOnce   sync.Once
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+	lifeMu     sync.Mutex
+	closed     bool
+	inflight   sync.WaitGroup
 }
 
 const cmdTimeout = 60 * time.Second
 
+// closeWait bounds how long Close waits for cancelled work to exit: a
+// killed gcloud is gone in milliseconds, but Close runs on the way out and
+// must never hang the exit.
+const closeWait = 2 * time.Second
+
+// errClosed is what work started after Close returns.
+var errClosed = errors.New("gcp client closed")
+
+// base is the Client's lifetime context, created on first use so the zero
+// Client (as tests build it) works.
+func (c *Client) base() context.Context {
+	c.baseOnce.Do(func() {
+		c.baseCtx, c.baseCancel = context.WithCancel(context.Background())
+	})
+	return c.baseCtx
+}
+
+// begin registers one piece of work against the Client's lifetime and
+// reports false once the Client is closed. Every true must be paired with
+// a call to end.
+func (c *Client) begin() bool {
+	c.lifeMu.Lock()
+	defer c.lifeMu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.inflight.Add(1)
+	return true
+}
+
+func (c *Client) end() { c.inflight.Done() }
+
+// bound derives ctx so it also ends when the Client is closed. The returned
+// stop must be called once the work is done.
+func (c *Client) bound(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.base(), cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// Close cancels every gcloud run, token fetch and REST request still in
+// flight and waits (up to closeWait) for them to exit, so none outlives the
+// installer. Work started afterwards fails with errClosed. Call it once the
+// TUI has quit; it is safe to call more than once.
+func (c *Client) Close() {
+	c.lifeMu.Lock()
+	c.closed = true
+	c.lifeMu.Unlock()
+	c.base()
+	c.baseCancel()
+
+	done := make(chan struct{})
+	go func() { c.inflight.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(closeWait):
+	}
+}
+
 func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
+	if !c.begin() {
+		return nil, errClosed
+	}
+	defer c.end()
+	ctx, stop := c.bound(ctx)
+	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gcloud", args...)
