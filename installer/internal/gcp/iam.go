@@ -176,9 +176,11 @@ const maxAPIResponse = 1 << 20
 const tokenTTL = 5 * time.Minute
 
 // tokenFetch is one `print-access-token` run, shared by every caller that
-// wants a token while it is under way.
+// wants a token while it is under way. gen is the ResetToken generation it
+// started in.
 type tokenFetch struct {
 	done  chan struct{} // closed once token and err are set
+	gen   uint64
 	token string
 	err   error
 }
@@ -193,30 +195,42 @@ type tokenFetch struct {
 // not cached for later callers; the next user action (ResetToken) or call
 // tries again. Each caller stops waiting when its own ctx ends; the fetch
 // itself runs on under cmdTimeout and still serves the rest.
+//
+// A caller may join a fetch begun before the latest ResetToken, i.e. by an
+// earlier action (see ResetToken). It adopts that fetch's success, but not
+// its failure: the failure may be exactly what the user just fixed with
+// `gcloud auth application-default login`, so the caller fetches once more
+// for its own action. Callers from the earlier action still share the error.
 func (c *Client) accessToken(ctx context.Context) (string, error) {
-	c.tokenMu.Lock()
-	if c.cachedToken != "" && time.Now().Before(c.tokenExpiry) {
-		token := c.cachedToken
+	for adoptedFailure := false; ; adoptedFailure = true {
+		c.tokenMu.Lock()
+		if c.cachedToken != "" && time.Now().Before(c.tokenExpiry) {
+			token := c.cachedToken
+			c.tokenMu.Unlock()
+			return token, nil
+		}
+		gen := c.tokenGen
+		f := c.tokenFetch
+		joined := f != nil
+		if f == nil {
+			f = &tokenFetch{done: make(chan struct{}), gen: gen}
+			c.tokenFetch = f
+			go c.runTokenFetch(f)
+		}
 		c.tokenMu.Unlock()
-		return token, nil
-	}
-	f := c.tokenFetch
-	joined := f != nil
-	if f == nil {
-		f = &tokenFetch{done: make(chan struct{})}
-		c.tokenFetch = f
-		go c.runTokenFetch(f)
-	}
-	c.tokenMu.Unlock()
-	if joined && c.onTokenWait != nil {
-		c.onTokenWait()
-	}
+		if joined && c.onTokenWait != nil {
+			c.onTokenWait()
+		}
 
-	select {
-	case <-f.done:
+		select {
+		case <-f.done:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		if f.err != nil && f.gen < gen && !adoptedFailure {
+			continue
+		}
 		return f.token, f.err
-	case <-ctx.Done():
-		return "", ctx.Err()
 	}
 }
 
@@ -254,13 +268,16 @@ func (c *Client) runTokenFetch(f *tokenFetch) {
 // It never waits: tokenMu is not held while gcloud runs. A fetch already
 // under way is adopted, not abandoned. It can only be the previous action's
 // warm-up, still running because that action ended early (e.g. a malformed
-// project ID fails `projects describe` in a second), so its token is as
-// fresh as a new fetch's and joining it saves a spawn.
+// project ID fails `projects describe` in a second). Its success is as
+// fresh as a new fetch's, and joining it saves a spawn. Its failure is not
+// adopted: this action's callers fetch once more (see accessToken), since
+// the user may have just fixed what made it fail.
 func (c *Client) ResetToken() {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	c.cachedToken = ""
 	c.rejectedToken = ""
+	c.tokenGen++
 }
 
 // WarmToken fetches the access token into the cache ahead of the REST calls

@@ -346,6 +346,63 @@ func TestResetTokenAdoptsAFetchInFlight(t *testing.T) {
 	}
 }
 
+// #57: a fetch begun by an earlier action and adopted after ResetToken
+// shares its success, but not its failure. The failure may be what the user
+// just fixed with `gcloud auth application-default login`, so this action's
+// caller fetches once more and gets the fix. A caller from the earlier
+// action still gets the error it was waiting for.
+func TestAdoptedFetchFailureIsRetriedAfterReset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"billingEnabled": true}`))
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	joined := make(chan struct{}, 2)
+	c := &Client{billingBase: srv.URL,
+		token: func(context.Context) (string, error) {
+			if fetches.Add(1) == 1 {
+				close(started)
+				<-release
+				return "", errors.New("Reauthentication failed. cannot prompt during non-interactive execution.")
+			}
+			return "after-login", nil
+		},
+		onTokenWait: func() { joined <- struct{}{} },
+	}
+
+	// Action 1: its warm-up starts the fetch, and one of its probes joins.
+	go c.WarmToken(context.Background())
+	<-started
+	oldErr := make(chan error, 1)
+	go func() { _, err := c.accessToken(context.Background()); oldErr <- err }()
+	<-joined
+
+	// The user re-logs in, and action 2 starts while action 1's fetch is
+	// still running; its probe joins that fetch.
+	c.ResetToken()
+	newRes := make(chan error, 1)
+	go func() {
+		on, err := c.BillingEnabled(context.Background(), "acme")
+		if err == nil && !on {
+			err = errors.New("billing read as off")
+		}
+		newRes <- err
+	}()
+	<-joined
+	close(release) // the adopted fetch fails
+
+	if err := <-oldErr; err == nil || !strings.Contains(err.Error(), "Reauthentication failed") {
+		t.Errorf("action 1's caller should share its fetch's error, got %v", err)
+	}
+	if err := <-newRes; err != nil {
+		t.Errorf("action 2 should refetch past the adopted failure and succeed, got %v", err)
+	}
+	if n := fetches.Load(); n != 2 {
+		t.Errorf("fetches = %d, want 2 (the adopted one and action 2's own)", n)
+	}
+}
+
 // A 401 means the cached token is no good (gcloud can hand back its own
 // token near expiry): the call drops it, fetches a fresh one and retries
 // once. A second 401 is reported, not retried forever.

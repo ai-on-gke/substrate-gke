@@ -339,11 +339,15 @@ type Client struct {
 	// tokenFetch is the fetch under way, if any; it is never run with
 	// tokenMu held. rejectedToken is the last token a 401 rejected, until
 	// the next ResetToken; see rejectToken.
+	// tokenGen counts ResetToken calls; a fetch records the generation it
+	// started in, so a caller from a later action can tell it adopted an
+	// older action's fetch (see accessToken).
 	tokenMu       sync.Mutex
 	cachedToken   string
 	tokenExpiry   time.Time
 	tokenFetch    *tokenFetch
 	rejectedToken string
+	tokenGen      uint64
 }
 
 const cmdTimeout = 60 * time.Second
