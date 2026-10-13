@@ -22,7 +22,7 @@ run:
 # wizard answers; the installer's exit summary prints this exact invocation.
 teardown:
 	./tools/cleanup-gcp --project "$(PROJECT_ID)" --cluster "$(CLUSTER_NAME)" --location "$(CLUSTER_LOCATION)" --bucket "$(BUCKET_NAME)" \
-		$(if $(GCE_REGION),--region "$(GCE_REGION)") $(if $(ARTIFACT_REGISTRY_REPOSITORY),--repository "$(ARTIFACT_REGISTRY_REPOSITORY)") \
+		$(if $(and $(filter command line,$(origin ARTIFACT_REGISTRY_REPOSITORY)),$(ARTIFACT_REGISTRY_REPOSITORY)),--repository "$(ARTIFACT_REGISTRY_REPOSITORY)") \
 		$(if $(filter true,$(DELETE_REPOSITORY)),--delete-repository) \
 		$(if $(filter true,$(KEEP_REPOSITORY)),--keep-repository)
 

@@ -132,3 +132,38 @@ func TestCleanupGcpRejectsInvalidOptionsBeforeCloudCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestMakeTeardownIgnoresRegistryEnvironment(t *testing.T) {
+	for _, tc := range []struct{ name, repository string }{
+		{"default repository", ""},
+		{"explicit repository", "build-images"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"-n", "-C", "..", "teardown", "PROJECT_ID=acme", "CLUSTER_NAME=cluster", "CLUSTER_LOCATION=us-west1-c", "BUCKET_NAME=snapshots", "DELETE_REPOSITORY=true"}
+			if tc.repository != "" {
+				args = append(args, "ARTIFACT_REGISTRY_REPOSITORY="+tc.repository)
+			}
+			cmd := exec.CommandContext(t.Context(), "make", args...)
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"GCE_REGION=europe-west4",
+				"ARTIFACT_REGISTRY_REPOSITORY=unrelated-images",
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("make teardown: %v\n%s", err, out)
+			}
+			command := string(out)
+			if strings.Contains(command, "--region") || strings.Contains(command, "unrelated-images") {
+				t.Fatalf("cleanup inherited a registry target from the environment:\n%s", command)
+			}
+			if tc.repository == "" {
+				if strings.Contains(command, "--repository") {
+					t.Fatalf("cleanup should use the default repository:\n%s", command)
+				}
+			} else if !strings.Contains(command, `--repository "`+tc.repository+`"`) {
+				t.Fatalf("cleanup lost the explicit repository:\n%s", command)
+			}
+		})
+	}
+}
