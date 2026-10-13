@@ -22,6 +22,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 )
 
 // Step identifies one screen of the wizard.
@@ -200,6 +202,24 @@ const (
 	SandboxMicroVM = "microvm"
 )
 
+// DefaultClusterVersion and DefaultReleaseChannel are what a new cluster is
+// created with: 1.37 on the Rapid channel.
+//
+// 1.37 serves the PodCertificate APIs as v1, which Substrate uses from
+// v0.4.0, and its kubelets serve pod certificate projection without the beta
+// gate, so a cluster made this way needs no repair of any kind. Rapid is the
+// only channel that carries 1.37 today. Both are a choice, not a requirement:
+// the advanced track can pick Regular and 1.36, the newest Regular carries.
+//
+// They go together. Leaving the channel unset puts a cluster on GKE's default
+// channel, Regular, which rejects 1.37; leaving the version unset gets that
+// channel's default version, which for Regular is below
+// gcp.MinSupportedRelease.
+const (
+	DefaultClusterVersion = "1.37"
+	DefaultReleaseChannel = "rapid"
+)
+
 // Setup accumulates everything the user chose plus values resolved from GCP.
 type Setup struct {
 	Track string
@@ -240,6 +260,34 @@ type Setup struct {
 	ClusterIsNew    bool
 	ClusterKVMReady bool
 
+	// EnableBetaAPIs records that the chosen existing cluster lacks the beta
+	// PodCertificate APIs, so provision is about to turn them on: a
+	// control-plane update of roughly ten minutes rather than the quick
+	// top-up an existing cluster normally gets. The provision screen words
+	// itself from this, having just told the user to expect it.
+	EnableBetaAPIs bool
+
+	// BetaAPIsOptional records that the chosen cluster serves the
+	// PodCertificate APIs as GA throughout, so it needs no beta APIs — yet
+	// bootstrap turns them on anyway, on every cluster. Provision says that
+	// rather than announcing an update the cluster screen gave no hint of.
+	BetaAPIsOptional bool
+
+	// ReplacePools is which of the chosen cluster's node pools may not mount
+	// pod certificates (see gcp.Cluster.PoolReplacement). They have to be
+	// replaced before Substrate is turned on, not after: its own control
+	// plane mounts pod certificates, so step 6 would hang on them. Provision
+	// lists them, with the commands, when it finishes.
+	ReplacePools gcp.PoolReplacement
+
+	// ClusterVersion and ReleaseChannel shape a cluster the install creates
+	// and are ignored for one it connects to: bootstrap reads them only on the
+	// creation path. A bare minor is fine for the version — GKE resolves it to
+	// the newest patch the channel serves, so there is no patch number here to
+	// go stale.
+	ClusterVersion string
+	ReleaseChannel string
+
 	BucketName   string
 	KoDockerRepo string
 
@@ -264,16 +312,18 @@ type Setup struct {
 // NewSetup returns a Setup with the same defaults the upstream docs use.
 func NewSetup() *Setup {
 	return &Setup{
-		Track:        TrackQuickstart,
-		Zone:         "us-west1-c",
-		Network:      "default",
-		Subnetwork:   "default",
-		MachineType:  "c3-standard-4",
-		ClusterName:  "substrate-test",
-		NodePool:     "substrate-node-pool",
-		SandboxClass: SandboxGVisor,
-		AutoscaleMin: 1,
-		AutoscaleMax: 5,
+		Track:          TrackQuickstart,
+		Zone:           "us-west1-c",
+		Network:        "default",
+		Subnetwork:     "default",
+		MachineType:    "c3-standard-4",
+		ClusterName:    "substrate-test",
+		ClusterVersion: DefaultClusterVersion,
+		ReleaseChannel: DefaultReleaseChannel,
+		NodePool:       "substrate-node-pool",
+		SandboxClass:   SandboxGVisor,
+		AutoscaleMin:   1,
+		AutoscaleMax:   5,
 	}
 }
 

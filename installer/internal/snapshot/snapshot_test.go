@@ -1009,6 +1009,26 @@ func TestFindSetupGCP(t *testing.T) {
 	}
 }
 
+// Bootstrap reads the target release and channel only from the environment.
+// Drop the version and a new cluster gets its channel's default, which on
+// Regular is below the floor the installer enforces; drop the channel and it
+// lands on Regular, which does not offer the default 1.37 at all.
+func TestBuilderEnvCarriesTheClusterVersionAndChannel(t *testing.T) {
+	st := testSetup(t)
+	spec := NewBuilder("/tmp/substrate-pin", true).Bootstrap(st)
+
+	// Both, always: without the channel a new cluster lands on Regular,
+	// which does not offer the default 1.37.
+	for _, want := range []string{"CLUSTER_VERSION=" + st.ClusterVersion, "RELEASE_CHANNEL=" + st.ReleaseChannel} {
+		if !slices.Contains(spec.Env, want) {
+			t.Errorf("Bootstrap env missing %q: %v", want, spec.Env)
+		}
+	}
+	if st.ReleaseChannel != state.DefaultReleaseChannel {
+		t.Errorf("test setup channel = %q, want the default %q", st.ReleaseChannel, state.DefaultReleaseChannel)
+	}
+}
+
 func TestDeploySpecs(t *testing.T) {
 	b := NewBuilder("/tmp/substrate-pin", true)
 	st := testSetup(t)
