@@ -1679,10 +1679,12 @@ func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
 // The version and channel have to go together, or GKE refuses the create:
 // a channel only offers the versions it carries, and today 1.37 is in Rapid
 // alone. The installer asks GKE which channel carries what (canned under
-// --dry-run) and stops on the project screen, pointing at a channel that
-// works, rather than letting provision fail. Extended can never work, since
-// it refuses the beta APIs setup-gcp turns on, so it is refused without
-// asking.
+// --dry-run) and says so on the project screen, pointing at a channel that
+// works. It is a warning, not a wall: submitting the same pair again goes on,
+// because the pair only matters if the next step creates a cluster, and GKE
+// rolls versions out per location. When no channel offers the version, the
+// cursor goes to the version, the field to change. Extended can never work,
+// since it refuses the beta APIs setup-gcp turns on, so it is refused outright.
 func TestTheChannelHasToOfferTheVersion(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -1699,23 +1701,26 @@ func TestTheChannelHasToOfferTheVersion(t *testing.T) {
 			pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 		}
 	}
+	scr := func() *projectScreen { return app.cur.(*projectScreen) }
 	press("2", "enter")                                         // welcome: advanced track
 	press("enter")                                              // doctor
 	press("1", "enter")                                         // images: pre-built
 	press("enter", "enter", "enter")                            // images fields
 	press("enter", "enter", "enter", "enter", "enter", "enter") // to the version field
-	press("enter")                                              // keep 1.37; to the channel field
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("regular")
-	press("enter")
-	if app.mach.Current() != state.Project {
-		t.Fatalf("1.37 on regular was accepted: step=%v", app.mach.Current())
+	typed("1.99")
+	press("enter", "enter") // past the channel field, then submit
+	if app.mach.Current() != state.Project || !strings.Contains(flat(app.View()), "no channel that offers version 1.99") {
+		t.Fatalf("1.99 should be flagged: step=%v\n%s", app.mach.Current(), app.View())
 	}
-	if view := flat(app.View()); !strings.Contains(view, "regular channel does not offer version 1.37") || !strings.Contains(view, "rapid does") {
-		t.Errorf("the refusal should say regular lacks 1.37 and rapid has it:\n%s", view)
+	if _, at := scr().fieldValue(clusterVersionLabel); scr().focus != at {
+		t.Errorf("no channel offers the version, so the cursor belongs on the version field; focus=%d want %d", scr().focus, at)
 	}
 
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("1.37")
+	press("enter") // to the channel field
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("extended")
 	press("enter")
@@ -1724,10 +1729,18 @@ func TestTheChannelHasToOfferTheVersion(t *testing.T) {
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("rapid")
+	typed("regular")
 	press("enter")
-	if app.mach.Current() != state.Cluster || app.deps.Setup.ReleaseChannel != "rapid" {
-		t.Errorf("1.37 on rapid: step=%v channel=%q, want Cluster/rapid", app.mach.Current(), app.deps.Setup.ReleaseChannel)
+	if app.mach.Current() != state.Project {
+		t.Fatalf("1.37 on regular went through without a word: step=%v", app.mach.Current())
+	}
+	if view := flat(app.View()); !strings.Contains(view, "regular channel does not offer version 1.37") || !strings.Contains(view, "rapid does") {
+		t.Errorf("the warning should say regular lacks 1.37 and rapid has it:\n%s", view)
+	}
+
+	press("enter") // the same pair again: continue anyway
+	if app.mach.Current() != state.Cluster || app.deps.Setup.ReleaseChannel != "regular" {
+		t.Errorf("a second submit should go on: step=%v channel=%q, want Cluster/regular", app.mach.Current(), app.deps.Setup.ReleaseChannel)
 	}
 }
 

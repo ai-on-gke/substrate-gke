@@ -58,8 +58,11 @@ type projValidMsg struct {
 	// image with docker; see dockerProblem.
 	docker []failedCheck
 	// channel is why GKE would refuse the new-cluster version on the chosen
-	// channel, or ""; see channelProblem.
-	channel string
+	// channel, or ""; see channelProblem. versionWrong says the version is
+	// the field to fix, and channelPair is the pair that was checked.
+	channel      string
+	versionWrong bool
+	channelPair  string
 }
 
 // failedCheck is a doctor check that did not pass, with what it found.
@@ -81,6 +84,12 @@ type projectScreen struct {
 	// enter proceeds anyway: the probe is advisory (a role might be granted
 	// minutes from now), but failing here beats failing mid-bootstrap.
 	permAcked bool
+	// channelAcked is the version/channel pair whose channel problem has
+	// been shown, so the next enter with the same pair proceeds. Advisory
+	// for the same reasons, and one more: the pair only matters if the next
+	// screen creates a cluster, and GKE rolls versions out per location, so
+	// a user connecting an existing cluster must not be stopped by it.
+	channelAcked string
 }
 
 func newField(label, value, placeholder string, set func(*state.Setup, string)) field {
@@ -195,17 +204,19 @@ func releaseChannelProblem(v string) string {
 // location, and says so if it does not. Asked rather than worked out, because
 // it changes every few weeks: 1.37 is in Rapid alone today and will reach
 // Regular in a couple of months. If GKE cannot be asked, nothing is reported;
-// the create itself will fail fast with GKE's own message.
-func channelProblem(gc *gcp.Client, project, location, version, channel string) string {
+// the create itself will fail fast with GKE's own message. versionWrong
+// reports that no channel offers the version, so the version is the field
+// to change rather than the channel.
+func channelProblem(gc *gcp.Client, project, location, version, channel string) (problem string, versionWrong bool) {
 	if version == "" || channel == "" || version == "latest" {
-		return ""
+		return "", false
 	}
 	carried, err := gc.ChannelVersions(context.Background(), project, location)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	if gcp.ChannelCarries(carried[channel], version) {
-		return ""
+		return "", false
 	}
 	var with []string
 	for _, ch := range []string{"rapid", "regular", "stable"} {
@@ -214,9 +225,9 @@ func channelProblem(gc *gcp.Client, project, location, version, channel string) 
 		}
 	}
 	if len(with) == 0 {
-		return fmt.Sprintf("GKE has no channel that offers version %s in %s.", version, location)
+		return fmt.Sprintf("GKE has no channel that offers version %s in %s.", version, location), true
 	}
-	return fmt.Sprintf("The %s channel does not offer version %s in %s; %s does.", channel, version, location, strings.Join(with, " and "))
+	return fmt.Sprintf("The %s channel does not offer version %s in %s; %s does.", channel, version, location, strings.Join(with, " and ")), false
 }
 
 // fieldValue returns the trimmed value of the field labeled label, or "" when
@@ -284,11 +295,14 @@ func (s *projectScreen) submit() tea.Cmd {
 	if channel == "" {
 		channel = state.DefaultReleaseChannel
 	}
+	channel = strings.ToLower(channel)
+	pair := version + "/" + channel
+	checkChannel := versionAt >= 0 && s.channelAcked != pair
 	return func() tea.Msg {
-		msg := projValidMsg{owner: s}
+		msg := projValidMsg{owner: s, channelPair: pair}
 		msg.number, msg.err = s.deps.GCP.ProjectNumber(context.Background(), pid)
-		if msg.err == nil && versionAt >= 0 {
-			msg.channel = channelProblem(s.deps.GCP, pid, zone, version, strings.ToLower(channel))
+		if msg.err == nil && checkChannel {
+			msg.channel, msg.versionWrong = channelProblem(s.deps.GCP, pid, zone, version, channel)
 		}
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
@@ -390,8 +404,13 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if m.channel != "" {
-			s.errText = m.channel
-			_, at := s.fieldValue(releaseChannelLabel)
+			s.channelAcked = m.channelPair
+			s.errText = m.channel + " That only matters if the next step creates a cluster; submit again to continue anyway."
+			label := releaseChannelLabel
+			if m.versionWrong {
+				label = clusterVersionLabel
+			}
+			_, at := s.fieldValue(label)
 			return s.setFocus(at)
 		}
 		if len(m.missing) > 0 || m.permErr != nil {
