@@ -273,14 +273,13 @@ func (s *projectScreen) submit() tea.Cmd {
 		// instead of paying a second cold gcloud spawn after it.
 		go s.deps.GCP.WarmToken(context.Background())
 		msg.number, msg.err = projectNumber(ctx, pid)
-		if msg.err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			msg.err = fmt.Errorf("timed out after %v looking up project %s: %w", submitTimeout, pid, msg.err)
-		}
+		msg.err = deadlineHit(ctx, msg.err, "looking up project "+pid)
 		// The cluster step lists clusters next, and that fails outright on
 		// a project without billing or without the GKE API. Catch both
 		// here, where the fix is still one command away.
 		if msg.err == nil {
 			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(ctx, s.deps.GCP, pid)
+			msg.probeErr = deadlineHit(ctx, msg.probeErr, "")
 		}
 		// No billing or no API blocks the step, and Update then shows
 		// that alone, so the checks below would be paid for and thrown
@@ -290,6 +289,7 @@ func (s *projectScreen) submit() tea.Cmd {
 		// screens later, mid-provision. Skipped once acknowledged.
 		if !blocked && !acked {
 			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(ctx, pid, repositoryPermissions...)
+			msg.permErr = deadlineHit(ctx, msg.permErr, "")
 		}
 		if !blocked && registry != "" {
 			for _, c := range doctor.DockerChecks(registry) {
@@ -300,6 +300,22 @@ func (s *projectScreen) submit() tea.Cmd {
 		}
 		return msg
 	}
+}
+
+// deadlineHit says so when err came from the submit's own deadline, so a
+// check cut off by submitTimeout reads as that rather than as an API fault
+// ("…: context deadline exceeded"). doing names the step when the panel
+// showing err does not already (the project lookup's raw error has no
+// context of its own); "" leaves just the time. Any other err is returned
+// unchanged.
+func deadlineHit(ctx context.Context, err error, doing string) error {
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	if doing == "" {
+		return fmt.Errorf("timed out after %v: %w", submitTimeout, err)
+	}
+	return fmt.Errorf("timed out after %v %s: %w", submitTimeout, doing, err)
 }
 
 // abandonValidation stops waiting for a submit's checks (esc): they are

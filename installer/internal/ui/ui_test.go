@@ -905,6 +905,29 @@ func TestProjectScreenHintsDuringChecks(t *testing.T) {
 // wait its own timeout in turn while every key is swallowed. esc stops
 // waiting at once (a second esc goes back), v / ? reach the app meanwhile,
 // and the abandoned submit's late result must not advance the wizard.
+// A check cut off by the submit's own deadline says so, whichever check it
+// was: the project lookup names its step, and the probe and IAM errors,
+// whose panels already name theirs, just gain the time. An error from a
+// live context, or no error, is passed through unchanged.
+func TestDeadlineHitWordsSubmitTimeouts(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	probe := errors.New(`reading billing info for acme: Get "https://cloudbilling.googleapis.com/…": context deadline exceeded`)
+
+	if got := deadlineHit(expired, probe, ""); !strings.HasPrefix(got.Error(), "timed out after 30s: reading billing info") || !errors.Is(got, probe) {
+		t.Errorf("probe error at the deadline = %q, want it prefixed with the submit timeout and still wrapping the original", got)
+	}
+	if got := deadlineHit(expired, probe, "looking up project acme"); !strings.HasPrefix(got.Error(), "timed out after 30s looking up project acme: ") {
+		t.Errorf("lookup error at the deadline = %q, want it to name the step", got)
+	}
+	if got := deadlineHit(context.Background(), probe, ""); got != probe {
+		t.Errorf("an error from a live context should pass through unchanged, got %q", got)
+	}
+	if got := deadlineHit(expired, nil, ""); got != nil {
+		t.Errorf("no error should stay no error, got %v", got)
+	}
+}
+
 func TestProjectScreenSubmitIsBoundedAndCancellable(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
