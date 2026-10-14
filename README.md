@@ -33,7 +33,9 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Go | Version checked automatically — run `make substrate-pin-check` if unsure |
 | `git` | — |
 | `kubectl` | — |
+| `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin`, or the `google-cloud-cli-gke-gcloud-auth-plugin` package when gcloud came from apt or dnf |
 | Docker with buildx | Only to build Substrate 0.2 or later from source, which builds its envoy-dataplane image with `docker buildx`. Docker also needs credentials for your registry: `gcloud auth configure-docker <registry-host>` |
+| A GCP project with billing | Checked on the project step, which can also enable the GKE API for you |
 
 ```bash
 # One-line install and launch:
@@ -62,9 +64,9 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 
 | # | Step | What happens |
 |---|---|---|
-| 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, network reachability, `git`, and Docker with buildx and credential configuration — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
+| 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
-| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
+| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
@@ -260,7 +262,9 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud` and ignores any `.ate-dev-env.sh` in the working directory. Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line. It's safe to re-run after a partial failure.
+The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
+
+Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line.
 
 To remove **only** the Substrate control plane and keep the cluster:
 

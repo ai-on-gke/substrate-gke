@@ -88,7 +88,7 @@ func TestChecksIncludeTheFatalSet(t *testing.T) {
 	fatal := fatalKeys(t, true)
 	// git is fatal when the installer owns the fetch: the tree comes down
 	// with it, rather than being vendored.
-	for _, key := range []string{"gcloud", "adc", "go", "network", "git"} {
+	for _, key := range []string{"gcloud", "adc", "go", "network", "git", "gke-auth-plugin"} {
 		if !fatal[key] {
 			t.Errorf("check %q should be fatal", key)
 		}
@@ -100,6 +100,73 @@ func TestChecksIncludeTheFatalSet(t *testing.T) {
 	// Micro-VM is opt-in, so missing host tools for it must warn rather than block.
 	if fatal["microvm-tools"] {
 		t.Error(`check "microvm-tools" must not be fatal; gVisor installs do not use them`)
+	}
+}
+
+// writeExecutable writes an executable shell script at dir/name.
+func writeExecutable(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runCheck runs the check named key with only bin on PATH.
+func runCheck(t *testing.T, bin, key string) Result {
+	t.Helper()
+	t.Setenv("PATH", bin)
+	for _, c := range Checks(t.TempDir(), true) {
+		if c.Key == key {
+			return c.Run(context.Background())
+		}
+	}
+	t.Fatalf("no %q check found", key)
+	return Result{}
+}
+
+// Review report: the installer failed on a machine without
+// gke-gcloud-auth-plugin. get-credentials only warns when the plugin is
+// missing, so the first sign was a failed cluster probe and then a failed
+// deploy. The doctor must find the plugin where gcloud does, on PATH or in
+// the SDK's bin directory, and otherwise block with an install command that
+// works for how the SDK was installed.
+func TestGKEAuthPluginCheck(t *testing.T) {
+	t.Run("on PATH", func(t *testing.T) {
+		bin := t.TempDir()
+		writeExecutable(t, bin, "gke-gcloud-auth-plugin", "exit 0")
+		if got := runCheck(t, bin, "gke-auth-plugin"); got.Status != Pass {
+			t.Errorf("plugin on PATH: got %+v, want Pass", got)
+		}
+	})
+	t.Run("in the SDK bin directory only", func(t *testing.T) {
+		bin, sdk := t.TempDir(), t.TempDir()
+		writeExecutable(t, bin, "gcloud", "echo "+sdk)
+		writeExecutable(t, filepath.Join(sdk, "bin"), "gke-gcloud-auth-plugin", "exit 0")
+		got := runCheck(t, bin, "gke-auth-plugin")
+		if got.Status != Pass || !strings.Contains(got.Detail, sdk) {
+			t.Errorf("plugin in the SDK bin directory: got %+v, want Pass naming %s", got, sdk)
+		}
+	})
+	for _, tt := range []struct {
+		name, sdkRoot, wantFix string
+	}{
+		{"missing from a standalone SDK", "/home/you/google-cloud-sdk", "gcloud components install gke-gcloud-auth-plugin"},
+		{"missing from an apt or dnf SDK", "/usr/lib/google-cloud-sdk", "google-cloud-cli-gke-gcloud-auth-plugin"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeExecutable(t, bin, "gcloud", "echo "+tt.sdkRoot)
+			got := runCheck(t, bin, "gke-auth-plugin")
+			if got.Status != Fail {
+				t.Errorf("got %+v, want Fail", got)
+			}
+			if !strings.Contains(got.Fix, tt.wantFix) {
+				t.Errorf("fix %q does not contain %q", got.Fix, tt.wantFix)
+			}
+		})
 	}
 }
 
@@ -147,7 +214,7 @@ func TestGitIsOnlyFatalWhenTheInstallerFetches(t *testing.T) {
 		t.Error(`check "git" must not be fatal once the pinned tree is on disk`)
 	}
 	// The rest of the fatal set does not depend on who owns the checkout.
-	for _, key := range []string{"gcloud", "adc", "go", "network"} {
+	for _, key := range []string{"gcloud", "adc", "go", "network", "gke-auth-plugin"} {
 		if !fatalKeys(t, false)[key] {
 			t.Errorf("check %q should stay fatal regardless of --substrate-root", key)
 		}

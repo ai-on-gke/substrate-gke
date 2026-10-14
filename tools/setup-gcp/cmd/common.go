@@ -21,6 +21,15 @@ import (
 	"sync"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/api/option"
+)
+
+// clientOptions are passed to the gRPC clients (GKE, Resource Manager).
+// restClientOptions are passed to the JSON API clients (Cloud Storage, IAM).
+// Both are empty in production; tests point them at in-process fake servers.
+var (
+	clientOptions     []option.ClientOption
+	restClientOptions []option.ClientOption
 )
 
 type Config struct {

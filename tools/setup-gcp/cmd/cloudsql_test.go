@@ -126,17 +126,17 @@ func TestGetEnvInt64(t *testing.T) {
 	}
 }
 
-func TestAddProjectIamBindingCloudSQLRoles(t *testing.T) {
-	// The cloudsql roles reuse addProjectIamBinding; verify idempotency for
-	// the two roles this command grants.
+func TestAddBindingCloudSQLRoles(t *testing.T) {
+	// The cloudsql roles reuse addBinding; verify idempotency for the two
+	// roles this command grants.
 	policy := &iampb.Policy{}
 	member := "serviceAccount:ate-api-server@my-proj.iam.gserviceaccount.com"
 	for _, role := range []string{"roles/cloudsql.client", "roles/cloudsql.instanceUser"} {
-		if !addProjectIamBinding(policy, role, member) {
-			t.Errorf("addProjectIamBinding(%q) = false on first add, want true", role)
+		if !addBinding(&policy.Bindings, role, member) {
+			t.Errorf("addBinding(%q) = false on first add, want true", role)
 		}
-		if addProjectIamBinding(policy, role, member) {
-			t.Errorf("addProjectIamBinding(%q) = true on repeat add, want false", role)
+		if addBinding(&policy.Bindings, role, member) {
+			t.Errorf("addBinding(%q) = true on repeat add, want false", role)
 		}
 	}
 }

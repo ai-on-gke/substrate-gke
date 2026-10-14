@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -74,9 +75,28 @@ type Client struct {
 	// crmBase overrides the Cloud Resource Manager endpoint; tests point it
 	// at a local server. Empty means the real one.
 	crmBase string
-	// token overrides how MissingPermissions obtains an access token; nil
+	// billingBase and serviceUsageBase override the Cloud Billing and
+	// Service Usage endpoints the same way.
+	billingBase      string
+	serviceUsageBase string
+	// token overrides how the REST probes obtain an access token; nil
 	// means asking gcloud for the application-default one.
 	token func(ctx context.Context) (string, error)
+	// onTokenWait, when set, is called each time a caller joins a token
+	// fetch already under way. Tests use it to know every caller is
+	// queued before releasing the fetch, instead of sleeping.
+	onTokenWait func()
+
+	// tokenMu guards the access token accessToken caches, so one submit's
+	// REST probes, run concurrently, share a single gcloud spawn.
+	// tokenFetch is the fetch under way, if any; it is never run with
+	// tokenMu held. rejectedToken is the last token a 401 rejected, until
+	// the next ResetToken; see rejectToken.
+	tokenMu       sync.Mutex
+	cachedToken   string
+	tokenExpiry   time.Time
+	tokenFetch    *tokenFetch
+	rejectedToken string
 }
 
 const cmdTimeout = 60 * time.Second

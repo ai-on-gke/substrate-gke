@@ -37,21 +37,6 @@ var requiredBetaAPIs = []string{
 	"certificates.k8s.io/v1beta1/clustertrustbundles",
 }
 
-func deleteCluster(ctx context.Context, cfg *Config) error {
-	client, err := container.NewClusterManagerClient(ctx)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	name := fmt.Sprintf("projects/%s/locations/%s/clusters/%s", cfg.ProjectID, cfg.ClusterLocation, cfg.ClusterName)
-	slog.Info("Deleting cluster", slog.String("cluster", cfg.ClusterName))
-	op, err := client.DeleteCluster(ctx, &containerpb.DeleteClusterRequest{Name: name})
-	if err != nil {
-		return fmt.Errorf("delete cluster: %w", err)
-	}
-	return waitContainerOperation(ctx, client, op.Name, cfg)
-}
-
 func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateClusterRequest {
 	var networkConfig *containerpb.NetworkConfig
 	if cfg.EnableDataplaneV2 {
@@ -137,7 +122,7 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 	if err := validateBootDisk(cfg); err != nil {
 		return err
 	}
-	client, err := container.NewClusterManagerClient(ctx)
+	client, err := container.NewClusterManagerClient(ctx, clientOptions...)
 	if err != nil {
 		return err
 	}
@@ -158,34 +143,29 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 
 	slog.Info("Cluster exists. Checking attributes...", slog.String("cluster", cfg.ClusterName))
 
-	// Recreate cluster if network configuration mismatches.
+	// Network, subnetwork, and Dataplane V2 are fixed at cluster creation.
+	// Changing them means deleting the cluster and everything running on it,
+	// so an existing cluster is never recreated over a difference: the drift
+	// is reported and the cluster is used as it is. The installer passes
+	// NETWORK=default and SUBNETWORK=default for any cluster the user picks,
+	// so a difference here is normal for a cluster on a custom VPC.
 	expectedNetwork := fmt.Sprintf("projects/%s/global/networks/%s", cfg.ProjectID, cfg.Network)
 	if cluster.NetworkConfig != nil && cluster.NetworkConfig.Network != "" && !strings.HasSuffix(cluster.NetworkConfig.Network, expectedNetwork) {
-		slog.Info("Mismatch in network", slog.String("current", cluster.NetworkConfig.Network), slog.String("expected", expectedNetwork))
-		if err := deleteCluster(ctx, cfg); err != nil {
-			return err
-		}
-		return createClusterInternal(ctx, cfg, client, parent)
+		slog.Warn("Cluster is on a different network than configured; keeping the existing cluster",
+			slog.String("current", cluster.NetworkConfig.Network), slog.String("configured", expectedNetwork))
 	}
 
-	// Recreate cluster if subnet configuration mismatches.
 	expectedSubnetwork := fmt.Sprintf("projects/%s/regions/%s/subnetworks/%s", cfg.ProjectID, cfg.Region, cfg.Subnetwork)
 	if cluster.NetworkConfig != nil && cluster.NetworkConfig.Subnetwork != "" && !strings.HasSuffix(cluster.NetworkConfig.Subnetwork, expectedSubnetwork) {
-		slog.Info("Mismatch in subnetwork", slog.String("current", cluster.NetworkConfig.Subnetwork), slog.String("expected", expectedSubnetwork))
-		if err := deleteCluster(ctx, cfg); err != nil {
-			return err
-		}
-		return createClusterInternal(ctx, cfg, client, parent)
+		slog.Warn("Cluster is on a different subnetwork than configured; keeping the existing cluster",
+			slog.String("current", cluster.NetworkConfig.Subnetwork), slog.String("configured", expectedSubnetwork))
 	}
 
-	// Recreate cluster if dataplane v2 configuration mismatches.
 	currentIsV2 := cluster.NetworkConfig != nil && cluster.NetworkConfig.DatapathProvider == containerpb.DatapathProvider_ADVANCED_DATAPATH
 	if currentIsV2 != cfg.EnableDataplaneV2 {
-		slog.Info("Mismatch in Dataplane V2 configuration", slog.Bool("current", currentIsV2), slog.Bool("expected", cfg.EnableDataplaneV2))
-		if err := deleteCluster(ctx, cfg); err != nil {
-			return err
-		}
-		return createClusterInternal(ctx, cfg, client, parent)
+		slog.Warn("Cluster Dataplane V2 setting differs from the configured one; keeping the existing cluster",
+			slog.Bool("current", currentIsV2), slog.Bool("configured", cfg.EnableDataplaneV2),
+			slog.String("remedy", "Dataplane V2 can only be set at creation; recreate the cluster yourself if you need it"))
 	}
 
 	expectedWorkloadPool := fmt.Sprintf("%s.svc.id.goog", cfg.ProjectID)

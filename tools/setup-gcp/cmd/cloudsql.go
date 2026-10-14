@@ -263,7 +263,7 @@ func createCloudSQLDatabase(ctx context.Context, svc *sqladmin.Service, cfg *Con
 }
 
 func createCloudSQLGSA(ctx context.Context, cfg *Config) error {
-	svc, err := iam.NewService(ctx)
+	svc, err := iam.NewService(ctx, restClientOptions...)
 	if err != nil {
 		return fmt.Errorf("create iam client: %w", err)
 	}
@@ -290,13 +290,18 @@ func createCloudSQLGSA(ctx context.Context, cfg *Config) error {
 	// Classic Workload Identity: let the ate-api-server KSA mint tokens as
 	// this GSA, so the proxy sidecar's ADC resolves to the IAM database user.
 	member := workloadIdentityMember(cfg.ProjectID)
-	policy, err := svc.Projects.ServiceAccounts.GetIamPolicy(resource).Context(ctx).Do()
+	// Version 3, so conditional bindings come back intact and are written
+	// back unchanged (see conditionalPolicyVersion).
+	policy, err := svc.Projects.ServiceAccounts.GetIamPolicy(resource).
+		OptionsRequestedPolicyVersion(conditionalPolicyVersion).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("get service account iam policy: %w", err)
 	}
 	const wiRole = "roles/iam.workloadIdentityUser"
 	for _, b := range policy.Bindings {
-		if b.Role == wiRole {
+		// A conditional binding is not the grant, and the member must not
+		// be added under its condition (see addBinding).
+		if b.Condition == nil && b.Role == wiRole {
 			for _, m := range b.Members {
 				if m == member {
 					slog.Info("Workload Identity binding exists. Skipping.")
@@ -313,6 +318,7 @@ func createCloudSQLGSA(ctx context.Context, cfg *Config) error {
 
 func setGSAPolicy(ctx context.Context, svc *iam.Service, resource string, policy *iam.Policy) error {
 	slog.Info("Binding Workload Identity user to service account...")
+	policy.Version = conditionalPolicyVersion
 	_, err := svc.Projects.ServiceAccounts.SetIamPolicy(resource, &iam.SetIamPolicyRequest{Policy: policy}).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("set service account iam policy: %w", err)
@@ -324,14 +330,14 @@ func setGSAPolicy(ctx context.Context, svc *iam.Service, resource string, policy
 // connector tunnels (cloudsql.client) and to log in with IAM database
 // authentication (cloudsql.instanceUser).
 func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
-	client, err := resourcemanager.NewProjectsClient(ctx)
+	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	resource := fmt.Sprintf("projects/%s", cfg.ProjectID)
-	policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resource})
+	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest(resource))
 	if err != nil {
 		return fmt.Errorf("get project iam policy: %w", err)
 	}
@@ -341,13 +347,14 @@ func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
 	// granting to it too soon fails with "does not exist". Re-read the
 	// policy each attempt so etag conflicts also resolve.
 	for attempt := 1; ; attempt++ {
-		changed1 := addProjectIamBinding(policy, "roles/cloudsql.client", member)
-		changed2 := addProjectIamBinding(policy, "roles/cloudsql.instanceUser", member)
+		changed1 := addBinding(&policy.Bindings, "roles/cloudsql.client", member)
+		changed2 := addBinding(&policy.Bindings, "roles/cloudsql.instanceUser", member)
 		if !changed1 && !changed2 {
 			slog.Info("IAM policy already has required Cloud SQL permissions. Skipping update.")
 			return nil
 		}
 		slog.Info("Setting IAM policy (grant Cloud SQL permissions)...", slog.String("member", member))
+		policy.Version = conditionalPolicyVersion
 		_, err = client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{Resource: resource, Policy: policy})
 		if err == nil {
 			return nil
@@ -361,7 +368,7 @@ func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
 			return ctx.Err()
 		case <-time.After(10 * time.Second):
 		}
-		policy, err = client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resource})
+		policy, err = client.GetIamPolicy(ctx, projectPolicyRequest(resource))
 		if err != nil {
 			return fmt.Errorf("get project iam policy: %w", err)
 		}
