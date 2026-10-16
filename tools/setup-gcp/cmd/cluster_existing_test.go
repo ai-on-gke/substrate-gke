@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"maps"
 	"os"
 	"slices"
 	"testing"
@@ -65,6 +66,9 @@ func syncedCluster() *containerpb.Cluster {
 			Name: "substrate-node-pool",
 			Config: &containerpb.NodeConfig{
 				AdvancedMachineFeatures: &containerpb.AdvancedMachineFeatures{EnableNestedVirtualization: proto.Bool(true)},
+				LinuxNodeConfig: &containerpb.LinuxNodeConfig{
+					Sysctls: maps.Clone(requiredNodeSysctls),
+				},
 			},
 		}},
 	}
