@@ -124,8 +124,9 @@ type projectScreen struct {
 
 // submitTimeout bounds a submit's checks as a whole. A healthy run takes a
 // few seconds; with the network down each gcloud call would otherwise wait
-// its own cmdTimeout, one after the other.
-const submitTimeout = 30 * time.Second
+// its own cmdTimeout, one after the other. A var only so tests can shorten
+// it.
+var submitTimeout = 30 * time.Second
 
 // enableCheckTimeout bounds the billing check after a failed enable. The
 // enable often failed because the network is down, and the panel it
@@ -291,7 +292,11 @@ func (s *projectScreen) submit() tea.Cmd {
 			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(ctx, pid, repositoryPermissions...)
 			msg.permErr = deadlineHit(ctx, msg.permErr, "")
 		}
-		if !blocked && registry != "" {
+		// Not once the deadline has passed (or esc has cancelled): every
+		// docker check would fail at once on the dead context, and Update
+		// shows a docker failure ahead of probeErr/permErr, hiding the
+		// "timed out" that is the real story.
+		if !blocked && registry != "" && ctx.Err() == nil {
 			for _, c := range doctor.DockerChecks(registry) {
 				if res := c.Run(ctx); res.Status == doctor.Fail {
 					msg.docker = append(msg.docker, failedCheck{c.Name, res})
