@@ -284,13 +284,6 @@ validate_repository_config() {
 
 delete_repository() {
   local repository="projects/${PROJECT_ID}/locations/${GCE_REGION}/repositories/${ARTIFACT_REGISTRY_REPOSITORY}"
-  if ! gcloud artifacts repositories describe "${ARTIFACT_REGISTRY_REPOSITORY}" \
-    --project="${PROJECT_ID}" \
-    --location="${GCE_REGION}" \
-    --quiet >/dev/null; then
-    echo "Warning: unable to check Artifact Registry repository ${repository}; skipping repository cleanup." >&2
-    return
-  fi
   echo "Deleting Artifact Registry repository ${repository} and its images..."
   gcloud_step "delete Artifact Registry repository" \
     artifacts repositories delete "${ARTIFACT_REGISTRY_REPOSITORY}" \

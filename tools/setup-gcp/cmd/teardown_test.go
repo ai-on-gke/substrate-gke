@@ -26,17 +26,17 @@ import (
 const teardownGcloud = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${TEARDOWN_TEST_LOG}"
-if [[ "$1 $2" = "artifacts repositories" && "${TEARDOWN_TEST_FAILURE:-}" = "$3" ]]; then
-  echo "repository $3 denied" >&2
-  exit 1
-fi
 case "$1 $2 $3" in
-  "artifacts repositories describe")
+  "artifacts repositories delete")
+    if [ "${TEARDOWN_TEST_FAILURE:-}" = "delete" ]; then
+      echo "ERROR: (gcloud.artifacts.repositories.delete) PERMISSION_DENIED: repository delete denied" >&2
+      exit 1
+    fi
     if [ -z "${TEARDOWN_TEST_REPOSITORY:-}" ]; then
-      echo "repository not found" >&2
+      echo "ERROR: (gcloud.artifacts.repositories.delete) NOT_FOUND: repository not found" >&2
       exit 1
     fi ;;
-  "artifacts repositories delete"|"monitoring dashboards list"|"projects remove-iam-policy-binding "*|"storage buckets "*|"storage rm "*|"container clusters delete"|"container node-pools delete") ;;
+  "monitoring dashboards list"|"projects remove-iam-policy-binding "*|"storage buckets "*|"storage rm "*|"container clusters delete"|"container node-pools delete") ;;
   *) echo "unexpected gcloud call: $*" >&2; exit 1 ;;
 esac
 `
@@ -79,12 +79,10 @@ func runTeardown(t *testing.T, args, env []string, wantErr string) ([]string, st
 func TestTeardown(t *testing.T) {
 	const clusterCall = "container clusters delete test-cluster --location=us-central1-a --project=test-project --quiet"
 	repositoryCalls := []string{
-		"artifacts repositories describe ate-images --project=test-project --location=europe-west1 --quiet",
 		"artifacts repositories delete ate-images --project=test-project --location=europe-west1 --quiet",
 	}
 	customCalls := []string{
 		strings.ReplaceAll(repositoryCalls[0], "ate-images", "custom-images"),
-		strings.ReplaceAll(repositoryCalls[1], "ate-images", "custom-images"),
 	}
 	customEnv := []string{
 		"ARTIFACT_REGISTRY_REPOSITORY=custom-images",
@@ -94,7 +92,6 @@ func TestTeardown(t *testing.T) {
 	allEnv := slices.Concat(clusterEnv, customEnv, []string{"PROJECT_NUMBER=123456789", "BUCKET_NAME=test-bucket"})
 	allCalls := append([]string{clusterCall}, customCalls...)
 	keepEnv := append(slices.Clone(allEnv), "GCE_REGION=")
-	const lookupWarning = "repository describe denied\nWarning: unable to check Artifact Registry repository"
 
 	for _, tc := range []struct {
 		name                string
@@ -105,14 +102,11 @@ func TestTeardown(t *testing.T) {
 	}{
 		{"default repository", "--delete-repository", nil, repositoryCalls, "", ""},
 		{"custom repository", "--delete-repository", customEnv, customCalls, "", ""},
-		{"already deleted", "--delete-repository", []string{"TEARDOWN_TEST_REPOSITORY="}, repositoryCalls[:1], "", "repository not found\nWarning: unable to check Artifact Registry repository"},
-		{"lookup denied", "--delete-repository", []string{"TEARDOWN_TEST_FAILURE=describe"}, repositoryCalls[:1], "", lookupWarning},
+		{"already deleted", "--delete-repository", []string{"TEARDOWN_TEST_REPOSITORY="}, repositoryCalls, "", "(already deleted)"},
 		{"delete denied", "--delete-repository", []string{"TEARDOWN_TEST_FAILURE=delete"}, repositoryCalls, "repository delete denied", "FAILED: delete Artifact Registry repository"},
 		{"all", "--all --delete-repository", allEnv, allCalls, "", ""},
 		{"all with node pool", "--all", append(slices.Clone(allEnv), "NODE_POOL_NAME=test-pool"), []string{"container node-pools delete test-pool --cluster=test-cluster --location=us-central1-a --project=test-project --quiet", clusterCall}, "", ""},
 		{"keep repository by default", "--all", keepEnv, []string{clusterCall}, "", ""},
-		{"all lookup denied", "--all --delete-repository", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=describe"), allCalls[:2], "", lookupWarning},
-		{"lookup denied before all", "--delete-repository --all", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=describe"), []string{customCalls[0], clusterCall}, "", lookupWarning},
 		{"all delete denied", "--all --delete-repository", append(slices.Clone(allEnv), "TEARDOWN_TEST_FAILURE=delete"), allCalls, "repository delete denied", "FAILED: delete Artifact Registry repository"},
 		{"delete denied before cluster", "--delete-repository --delete-cluster", append(slices.Clone(clusterEnv), "TEARDOWN_TEST_FAILURE=delete"), append(slices.Clone(repositoryCalls), clusterCall), "repository delete denied", "FAILED: delete Artifact Registry repository"},
 		{"missing project", "--delete-repository", []string{"PROJECT_ID="}, nil, "PROJECT_ID is not set", ""},
