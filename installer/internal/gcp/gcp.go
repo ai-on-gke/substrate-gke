@@ -48,6 +48,29 @@ type Cluster struct {
 	// KVMReady reports whether any node pool in the cluster has /dev/kvm
 	// available (nested virtualization enabled or a bare-metal machine type).
 	KVMReady bool
+	// Network and Subnetwork are the cluster's networkConfig paths, as gcloud
+	// lists them ("projects/P/global/networks/N",
+	// "projects/P/regions/R/subnetworks/S"), and DataplaneV2 whether its
+	// datapath is ADVANCED_DATAPATH. Empty and false when gcloud listed no
+	// networkConfig. The installer hands them to bootstrap for an existing
+	// cluster (see state.Setup.BootstrapNetwork).
+	Network     string
+	Subnetwork  string
+	DataplaneV2 bool
+	// FilestoreCSIAddon reports whether GKE's managed Filestore CSI driver is
+	// enabled. Bootstrap turns it off on an existing cluster
+	// (agent-substrate/substrate#2357), so the installer warns before that
+	// happens to a cluster whose workloads may be using it.
+	FilestoreCSIAddon bool
+}
+
+// NetworkName and SubnetworkName are the last segments of the cluster's
+// network paths: the short names setup-gcp's NETWORK and SUBNETWORK take.
+func (c Cluster) NetworkName() string    { return lastSegment(c.Network) }
+func (c Cluster) SubnetworkName() string { return lastSegment(c.Subnetwork) }
+
+func lastSegment(path string) string {
+	return path[strings.LastIndex(path, "/")+1:]
 }
 
 // SubstrateReady reports whether the cluster serves the beta APIs Substrate
@@ -153,12 +176,15 @@ func (c *Client) ProjectNumber(ctx context.Context, projectID string) (string, e
 // ListClusters lists the project's GKE clusters with their beta-API status.
 func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster, error) {
 	if c.DryRun {
-		// The last two names are cues for CheckInstalled's dry-run sim, so a
-		// --dry-run walkthrough shows the install guard's whole story:
-		// clean, blocked-installed, and partial.
+		// substrate-installed and substrate-partial are cues for
+		// CheckInstalled's dry-run sim, so a --dry-run walkthrough shows the
+		// install guard's whole story: clean, blocked-installed, and partial.
+		// substrate-poc has the managed Filestore driver on, so its provision
+		// and Filestore steps show that warning.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
-				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
+				MasterVersion: "1.35.5-gke.1163012", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true,
+				FilestoreCSIAddon: true},
 			{Name: "legacy-prod", Location: "us-central1", Status: "RUNNING",
 				MasterVersion: "1.33.2-gke.100", NodeCount: 12},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",
@@ -243,7 +269,17 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 		EnableK8sBetaApis    struct {
 			EnabledApis []string `json:"enabledApis"`
 		} `json:"enableK8sBetaApis"`
-		NodePools []rawNodePool `json:"nodePools"`
+		NodePools     []rawNodePool `json:"nodePools"`
+		NetworkConfig struct {
+			Network          string `json:"network"`
+			Subnetwork       string `json:"subnetwork"`
+			DatapathProvider string `json:"datapathProvider"`
+		} `json:"networkConfig"`
+		AddonsConfig struct {
+			GcpFilestoreCsiDriverConfig struct {
+				Enabled bool `json:"enabled"`
+			} `json:"gcpFilestoreCsiDriverConfig"`
+		} `json:"addonsConfig"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing cluster list: %w", err)
@@ -258,6 +294,11 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			NodeCount:     r.CurrentNodeCount,
 			BetaAPIs:      r.EnableK8sBetaApis.EnabledApis,
 			KVMReady:      kvmReady(r.NodePools),
+			Network:       r.NetworkConfig.Network,
+			Subnetwork:    r.NetworkConfig.Subnetwork,
+			DataplaneV2:   r.NetworkConfig.DatapathProvider == "ADVANCED_DATAPATH",
+
+			FilestoreCSIAddon: r.AddonsConfig.GcpFilestoreCsiDriverConfig.Enabled,
 		})
 	}
 	return clusters, nil
