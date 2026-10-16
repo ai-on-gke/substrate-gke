@@ -537,6 +537,11 @@ func (b *Builder) env(st *state.Setup) []string {
 		"CREATE_ARTIFACT_REPOSITORY=" + fmt.Sprint(st.CreatesArtifactRepository()),
 		"CLUSTER_LOCATION=" + st.Zone,
 		"CLUSTER_NAME=" + st.ClusterName,
+		// Read only when bootstrap creates the cluster, so it is sent for every
+		// run and simply ignored by one that connects to an existing cluster —
+		// the alternative, omitting it conditionally, would make the
+		// environment differ between two runs that provision the same way.
+		"CLUSTER_VERSION=" + st.ClusterVersion,
 		"NETWORK=" + st.Network,
 		"SUBNETWORK=" + st.Subnetwork,
 		"NODE_MACHINE_TYPE=" + st.MachineType,
