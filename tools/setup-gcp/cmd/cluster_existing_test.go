@@ -19,6 +19,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"cloud.google.com/go/container/apiv1/containerpb"
@@ -140,5 +141,60 @@ func TestBootstrapNeverRecreatesAnExistingCluster(t *testing.T) {
 				t.Errorf("bootstrap recreated an existing cluster over a %s: calls %v", tt.name, calls)
 			}
 		})
+	}
+}
+
+// The boot disk is set only when the tool creates the cluster. Re-running
+// with the same --boot-disk-* settings changes nothing and does not warn;
+// re-running with different ones warns with the wanted values and a remedy,
+// and still changes nothing.
+func TestBootstrapLeavesAnExistingBootDiskAlone(t *testing.T) {
+	const bootDiskWarning = "no node pool with the requested boot disk"
+	f := newFakeGCP(t)
+	c := bootstrapConfig(t)
+	c.BootDiskSizeGB = 500
+	c.BootDiskType = ""
+	c.BootDiskProvisionedIOPS = 12000
+	c.BootDiskProvisionedThroughputMBps = 1200
+	logs := captureLogs(t)
+
+	if err := createClusterIdempotent(context.Background(), &c); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.calls(); !slices.Equal(calls, []string{"CreateCluster"}) {
+		t.Fatalf("first run made calls %v, want [CreateCluster]", calls)
+	}
+
+	logs.Reset()
+	if err := createClusterIdempotent(context.Background(), &c); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.calls(); len(calls) != 1 {
+		t.Errorf("re-run with the same boot disk made calls %v, want none", calls[1:])
+	}
+	if out := logs.String(); strings.Contains(out, bootDiskWarning) {
+		t.Errorf("re-run with the same boot disk warned:\n%s", out)
+	}
+
+	logs.Reset()
+	c.BootDiskProvisionedIOPS = 8000
+	if err := createClusterIdempotent(context.Background(), &c); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.calls(); len(calls) != 1 {
+		t.Errorf("re-run with a different boot disk made calls %v, want none", calls[1:])
+	}
+	out := logs.String()
+	for _, want := range []string{
+		bootDiskWarning,
+		"want_size_gb=500",
+		"want_type=hyperdisk-balanced",
+		"want_provisioned_iops=8000",
+		"want_provisioned_throughput_mibps=1200",
+		"gcloud container node-pools update",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("boot disk warning lacks %q:\n%s", want, out)
+		}
 	}
 }
