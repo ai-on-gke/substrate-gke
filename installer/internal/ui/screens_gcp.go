@@ -24,6 +24,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
@@ -1405,6 +1406,118 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// clusterRows lays out the cluster list in width columns, one layout for every
+// row so the columns line up. The full row is around 100 columns, wider than
+// the list gets beside the sidebar at most terminal sizes (about 47 at 80
+// columns), and a row too wide is cut at the edge — taking the badge, the part
+// the list is for, with it. So the list gives things up in order until every
+// row fits: the GKE build suffix on the version, then the long badges, then
+// node count, location and version, and only then characters off the end of
+// the names, which would make clusters that share a prefix look alike. The
+// badges always stay.
+func clusterRows(clusters []gcp.Cluster, badges, shorts []string, width int) []string {
+	type layout struct {
+		short                    bool
+		fullVersion              bool
+		location, version, nodes bool
+	}
+	layouts := []layout{
+		{false, true, true, true, true},
+		{false, false, true, true, true},
+		{true, false, true, true, true},
+		{true, false, true, true, false},
+		{true, false, false, true, false},
+		{true, false, false, false, false},
+	}
+	cells := func(c gcp.Cluster, l layout) []string {
+		var out []string
+		if l.location {
+			out = append(out, c.Location)
+		}
+		if l.version {
+			v := c.MasterVersion
+			if !l.fullVersion {
+				v, _, _ = strings.Cut(v, "-")
+			}
+			out = append(out, v)
+		}
+		if l.nodes {
+			nodes := fmt.Sprintf("%d nodes", c.NodeCount)
+			if c.NodeCount == 1 {
+				nodes = "1 node"
+			}
+			out = append(out, nodes)
+		}
+		return out
+	}
+	numWidth := len(fmt.Sprintf("[%d] ", len(clusters)+1))
+	nameWidth := 0
+	for _, c := range clusters {
+		nameWidth = max(nameWidth, lipgloss.Width(c.Name))
+	}
+	for li, l := range layouts {
+		// The widest each column gets across the list, so every row pads to
+		// the same stops.
+		var colWidths []int
+		badgeWidth := 0
+		for k, c := range clusters {
+			for ci, cell := range cells(c, l) {
+				if ci == len(colWidths) {
+					colWidths = append(colWidths, 0)
+				}
+				colWidths[ci] = max(colWidths[ci], lipgloss.Width(cell))
+			}
+			b := badges[k]
+			if l.short {
+				b = shorts[k]
+			}
+			badgeWidth = max(badgeWidth, lipgloss.Width(b))
+		}
+		fixed := numWidth + 2 + badgeWidth
+		for _, cw := range colWidths {
+			fixed += cw + 2
+		}
+		room := width - fixed
+		last := li == len(layouts)-1
+		if room < nameWidth && !last {
+			continue
+		}
+		nameCol := min(nameWidth, max(room, 4))
+		rows := make([]string, len(clusters))
+		for k, c := range clusters {
+			num := fmt.Sprintf("[%d] ", k+1)
+			row := num + strings.Repeat(" ", numWidth-len(num)) + padTo(truncateTo(c.Name, nameCol), nameCol)
+			for ci, cell := range cells(c, l) {
+				row += "  " + padTo(cell, colWidths[ci])
+			}
+			b := badges[k]
+			if l.short {
+				b = shorts[k]
+			}
+			rows[k] = row + "  " + b
+		}
+		return rows
+	}
+	return nil // not reached: the last layout always returns
+}
+
+// padTo pads s with spaces to n columns.
+func padTo(s string, n int) string {
+	if w := lipgloss.Width(s); w < n {
+		return s + strings.Repeat(" ", n-w)
+	}
+	return s
+}
+
+// truncateTo shortens s to at most n columns, marking the cut with "…".
+func truncateTo(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
 func (s *clusterScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
@@ -1420,38 +1533,50 @@ func (s *clusterScreen) View(w int) string {
 		return b.String()
 	}
 
+	badges := make([]string, len(s.clusters))
+	shorts := make([]string, len(s.clusters))
 	for i, c := range s.clusters {
 		// "substrate-ready" is capability (the beta PodCertificate APIs), not
 		// install state: what the probe learned about an actual install is its
 		// own badge, so a teardown visibly clears it while readiness rightly
 		// stays. Name the missing capability rather than only saying something
 		// is — the confirm panel then explains how to get it.
+		//
+		// Each badge has a short form too, for terminals too narrow for the
+		// long one (see clusterRows).
 		badge := theme.Good.Render(theme.GlyphDone + " substrate-ready")
+		short := theme.Good.Render(theme.GlyphDone + " ready")
 		switch {
 		case c.SubstrateReady():
 		case !c.SupportedRelease():
 			// Distinct from "missing" because the remedy differs: no
 			// enablement helps this one until the control plane moves.
 			badge = theme.Bad.Render(theme.GlyphFail + " needs " + gcp.MinSupportedRelease.String() + "+")
+			short = badge
 		default:
 			badge = theme.Bad.Render(theme.GlyphFail + " beta APIs missing")
+			short = theme.Bad.Render(theme.GlyphFail + " no beta APIs")
 		}
 		if res, ok := s.probed[c.Name+"/"+c.Location]; ok && res.Installed {
-			label := " · substrate installed"
+			label, shortLabel := " · substrate installed", " · installed"
 			if res.Partial() {
-				label = " · partial install"
+				label, shortLabel = " · partial install", " · partial"
 			}
 			badge += theme.Warning.Render(label)
+			short += theme.Warning.Render(shortLabel)
 		} else if s.bgPending[c.Name+"/"+c.Location] {
 			badge += theme.Fainted.Render(" · checking…")
+			short += theme.Fainted.Render(" · checking…")
 		}
+		badges[i], shorts[i] = badge, short
+	}
+	for i, row := range clusterRows(s.clusters, badges, shorts, w-2) {
 		// The confirmation needs every row the terminal has: at 80×24 the
 		// full list leaves it a handful, and the remedy was being clamped
 		// away. While it is open the list shrinks to the row it is about.
 		if s.mode == "confirm" && i != s.cursor {
 			continue
 		}
-		row := fmt.Sprintf("[%d] %-24s %-14s %-18s %2d nodes  %s", i+1, c.Name, c.Location, c.MasterVersion, c.NodeCount, badge)
 		if i == s.cursor {
 			b.WriteString(theme.Selected.Render(" "+row+" ") + "\n")
 		} else {

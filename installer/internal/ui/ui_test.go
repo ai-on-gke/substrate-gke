@@ -28,6 +28,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
@@ -1860,7 +1861,9 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	}
 	// Back in the list, the probe's verdict is visible on the row — distinct
 	// from the "substrate-ready" capability badge, which rightly stays.
-	if view := app.View(); !strings.Contains(view, "substrate installed") {
+	// "installed", not the long "substrate installed": the list shortens its
+	// badges when the long ones do not fit beside the sidebar.
+	if view := app.View(); !strings.Contains(view, "installed") {
 		t.Errorf("list row missing the installed badge:\n%s", view)
 	}
 	// Re-selecting the same cluster answers from the cache instead of paying
@@ -1889,7 +1892,7 @@ func TestListBackgroundProbesReadyClusters(t *testing.T) {
 	if calls != 4 {
 		t.Fatalf("background probes = %d, want 4 (only the substrate-ready clusters)", calls)
 	}
-	if view := app.View(); !strings.Contains(view, "substrate installed") {
+	if view := app.View(); !strings.Contains(view, "installed") {
 		t.Errorf("list row missing the background-probed badge:\n%s", view)
 	}
 }
@@ -1905,7 +1908,7 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	press := pressToCluster(t, app)
 
 	view := app.View()
-	for _, want := range []string{"substrate installed", "partial install"} {
+	for _, want := range []string{"installed", "partial"} { // short or long badge
 		if !strings.Contains(view, want) {
 			t.Errorf("dry-run list missing %q badge:\n%s", want, view)
 		}
@@ -2611,6 +2614,50 @@ func TestAChannelLookupThatTimesOutSaysSo(t *testing.T) {
 	stop()
 	if problem, _ := channelProblem(cancelled, &gcp.Client{}, "acme", "us-central1-a", "1.37", "rapid"); problem != "" {
 		t.Errorf("a cancelled lookup should stay silent, got %q", problem)
+	}
+}
+
+// The cluster list is read for its badges, and a row wider than the list is
+// cut at the edge, badge first — which at 80 columns, beside the sidebar,
+// was every row. So at every width a row has to fit and keep its badge, the
+// rows have to share one layout so their columns line up, and names stay
+// whole until nothing else is left to drop: clusters often share a prefix,
+// and truncated they look alike.
+func TestClusterRowsFitAndKeepTheirBadges(t *testing.T) {
+	clusters, err := (&gcp.Client{DryRun: true}).ListClusters(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	badges := make([]string, len(clusters))
+	shorts := make([]string, len(clusters))
+	for i := range clusters {
+		badges[i], shorts[i] = "✓ substrate-ready · substrate installed", "✓ ready · installed"
+	}
+	for _, width := range []int{30, 45, 65, 85, 120, 200} {
+		rows := clusterRows(clusters, badges, shorts, width)
+		if len(rows) != len(clusters) {
+			t.Fatalf("width %d: %d rows for %d clusters", width, len(rows), len(clusters))
+		}
+		badgeAt := -1
+		for i, row := range rows {
+			if lipgloss.Width(row) > width && width >= 45 {
+				t.Errorf("width %d: row %d is %d wide:\n%s", width, i, lipgloss.Width(row), row)
+			}
+			if !strings.HasSuffix(row, badges[i]) && !strings.HasSuffix(row, shorts[i]) {
+				t.Errorf("width %d: row %d lost its badge: %q", width, i, row)
+			}
+			at := strings.Index(row, "✓")
+			if badgeAt >= 0 && at != badgeAt {
+				t.Errorf("width %d: badges do not line up (%d vs %d):\n%s", width, at, badgeAt, strings.Join(rows, "\n"))
+			}
+			badgeAt = at
+			if width >= 45 && !strings.Contains(row, clusters[i].Name) {
+				t.Errorf("width %d: %q was truncated while columns could have gone: %q", width, clusters[i].Name, row)
+			}
+		}
+		if width >= 200 && !strings.Contains(rows[0], clusters[0].MasterVersion) {
+			t.Errorf("width %d: the full layout should be used when it fits: %q", width, rows[0])
+		}
 	}
 }
 
