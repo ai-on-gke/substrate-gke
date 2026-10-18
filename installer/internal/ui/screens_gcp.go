@@ -68,6 +68,12 @@ type projValidMsg struct {
 	// docker are the docker checks that failed, when the install builds an
 	// image with docker; see dockerProblem.
 	docker []failedCheck
+	// channel is why GKE would refuse the new-cluster version on the chosen
+	// channel, or ""; see channelProblem. versionWrong says the version is
+	// the field to fix, and channelPair is the pair that was checked.
+	channel      string
+	versionWrong bool
+	channelPair  string
 }
 
 // failedCheck is a doctor check that did not pass, with what it found.
@@ -123,6 +129,14 @@ type projectScreen struct {
 	// one's, which must not advance the wizard.
 	validateCancel context.CancelFunc
 	validateSeq    int
+	// channelAcked is the version/channel pair whose channel problem has
+	// been shown, so the next submit with the same pair proceeds. Advisory
+	// like the others, and one more reason: the pair only matters if the
+	// next screen creates a cluster, and GKE rolls versions out per
+	// location, so a user connecting an existing cluster must not be stopped
+	// by it. Reset on any edit, like the others, so changing the zone (or
+	// anything else) checks again.
+	channelAcked string
 }
 
 // submitTimeout bounds a submit's checks as a whole. A healthy run takes a
@@ -175,6 +189,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			// screen: the fields would have to appear after it, splitting one
 			// form into two.
 			clusterVersionField(st.ClusterVersion),
+			releaseChannelField(st.ReleaseChannel),
 		)
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
@@ -204,7 +219,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 // "no version", which would hand the choice to GKE's Regular channel, whose
 // own default is below the floor.
 func clusterVersionField(current string) field {
-	f := newField("Cluster version (new clusters)", current, state.DefaultClusterVersion, func(s *state.Setup, v string) {
+	f := newField(clusterVersionLabel, current, state.DefaultClusterVersion, func(s *state.Setup, v string) {
 		if v == "" {
 			v = state.DefaultClusterVersion
 		}
@@ -223,6 +238,85 @@ func clusterVersionProblem(v string) string {
 		return ""
 	}
 	return fmt.Sprintf("Cluster version %s is below %s, the oldest release Substrate is supported on.", v, gcp.MinSupportedRelease)
+}
+
+// Labels of the new-cluster fields, which submit reads back to ask GKE
+// whether the channel carries the version.
+const (
+	clusterVersionLabel = "Cluster version (new clusters)"
+	releaseChannelLabel = "Release channel (new clusters)"
+)
+
+// releaseChannelField is the advanced track's channel for a cluster the run
+// creates. Cleared, it means the default, as the version field does: an unset
+// channel lands the cluster on Regular, which does not carry the default
+// version.
+func releaseChannelField(current string) field {
+	f := newField(releaseChannelLabel, current, state.DefaultReleaseChannel, func(s *state.Setup, v string) {
+		if v == "" {
+			v = state.DefaultReleaseChannel
+		}
+		s.ReleaseChannel = strings.ToLower(v)
+	})
+	f.check = releaseChannelProblem
+	return f
+}
+
+// releaseChannelProblem rejects what can never work, and leaves the rest to
+// GKE's own list of what each channel carries (see channelProblem). Extended
+// is refused outright: it does not allow beta APIs, and setup-gcp asks for
+// them on every cluster it creates, so it refuses extended itself. "none"
+// is not offered either; GKE no longer lets new accounts create a cluster
+// outside a channel.
+func releaseChannelProblem(v string) string {
+	switch strings.ToLower(v) {
+	case "", "rapid", "regular", "stable":
+		return ""
+	case "extended":
+		return "The extended channel does not allow the beta APIs setup-gcp turns on for every cluster. Use rapid, regular, or stable."
+	}
+	return fmt.Sprintf("Release channel %q is not one of rapid, regular, or stable.", v)
+}
+
+// channelProblem asks GKE whether the channel carries the version in this
+// location, and says so if it does not. Asked rather than worked out, because
+// it changes every few weeks: 1.37 is in Rapid alone today and will reach
+// Regular in a couple of months. If GKE cannot be asked, nothing is reported;
+// the create itself will fail fast with GKE's own message. versionWrong
+// reports that no channel offers the version, so the version is the field
+// to change rather than the channel.
+func channelProblem(ctx context.Context, gc *gcp.Client, project, location, version, channel string) (problem string, versionWrong bool) {
+	if version == "" || channel == "" || version == "latest" {
+		return "", false
+	}
+	carried, err := gc.ChannelVersions(ctx, project, location)
+	if err != nil {
+		return "", false
+	}
+	if gcp.ChannelCarries(carried[channel], version) {
+		return "", false
+	}
+	var with []string
+	for _, ch := range []string{"rapid", "regular", "stable"} {
+		if gcp.ChannelCarries(carried[ch], version) {
+			with = append(with, ch)
+		}
+	}
+	if len(with) == 0 {
+		return fmt.Sprintf("GKE has no channel that offers version %s in %s.", version, location), true
+	}
+	return fmt.Sprintf("The %s channel does not offer version %s in %s; %s does.", channel, version, location, strings.Join(with, " and ")), false
+}
+
+// fieldValue returns the trimmed value of the field labeled label, or "" when
+// the form has no such field (the quickstart track).
+func (s *projectScreen) fieldValue(label string) (string, int) {
+	for i, f := range s.fields {
+		if f.label == label {
+			return strings.TrimSpace(f.input.Value()), i
+		}
+	}
+	return "", -1
 }
 
 func (s *projectScreen) Init() tea.Cmd {
@@ -301,6 +395,21 @@ func (s *projectScreen) submit() tea.Cmd {
 	}
 	registry := s.dockerRegistry(&st)
 	s.checkingDocker = registry != ""
+	// Only the advanced track can change the version or channel, so only it
+	// pays for asking GKE whether they go together. Empty fields mean the
+	// defaults, which is what is checked.
+	zone, _ := s.fieldValue("Cluster location (zone)")
+	version, versionAt := s.fieldValue(clusterVersionLabel)
+	channel, _ := s.fieldValue(releaseChannelLabel)
+	if version == "" {
+		version = state.DefaultClusterVersion
+	}
+	if channel == "" {
+		channel = state.DefaultReleaseChannel
+	}
+	channel = strings.ToLower(channel)
+	pair := version + "/" + channel
+	checkChannel := versionAt >= 0 && s.channelAcked != pair
 	// One deadline for the whole submit, cancellable with esc: with the
 	// network down, each call below would otherwise wait its own
 	// cmdTimeout in turn while every key is swallowed.
@@ -311,7 +420,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	projectNumber := s.projectNumber
 	return func() tea.Msg {
 		defer cancel()
-		msg := projValidMsg{owner: s, seq: seq}
+		msg := projValidMsg{owner: s, seq: seq, channelPair: pair}
 		// Each submit re-reads ADC: after a PERMISSION_DENIED panel the
 		// user may have run `gcloud auth application-default login` as
 		// someone else. The probes in this submit still share one fetch.
@@ -334,6 +443,11 @@ func (s *projectScreen) submit() tea.Cmd {
 		// that alone, so the checks below would be paid for and thrown
 		// away, on every retry.
 		blocked := msg.err != nil || msg.billingOff || msg.apiOff
+		// Under the same deadline and esc as the rest, and skipped when the
+		// project is blocked: get-server-config would fail there too.
+		if !blocked && checkChannel {
+			msg.channel, msg.versionWrong = channelProblem(ctx, s.deps.GCP, pid, zone, version, channel)
+		}
 		// Check the bootstrap permissions now rather than failing three
 		// screens later, mid-provision. Skipped once acknowledged.
 		if !blocked && !acked {
@@ -721,6 +835,16 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			s.errText = probeProblem(pid, m.probeErr)
 			return nil
 		}
+		if m.channel != "" {
+			s.channelAcked = m.channelPair
+			s.errText = m.channel + " That only matters if the next step creates a cluster; submit again to continue anyway."
+			label := releaseChannelLabel
+			if m.versionWrong {
+				label = clusterVersionLabel
+			}
+			_, at := s.fieldValue(label)
+			return s.setFocus(at)
+		}
 		if len(m.missing) > 0 || m.permErr != nil {
 			s.permAcked = true
 			s.errText = permProblem(pid, m.missing, m.permErr)
@@ -783,6 +907,7 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		s.enableFor = ""
 		s.probeAcked = false
 		s.permAcked = false
+		s.channelAcked = ""
 		var cmd tea.Cmd
 		s.fields[s.focus].input, cmd = s.fields[s.focus].input.Update(msg)
 		return cmd
