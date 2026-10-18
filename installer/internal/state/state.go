@@ -257,6 +257,25 @@ type Setup struct {
 	ClusterIsNew    bool
 	ClusterKVMReady bool
 
+	// ClusterNetwork, ClusterSubnetwork and ClusterDataplaneV2 describe the
+	// existing cluster the run connects to, as gcloud listed it. Bootstrap is
+	// given these rather than Network and Subnetwork, which are the user's
+	// choices for a cluster the run creates: it compares an existing
+	// cluster's network, subnetwork and datapath with what it was given and
+	// warns on each difference, and the defaults match few real clusters.
+	// Kept apart so backing out of an existing cluster cannot leak its
+	// network into the create path.
+	ClusterNetwork     string
+	ClusterSubnetwork  string
+	ClusterDataplaneV2 bool
+
+	// ClusterFilestoreAddon records that the existing cluster had GKE's
+	// managed Filestore CSI driver on. Provision's bootstrap turns it off
+	// (agent-substrate/substrate#2357), before the user has decided whether
+	// the optional Filestore step installs Substrate's replacement, so both
+	// screens say so.
+	ClusterFilestoreAddon bool
+
 	// EnableBetaAPIs records that the chosen existing cluster lacks the beta
 	// PodCertificate APIs, so provision is about to turn them on: a
 	// control-plane update of roughly ten minutes rather than the quick
@@ -337,6 +356,29 @@ func (s *Setup) MicroVMActive() bool {
 	return s != nil && s.MicroVM() && s.MicroVMDeployed
 }
 
+// BootstrapNetwork returns the network, subnetwork and Dataplane V2 setting to
+// hand setup-gcp's bootstrap. For a cluster the run creates, the user's
+// choices, with Dataplane V2 on as upstream has always defaulted it. For an
+// existing cluster, the cluster's own, so bootstrap's comparison usually finds
+// no difference to warn about. (Not for Shared VPC: setup-gcp expects the
+// network in this project, so a host-project network still gets a warning.)
+// A network gcloud did not list falls back to the user's, which bootstrap
+// then does not compare, since it skips the check when the cluster reports
+// none.
+func (s *Setup) BootstrapNetwork() (network, subnetwork string, dataplaneV2 bool) {
+	if s.ClusterIsNew {
+		return s.Network, s.Subnetwork, true
+	}
+	network, subnetwork = s.Network, s.Subnetwork
+	if s.ClusterNetwork != "" {
+		network = s.ClusterNetwork
+	}
+	if s.ClusterSubnetwork != "" {
+		subnetwork = s.ClusterSubnetwork
+	}
+	return network, subnetwork, s.ClusterDataplaneV2
+}
+
 // Prebuilt reports whether the install pulls published images rather than
 // building them.
 func (s *Setup) Prebuilt() bool { return s.ImageRepo != "" }
@@ -370,6 +412,45 @@ func (s *Setup) Region() string {
 		return parts[0] + "-" + parts[1]
 	}
 	return s.Zone
+}
+
+// SelectCluster records an existing cluster as the run's target, and
+// NewCluster a cluster the run will create. Every Cluster* field is written
+// by both, here and only here: a field one of them forgot would carry an
+// abandoned selection's value into the create path, or a stale one into the
+// next selection — the leak these fields are kept apart to prevent. A new
+// field gets its line in both, next to each other.
+func (s *Setup) SelectCluster(c gcp.Cluster) {
+	s.ClusterName = c.Name
+	s.Zone = c.Location
+	s.ClusterIsNew = false
+	s.ClusterKVMReady = c.KVMReady
+	s.ClusterNetwork = c.NetworkName()
+	s.ClusterSubnetwork = c.SubnetworkName()
+	s.ClusterDataplaneV2 = c.DataplaneV2
+	s.ClusterFilestoreAddon = c.FilestoreCSIAddon
+	s.EnableBetaAPIs = c.MissingBetaAPIs()
+	s.BetaAPIsOptional = c.ServesPodCertificatesAsGA()
+	// Recorded for a ready cluster too, not only one that is about to get
+	// the APIs: a ready cluster with old pools is most often a re-run after
+	// an earlier one turned the APIs on, and its pools still need replacing
+	// if the user has not done it yet. ReplacePools.Unsure says so.
+	s.ReplacePools = c.PoolReplacement()
+}
+
+// NewCluster records a cluster the run will create, named name, in the
+// location already in Zone (see SelectCluster).
+func (s *Setup) NewCluster(name string) {
+	s.ClusterName = name
+	s.ClusterIsNew = true
+	s.ClusterKVMReady = false
+	s.ClusterNetwork = ""
+	s.ClusterSubnetwork = ""
+	s.ClusterDataplaneV2 = false
+	s.ClusterFilestoreAddon = false
+	s.EnableBetaAPIs = false
+	s.BetaAPIsOptional = false
+	s.ReplacePools = gcp.PoolReplacement{}
 }
 
 // defaultBucketName derives the snapshot bucket name for a project, cluster,

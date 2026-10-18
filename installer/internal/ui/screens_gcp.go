@@ -166,8 +166,10 @@ func newProjectScreen(deps *Deps) *projectScreen {
 	if st.Track == state.TrackAdvanced {
 		fields = append(fields,
 			newField("Node machine type", st.MachineType, "c3-standard-4", func(s *state.Setup, v string) { s.MachineType = v }),
-			newField("VPC network", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
-			newField("VPC subnetwork", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
+			// New clusters only: an existing cluster is always given its own
+			// network (see Setup.BootstrapNetwork).
+			newField("VPC network (new clusters)", st.Network, "default", func(s *state.Setup, v string) { s.Network = v }),
+			newField("VPC subnetwork (new clusters)", st.Subnetwork, "default", func(s *state.Setup, v string) { s.Subnetwork = v }),
 			// Only consulted when the run creates a cluster. Offered anyway
 			// rather than hidden behind that choice, which is made on the next
 			// screen: the fields would have to appear after it, splitting one
@@ -970,17 +972,7 @@ func (s *clusterScreen) selected() (gcp.Cluster, bool) {
 // create-new path or a later pick.
 func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 	st := s.deps.Setup
-	st.ClusterName = c.Name
-	st.Zone = c.Location
-	st.ClusterIsNew = false
-	st.ClusterKVMReady = c.KVMReady
-	st.EnableBetaAPIs = c.MissingBetaAPIs()
-	st.BetaAPIsOptional = c.ServesPodCertificatesAsGA()
-	// Recorded for a ready cluster too, not only one that is about to get
-	// the APIs: a ready cluster with old pools is most often a re-run after
-	// an earlier one turned the APIs on, and its pools still need replacing
-	// if the user has not done it yet. ReplacePools.Unsure says so.
-	st.ReplacePools = c.PoolReplacement()
+	st.SelectCluster(c)
 	if err := st.ApplyProjectDefaults(); err != nil {
 		s.err = err
 		return nil
@@ -1150,12 +1142,7 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 					}
 				}
 				st := s.deps.Setup
-				st.ClusterName = name
-				st.ClusterIsNew = true
-				st.ClusterKVMReady = false
-				st.EnableBetaAPIs = false
-				st.BetaAPIsOptional = false
-				st.ReplacePools = gcp.PoolReplacement{}
+				st.NewCluster(name)
 				if err := st.ApplyProjectDefaults(); err != nil {
 					s.err = err
 					return nil
@@ -1263,7 +1250,11 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 		case "b", "esc", "left":
 			return goBack
 		case "enter":
-			if s.loading {
+			// Not while the list failed to load: the create row would be
+			// the only one left, the name prompt is hidden behind the error
+			// panel, and its prefilled name may be a cluster that exists —
+			// one the list would have caught. [r] reloads.
+			if s.loading || s.err != nil {
 				return nil
 			}
 			if s.cursor == len(s.clusters) {

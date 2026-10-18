@@ -128,10 +128,33 @@ type Cluster struct {
 	// KVMReady reports whether any node pool in the cluster has /dev/kvm
 	// available (nested virtualization enabled or a bare-metal machine type).
 	KVMReady bool
+	// Network and Subnetwork are the cluster's networkConfig paths, as gcloud
+	// lists them ("projects/P/global/networks/N",
+	// "projects/P/regions/R/subnetworks/S"), and DataplaneV2 whether its
+	// datapath is ADVANCED_DATAPATH. Empty and false when gcloud listed no
+	// networkConfig. The installer hands them to bootstrap for an existing
+	// cluster (see state.Setup.BootstrapNetwork).
+	Network     string
+	Subnetwork  string
+	DataplaneV2 bool
+	// FilestoreCSIAddon reports whether GKE's managed Filestore CSI driver is
+	// enabled. Bootstrap turns it off on an existing cluster
+	// (agent-substrate/substrate#2357), so the installer warns before that
+	// happens to a cluster whose workloads may be using it.
+	FilestoreCSIAddon bool
 	// PoolVersions is each node pool's name and Kubernetes version, in
 	// gcloud's order. Empty when gcloud listed no pools (Autopilot) or for a
 	// fixture that did not bother.
 	PoolVersions []PoolVersion
+}
+
+// NetworkName and SubnetworkName are the last segments of the cluster's
+// network paths: the short names setup-gcp's NETWORK and SUBNETWORK take.
+func (c Cluster) NetworkName() string    { return lastSegment(c.Network) }
+func (c Cluster) SubnetworkName() string { return lastSegment(c.Subnetwork) }
+
+func lastSegment(path string) string {
+	return path[strings.LastIndex(path, "/")+1:]
 }
 
 // PoolVersion is one node pool's name and the version its kubelets run.
@@ -383,7 +406,10 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 		// branches of the confirm panel — too old to enable, and enable and
 		// replace pools; substrate-ga lacks them and needs none. The last two
 		// names are also cues for CheckInstalled's sim, which supplies the
-		// installed and partial states of the reinstall guard.
+		// installed and partial states of the reinstall guard. substrate-ga has
+		// the managed Filestore driver on, so its provision and Filestore steps
+		// show that warning; it is the one ready cluster that provision does
+		// not end on a pool check, so the warning stays on screen.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
@@ -402,7 +428,7 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 			// still turn the beta APIs on, so provision says so.
 			{Name: "substrate-ga", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.37.1-gke.1000000", NodeCount: 2,
-				PoolVersions: []PoolVersion{{"default-pool", "1.37.1-gke.1000000"}}},
+				PoolVersions: []PoolVersion{{"default-pool", "1.37.1-gke.1000000"}}, FilestoreCSIAddon: true},
 			{Name: "substrate-installed", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 3, BetaAPIs: RequiredBetaAPIs, KVMReady: true},
 			{Name: "substrate-partial", Location: "us-west1-c", Status: "RUNNING",
@@ -495,7 +521,17 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 		EnableK8sBetaApis    struct {
 			EnabledApis []string `json:"enabledApis"`
 		} `json:"enableK8sBetaApis"`
-		NodePools []rawNodePool `json:"nodePools"`
+		NodePools     []rawNodePool `json:"nodePools"`
+		NetworkConfig struct {
+			Network          string `json:"network"`
+			Subnetwork       string `json:"subnetwork"`
+			DatapathProvider string `json:"datapathProvider"`
+		} `json:"networkConfig"`
+		AddonsConfig struct {
+			GcpFilestoreCsiDriverConfig struct {
+				Enabled bool `json:"enabled"`
+			} `json:"gcpFilestoreCsiDriverConfig"`
+		} `json:"addonsConfig"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing cluster list: %w", err)
@@ -511,6 +547,11 @@ func ParseClusters(data []byte) ([]Cluster, error) {
 			BetaAPIs:      r.EnableK8sBetaApis.EnabledApis,
 			KVMReady:      kvmReady(r.NodePools),
 			PoolVersions:  poolVersions(r.NodePools),
+			Network:       r.NetworkConfig.Network,
+			Subnetwork:    r.NetworkConfig.Subnetwork,
+			DataplaneV2:   r.NetworkConfig.DatapathProvider == "ADVANCED_DATAPATH",
+
+			FilestoreCSIAddon: r.AddonsConfig.GcpFilestoreCsiDriverConfig.Enabled,
 		})
 	}
 	return clusters, nil

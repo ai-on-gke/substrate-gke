@@ -1119,6 +1119,40 @@ func TestBootstrapDisplayNamesTheResolvedSetupGCP(t *testing.T) {
 	}
 }
 
+// Bootstrap compares an existing cluster's network, subnetwork and Dataplane
+// V2 setting with the ones it is handed and warns on each difference, and the
+// defaults match few real clusters: GKE now gives many their own
+// gke-<name>-subnet-<hash> subnet. So an existing cluster is handed its own
+// values, and ENABLE_DATAPLANE_V2 is explicit either way, since bootstrap
+// registers no flag for it and otherwise expects true. A new cluster still
+// gets the user's choices, not an abandoned selection's.
+func TestBootstrapIsHandedAnExistingClustersOwnNetwork(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+
+	existing := testSetup(t)
+	existing.ClusterIsNew = false
+	existing.ClusterNetwork = "default"
+	existing.ClusterSubnetwork = "gke-prod-subnet-55edbf1e"
+	existing.ClusterDataplaneV2 = false
+	env := b.Bootstrap(existing).Env
+	for _, want := range []string{"NETWORK=default", "SUBNETWORK=gke-prod-subnet-55edbf1e", "ENABLE_DATAPLANE_V2=false"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("existing cluster: bootstrap env missing %q", want)
+		}
+	}
+
+	created := testSetup(t)
+	created.ClusterIsNew = true
+	created.Subnetwork = "my-subnet"
+	created.ClusterSubnetwork = "left-over-from-an-abandoned-selection"
+	env = b.Bootstrap(created).Env
+	for _, want := range []string{"SUBNETWORK=my-subnet", "ENABLE_DATAPLANE_V2=true"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("new cluster: bootstrap env missing %q", want)
+		}
+	}
+}
+
 // Bootstrap reads the target release only from the environment, and GKE's own
 // default for the channel it lands in is below the floor the installer
 // enforces — so dropping this variable means silently creating a cluster the

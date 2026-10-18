@@ -70,7 +70,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.36 by default, overridable in advanced setup). Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
-| 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
+| 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster had GKE's managed Filestore driver on, provision has already turned it off ([agent-substrate/substrate#2357](https://github.com/agent-substrate/substrate/issues/2357)), so skipping this leaves that cluster with none |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
 | 10 | 🎬 Deploy a demo workload *(optional)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
@@ -102,6 +102,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
   New clusters are created at 1.36 by default, with the beta APIs on from the start, so no repair applies. 1.37 would need no beta APIs at all, but GKE carries it only in the Rapid channel, which the installer can't select yet.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
 - **Sandbox runtime comes right before the demo** so steps 1–8 finish setting up the cluster, storage, and node pools first, and step 10 immediately deploys the matching demo (`counter` or `counter-microvm`).
+- **An existing cluster keeps its own network.** Provision's `setup-gcp bootstrap` warns when an existing cluster's network, subnetwork, or Dataplane V2 setting differs from what it's given, so the installer hands it the cluster's own values; the advanced track's network fields apply to new clusters only.
 
 </details>
 

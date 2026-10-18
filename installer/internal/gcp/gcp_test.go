@@ -283,6 +283,47 @@ func TestParseClusterKVMReady(t *testing.T) {
 	}
 }
 
+// The installer hands bootstrap a cluster's own network names, which only
+// works if they are read from the same listing, path and all. A field that
+// stopped being read would leave every cluster looking like it has no network,
+// and bootstrap would be handed the defaults again.
+func TestParseClustersReadsTheNetwork(t *testing.T) {
+	clusters, err := ParseClusters([]byte(`[{
+	  "name": "prod", "location": "us-central1-a",
+	  "networkConfig": {
+	    "network": "projects/acme/global/networks/default",
+	    "subnetwork": "projects/acme/regions/us-central1/subnetworks/gke-prod-subnet-55edbf1e",
+	    "datapathProvider": "ADVANCED_DATAPATH"
+	  }
+	}, {"name": "legacy", "location": "us-central1-a",
+	  "networkConfig": {"datapathProvider": "LEGACY_DATAPATH"}}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod := clusters[0]
+	if prod.NetworkName() != "default" || prod.SubnetworkName() != "gke-prod-subnet-55edbf1e" || !prod.DataplaneV2 {
+		t.Errorf("prod: network=%q subnetwork=%q dpv2=%v", prod.NetworkName(), prod.SubnetworkName(), prod.DataplaneV2)
+	}
+	if clusters[1].DataplaneV2 {
+		t.Error("a LEGACY_DATAPATH cluster must not read as Dataplane V2")
+	}
+}
+
+// Whether the managed Filestore driver is on decides whether the installer
+// warns that provision will turn it off; read from the same listing, or the
+// warning silently never fires.
+func TestParseClustersReadsTheFilestoreAddon(t *testing.T) {
+	clusters, err := ParseClusters([]byte(`[
+	  {"name": "on", "addonsConfig": {"gcpFilestoreCsiDriverConfig": {"enabled": true}}},
+	  {"name": "off", "addonsConfig": {}}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clusters[0].FilestoreCSIAddon || clusters[1].FilestoreCSIAddon {
+		t.Errorf("FilestoreCSIAddon = %v, %v; want true, false", clusters[0].FilestoreCSIAddon, clusters[1].FilestoreCSIAddon)
+	}
+}
+
 // Each line is drawn once and read two ways: as numbers by the comparisons and
 // as text in everything the user is shown. If the two ever disagreed, the
 // wizard would refuse a cluster at the very version its own message says is
