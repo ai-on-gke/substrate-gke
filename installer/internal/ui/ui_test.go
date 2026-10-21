@@ -2535,71 +2535,82 @@ func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
 // cursor goes to the version, the field to change. Extended can never work,
 // since it refuses the beta APIs setup-gcp turns on, so it is refused outright.
 func TestTheChannelHasToOfferTheVersion(t *testing.T) {
-	app := testApp(t)
-	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
-	for _, m := range runCmd(app.Init()) {
-		pump(t, app, m)
+	// The project screen alone, not a walk through the wizard to reach it:
+	// the walk cost ~35 s of the ui package's 10-minute budget.
+	deps := testApp(t).deps
+	deps.Setup.Track = state.TrackAdvanced
+	deps.Setup.ImageRepo, deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	deps.Setup.ProjectID = "acme"
+	scr := newProjectScreen(deps)
+	set := func(label, value string) {
+		_, at := scr.fieldValue(label)
+		scr.fields[at].input.SetValue(value)
 	}
-	press := func(keys ...string) {
-		for _, k := range keys {
-			pump(t, app, key(k))
+	// submit runs one submit through to its result and reports whether the
+	// screen moved on.
+	submit := func() bool {
+		advanced := false
+		for _, m := range runCmd(scr.submit()) {
+			for _, n := range runCmd(scr.Update(m)) {
+				if n == navNext {
+					advanced = true
+				}
+			}
 		}
-	}
-	typed := func(s string) {
-		for _, r := range s {
-			pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		}
-	}
-	scr := func() *projectScreen { return app.cur.(*projectScreen) }
-	press("2", "enter")                                         // welcome: advanced track
-	press("enter")                                              // doctor
-	press("1", "enter")                                         // images: pre-built
-	press("enter", "enter", "enter")                            // images fields
-	press("enter", "enter", "enter", "enter", "enter", "enter") // to the version field
-
-	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("1.99")
-	press("enter", "enter") // past the channel field, then submit
-	if app.mach.Current() != state.Project || !strings.Contains(flat(app.View()), "no channel that offers version 1.99") {
-		t.Fatalf("1.99 should be flagged: step=%v\n%s", app.mach.Current(), app.View())
-	}
-	if _, at := scr().fieldValue(clusterVersionLabel); scr().focus != at {
-		t.Errorf("no channel offers the version, so the cursor belongs on the version field; focus=%d want %d", scr().focus, at)
+		return advanced
 	}
 
-	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("1.37")
-	press("enter") // to the channel field
-	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("extended")
-	press("enter")
-	if app.mach.Current() != state.Project || !strings.Contains(flat(app.View()), "extended channel does not allow the beta APIs") {
-		t.Errorf("extended should be refused with its reason: step=%v\n%s", app.mach.Current(), app.View())
+	set(clusterVersionLabel, "1.99")
+	if submit() || !strings.Contains(scr.errText, "no channel that offers version 1.99") {
+		t.Fatalf("1.99 should be flagged, got %q", scr.errText)
+	}
+	if _, at := scr.fieldValue(clusterVersionLabel); scr.focus != at {
+		t.Errorf("no channel offers the version, so the cursor belongs on the version field; focus=%d want %d", scr.focus, at)
 	}
 
-	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("regular")
-	press("enter")
-	if app.mach.Current() != state.Project {
-		t.Fatalf("1.37 on regular went through without a word: step=%v", app.mach.Current())
+	set(clusterVersionLabel, "1.37")
+	set(releaseChannelLabel, "extended")
+	if submit() || !strings.Contains(scr.errText, "extended channel does not allow the beta APIs") {
+		t.Errorf("extended should be refused with its reason, got %q", scr.errText)
 	}
-	if view := flat(app.View()); !strings.Contains(view, "regular channel does not offer version 1.37") || !strings.Contains(view, "rapid does") {
-		t.Errorf("the warning should say regular lacks 1.37 and rapid has it:\n%s", view)
+
+	set(releaseChannelLabel, "regular")
+	if submit() {
+		t.Fatal("1.37 on regular went through without a word")
+	}
+	if !strings.Contains(scr.errText, "regular channel does not offer version 1.37") || !strings.Contains(scr.errText, "rapid does") {
+		t.Errorf("the warning should say regular lacks 1.37 and rapid has it, got %q", scr.errText)
 	}
 
 	// An edit anywhere re-arms the warning: the check is per location, so
 	// acknowledging it for one zone must not wave a different zone through.
-	scr().setFocus(1) // the zone
-	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("us-central1-a")
-	press("enter", "enter", "enter", "enter", "enter", "enter", "enter") // through to the channel field, then submit
-	if app.mach.Current() != state.Project || !strings.Contains(flat(app.View()), "regular channel does not offer version 1.37 in us-central1-a") {
-		t.Fatalf("after editing the zone the warning should come back: step=%v\n%s", app.mach.Current(), app.View())
+	// A real keystroke, since that is where the reset lives.
+	scr.setFocus(1) // the zone
+	scr.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	set("Cluster location (zone)", "us-central1-a")
+	if submit() || !strings.Contains(scr.errText, "regular channel does not offer version 1.37 in us-central1-a") {
+		t.Fatalf("after editing the zone the warning should come back, got %q", scr.errText)
 	}
 
-	press("enter") // the same pair again: continue anyway
-	if app.mach.Current() != state.Cluster || app.deps.Setup.ReleaseChannel != "regular" {
-		t.Errorf("a second submit should go on: step=%v channel=%q, want Cluster/regular", app.mach.Current(), app.deps.Setup.ReleaseChannel)
+	if !submit() || deps.Setup.ReleaseChannel != "regular" {
+		t.Errorf("a second submit of the same pair should go on: channel=%q err=%q", deps.Setup.ReleaseChannel, scr.errText)
+	}
+}
+
+// The channel lookup is advisory and silent when GKE cannot be asked, except
+// when it is what ran out the submit's deadline: then it has to say "timed
+// out" like every other check (#59), or the submit advances after 30 seconds
+// with no word. Esc cancels rather than times out, and that stays silent.
+func TestAChannelLookupThatTimesOutSaysSo(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if problem, _ := channelProblem(expired, &gcp.Client{}, "acme", "us-central1-a", "1.37", "rapid"); !strings.Contains(problem, "timed out") {
+		t.Errorf("a lookup cut off by the deadline should say so, got %q", problem)
+	}
+	cancelled, stop := context.WithCancel(context.Background())
+	stop()
+	if problem, _ := channelProblem(cancelled, &gcp.Client{}, "acme", "us-central1-a", "1.37", "rapid"); problem != "" {
+		t.Errorf("a cancelled lookup should stay silent, got %q", problem)
 	}
 }
 

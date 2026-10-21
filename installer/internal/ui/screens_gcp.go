@@ -291,6 +291,12 @@ func channelProblem(ctx context.Context, gc *gcp.Client, project, location, vers
 	}
 	carried, err := gc.ChannelVersions(ctx, project, location)
 	if err != nil {
+		// Silent, except when the lookup ran out the submit's deadline:
+		// then it says so like every other check (#59), and submitting again
+		// goes on as for any other channel warning.
+		if timedOut := deadlineHit(ctx, err, "asking GKE which channels offer "+version); timedOut != err {
+			return timedOut.Error() + ".", false
+		}
 		return "", false
 	}
 	if gcp.ChannelCarries(carried[channel], version) {
