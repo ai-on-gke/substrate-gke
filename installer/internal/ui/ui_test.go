@@ -1861,9 +1861,10 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	}
 	// Back in the list, the probe's verdict is visible on the row — distinct
 	// from the "substrate-ready" capability badge, which rightly stays.
-	// "installed", not the long "substrate installed": the list shortens its
-	// badges when the long ones do not fit beside the sidebar.
-	if view := app.View(); !strings.Contains(view, "installed") {
+	// " installed" matches the long badge ("· substrate installed") and the
+	// short one ("· installed") the list uses when the long ones do not fit,
+	// but not the dry-run cluster named substrate-installed.
+	if view := app.View(); !strings.Contains(view, " installed") {
 		t.Errorf("list row missing the installed badge:\n%s", view)
 	}
 	// Re-selecting the same cluster answers from the cache instead of paying
@@ -1892,7 +1893,7 @@ func TestListBackgroundProbesReadyClusters(t *testing.T) {
 	if calls != 4 {
 		t.Fatalf("background probes = %d, want 4 (only the substrate-ready clusters)", calls)
 	}
-	if view := app.View(); !strings.Contains(view, "installed") {
+	if view := app.View(); !strings.Contains(view, " installed") {
 		t.Errorf("list row missing the background-probed badge:\n%s", view)
 	}
 }
@@ -1908,7 +1909,9 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	press := pressToCluster(t, app)
 
 	view := app.View()
-	for _, want := range []string{"installed", "partial"} { // short or long badge
+	// With a leading space, so the cluster names substrate-installed and
+	// substrate-partial cannot satisfy them; the short and long badges both do.
+	for _, want := range []string{" installed", " partial"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("dry-run list missing %q badge:\n%s", want, view)
 		}
