@@ -211,11 +211,7 @@ func (c *execComp) update(msg tea.Msg) (cmd tea.Cmd, handled bool) {
 func (c *execComp) view(w int) string {
 	var b strings.Builder
 
-	line := "$ " + c.spec.Display
-	if c.spec.DisplayIsSummary {
-		line = c.spec.Display
-	}
-	b.WriteString(theme.CommandLine.Render(line) + "\n\n")
+	b.WriteString(theme.CommandLine.Render("$ "+c.spec.Display) + "\n\n")
 
 	active := c.active
 	if active < 0 && c.running() {

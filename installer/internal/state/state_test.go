@@ -75,7 +75,7 @@ func TestStepNumbering(t *testing.T) {
 			t.Errorf("%v should not be numbered", s)
 		}
 	}
-	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, FilestoreCSI: 7, Autoscaling: 8, Sandbox: 9} {
+	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, Project: 3, Sandbox: 4, Cluster: 5, FilestoreCSI: 8, Autoscaling: 9} {
 		if n, ok := m.Position(step); !ok || n != want {
 			t.Errorf("Position(%v) = %d/%v, want %d/true", step, n, ok, want)
 		}

@@ -374,10 +374,10 @@ func (b *Builder) KubectlAteInstall() string {
 // executed by the wizard, so no test will catch the drift — the user is the
 // one who runs it.
 func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string) {
-	// The atespace and ActorTemplate the counter demo creates. `ate-setup
-	// deploy demo counter`, `ate-setup deploy demo counter-microvm`, and
-	// `hack/install-ate.sh --deploy-demo-counter-microvm` all create the
-	// atespace, so the tour does not need a `kubectl ate create atespace` step.
+	// The atespace and ActorTemplate the counter demo creates. Both `ate-setup
+	// deploy demo counter` and `ate-setup deploy demo counter-microvm` create
+	// the atespace, so the tour does not need a `kubectl ate create atespace`
+	// step.
 	demoAtespace := "ate-demo-counter"
 	demoTemplate := "counter"
 	if st.MicroVMActive() {
@@ -743,11 +743,21 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 		lines = append(lines, fmt.Sprintf("Step %d/%d: %s", i+1, len(phases), phase))
 	}
 	run := "go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"
+	env := b.env(st)
+	if st.MicroVM() {
+		// A cluster bootstrap creates skips the cluster step's KVM check, so
+		// its node pool must get /dev/kvm here. setup-gcp defaults to that,
+		// but every spec inherits the caller's environment, and a developer's
+		// exported ENABLE_NESTED_VIRTUALIZATION=false would otherwise create a
+		// Micro-VM cluster no micro-VM worker can schedule on. exec.Cmd keeps
+		// the last duplicate, so this wins.
+		env = append(env, "ENABLE_NESTED_VIRTUALIZATION=true")
+	}
 	return execx.Spec{
 		Label:    "setup-gcp bootstrap",
 		Display:  run,
 		Argv:     b.inTree(run),
-		Env:      b.env(st),
+		Env:      env,
 		SimLines: append(lines, "Bootstrap completed successfully."),
 	}
 }
@@ -815,130 +825,13 @@ func credentialProviderEnv() []string {
 	return []string{"ATE_CREDENTIAL_PROVIDER=" + defaultCredentialProvider}
 }
 
-// craneDigest prints an image reference's registry digest. It must stay in
-// step with the go-containerregistry version in the pinned checkout's go.mod,
-// so bump it alongside Commit.
-//
-// crane authenticates with the docker keychain only (~/.docker/config.json and
-// its credential helpers), whereas ate-setup's resolver also tries gcloud/ADC
-// credentials. The default release repo is anonymous-readable, so this only
-// matters for a private mirror: there the micro-VM pre-built demo on a tree
-// without counterMicroVMDemoDir fails at `crane digest` with UNAUTHORIZED
-// unless `gcloud auth configure-docker HOST` has been run for that registry
-// host, even though the gVisor path works.
-const craneDigest = "go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest"
-
-// counterMicroVMDemoDir is where ate-setup registers its counter-microvm demo.
-// Its presence in the checkout means `ate-setup deploy demo counter-microvm`
-// exists there: upstream added it in v0.2.0 (agent-substrate/substrate#1785),
-// so main and the pinned Commit have it and older trees such as v0.1.0 do not.
-const counterMicroVMDemoDir = "cmd/ate-setup/internal/demos/countermicrovm"
-
-// The counter-microvm templates a pre-built micro-VM demo rewrites in place:
-// install-ate.sh reads them from these fixed paths, so they cannot be
-// rendered to a copy instead.
-const (
-	demoPoolTemplate  = "demos/counter/counter-microvm.yaml.tmpl"
-	demoActorTemplate = "demos/counter/counter-microvm-template.yaml.tmpl"
-)
-
-// restoreDemoTemplates defines, then runs, a function that puts back any
-// template a previous pre-built run left rewritten, from the .bak copy
-// `sed -i.bak` made. It runs before anything else on every micro-VM demo
-// path, ate-setup's included, since it reads the same templates: a run that
-// was SIGKILLed never reached its EXIT trap, and its leftover
-// ${REF}@${DIGEST} would otherwise make the next sed a no-op and silently
-// deploy the old digest — or, on a source build, a pre-built one.
-var restoreDemoTemplates = []string{
-	`restore_demo_templates() {`,
-	`  for f in ` + demoPoolTemplate + ` ` + demoActorTemplate + `; do`,
-	`    if [ -f "${f}.bak" ]; then mv -f "${f}.bak" "${f}"; fi`,
-	`  done`,
-	`}`,
-	`restore_demo_templates`,
-}
-
 // DeployDemo deploys one of the upstream demo applications (for the wizard,
 // the counter demo). When the Micro-VM sandbox runtime is selected and staged,
-// it runs `ate-setup deploy demo counter-microvm` if the checkout has it (see
-// counterMicroVMDemoDir), exactly as the gVisor demo runs ate-setup. Older
-// trees, such as v0.1.0, fall back to hack/install-ate.sh
-// --deploy-demo-counter-microvm (the demo step from hack/run-microvm-demo.sh),
-// which those trees keep for good.
-//
-// TODO: Drop the install-ate.sh fallback (deprecated upstream), the template
-// rewrite, and the jq/make entries in doctor.MicroVMTools. Commit is past
-// v0.2.0, so they only serve older commits typed into the images step.
+// it deploys `counter-microvm` in `ate-demo-counter-microvm`.
 func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	display, argv := imageArgs(st)
 	if st.MicroVMActive() {
-		const ateSetup = "go run ./cmd/ate-setup deploy demo counter-microvm"
-		fallback := []string{"./hack/install-ate.sh --deploy-demo-counter-microvm"}
-		if st.Prebuilt() {
-			// On a pre-built install, pin ateom-microvm and counter to their
-			// per-image registry digests (ActorTemplate admission requires an
-			// '@' digest reference) and substitute them into the demo templates
-			// inside a subshell so ko resolve/apply passes them through without
-			// building or pushing anything. ate-setup's prebuilt resolver does
-			// all of this itself, so only the fallback needs it.
-			//
-			// ImageRepo is free text, so the digest lookup has to work against
-			// any registry, as ate-setup's own prebuilt resolver does on the
-			// gVisor path. crane is that resolver's library
-			// (go-containerregistry) at the version upstream pins; it is run
-			// by version because the checkout vendors the library but not the
-			// crane command.
-			tag := imageVersion(st.ImageTag)
-			ateomRef := ShellQuote(st.ImageRepo + "/ateom-microvm:" + tag)
-			counterRef := ShellQuote(st.ImageRepo + "/counter:" + tag)
-			fallback = []string{
-				"(",
-				// The edited templates are restored from the .bak copies sed
-				// leaves, never from git: with --substrate-root the tree is
-				// the user's, and uncommitted edits to these files are theirs.
-				"  trap restore_demo_templates EXIT",
-				"  trap 'exit 130' INT TERM",
-				// Exported in here, not in the step's env, so it never
-				// reaches ate-setup, whose prebuilt path leaves ko alone.
-				"  export KO_DOCKER_REPO=ko.local",
-				"  ATEOM_REF=" + ateomRef,
-				"  COUNTER_REF=" + counterRef,
-				`  ATEOM_DIGEST=$(` + craneDigest + ` "${ATEOM_REF}")`,
-				`  COUNTER_DIGEST=$(` + craneDigest + ` "${COUNTER_REF}")`,
-				`  sed -i.bak "s|ko://github.com/agent-substrate/substrate/cmd/ateom-microvm|${ATEOM_REF}@${ATEOM_DIGEST}|g" ` + demoPoolTemplate,
-				`  sed -i.bak "s|ko://github.com/agent-substrate/substrate/demos/counter|${COUNTER_REF}@${COUNTER_DIGEST}|g" ` + demoActorTemplate,
-				"  ./hack/install-ate.sh --deploy-demo-counter-microvm",
-				")",
-			}
-		}
-		lines := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone), restoreDemoTemplates...)
-		// Display is fixed before the tree is inspected, so each branch says
-		// which one ran: that line is how the log tells them apart.
-		lines = append(lines,
-			"if [ -d "+counterMicroVMDemoDir+" ]; then",
-			"  echo "+ShellQuote("Deploying with: "+ateSetup),
-			"  "+ateSetup+argv,
-			"else",
-			"  echo "+ShellQuote("Deploying with: hack/install-ate.sh --deploy-demo-counter-microvm"),
-		)
-		for _, l := range fallback {
-			lines = append(lines, "  "+l)
-		}
-		lines = append(lines, "fi")
-		return execx.Spec{
-			Label: "deploy demo counter-microvm",
-			// Which command runs is decided in the script, so the title
-			// names the step and the script prints "Deploying with: …".
-			Display:          "deploy demo counter-microvm",
-			DisplayIsSummary: true,
-			Argv:             b.inTree(strings.Join(lines, "\n")),
-			Env:              b.microVMEnv(st),
-			SimLines: append(b.fetchSimLines(),
-				"[step]: deploy_demo_counter_microvm",
-				"workerpool.ate.dev/counter-microvm created",
-				"actortemplate.ate.dev/counter-microvm created",
-			),
-		}
+		name = "counter-microvm"
 	}
 	return execx.Spec{
 		Label:   "ate-setup deploy demo " + name,
@@ -953,8 +846,8 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	}
 }
 
-// microVMEnv is env plus the two settings upstream's micro-VM script reads
-// that no other step needs.
+// microVMEnv is env plus the two settings upstream's micro-VM asset script
+// (hack/install-microvm-deps.sh) reads that no other step needs.
 //
 // ARCH is pinned rather than left to the script's own resolution, which reads
 // KO_DEFAULTPLATFORMS and falls back to the workstation's `go env GOARCH`.
@@ -969,13 +862,9 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // developer's exported value from redirecting a GKE install's assets into a
 // kind bucket that does not exist.
 //
-// The KUBECTL_CONTEXT that env blanks matters most here: with one set,
-// install-microvm-deps.sh skips its up-front context check and install-ate.sh
-// skips its own get-credentials, so an inherited dev-env context (absent from
-// the throwaway KUBECONFIG credentialLines writes) would fail only at
-// `kubectl apply`, after the assets were assembled and uploaded. Blank, both
-// use that KUBECONFIG's current context — install-ate.sh re-fetches the same
-// credentials into it first, which is redundant but harmless.
+// The KUBECTL_CONTEXT that env blanks keeps install-microvm-deps.sh using the
+// throwaway KUBECONFIG credentialLines writes rather than an inherited dev-env
+// context.
 func (b *Builder) microVMEnv(st *state.Setup) []string {
 	return append(b.env(st), "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
 }

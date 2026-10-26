@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -275,51 +274,99 @@ func wrapNames(names []string, width int) []string {
 // ─── Turn on Substrate (control plane) ─────────────────────────────────────
 
 type controlPlaneScreen struct {
-	deps       *Deps
-	comp       *execComp
+	deps *Deps
+	comp *execComp
+	// stage stages the micro-VM assets and applies the microvm
+	// SandboxConfig once the control plane is up, when Micro-VM was chosen;
+	// nil otherwise. It runs here rather than as a step of its own because
+	// this is the first point both the snapshot bucket and the SandboxConfig
+	// CRD exist, and it is part of turning Substrate on for that runtime.
+	stage      *execComp
 	showDrawer bool
 }
 
 func newControlPlaneScreen(deps *Deps) *controlPlaneScreen {
-	return &controlPlaneScreen{
+	s := &controlPlaneScreen{
 		deps: deps,
 		comp: newExecComp(deps.Runner, deps.Builder.DeployAteSystem(deps.Setup), steps.Deploy(deps.Setup.Prebuilt()), deps.LogPath),
 	}
+	if deps.Setup.MicroVM() {
+		s.stage = newExecComp(deps.Runner, deps.Builder.InstallMicroVMDeps(deps.Setup), steps.MicroVMDeps(), deps.LogPath)
+	}
+	return s
 }
 
 func (s *controlPlaneScreen) Init() tea.Cmd      { return s.comp.start() }
 func (s *controlPlaneScreen) CapturesText() bool { return false }
-func (s *controlPlaneScreen) logComp() *execComp { return s.comp }
+
+// logComp is the command the user is looking at: staging once it has
+// started, the control-plane deploy before that.
+func (s *controlPlaneScreen) logComp() *execComp {
+	if s.stage != nil && s.stage.started {
+		return s.stage
+	}
+	return s.comp
+}
+
+// done reports whether everything this step runs has succeeded.
+func (s *controlPlaneScreen) done() bool {
+	return s.comp.ok() && (s.stage == nil || s.stage.ok())
+}
 
 func (s *controlPlaneScreen) Hints() []Hint {
 	hints := []Hint{{"m", "command drawer"}}
 	switch {
-	case s.comp.ok():
+	case s.done():
 		hints = append(hints, Hint{"enter", "continue"})
 	case s.comp.failed != nil:
 		hints = append(hints, Hint{"r", "retry"}, Hint{"b", "back"})
+	case s.stage != nil && s.stage.failed != nil:
+		hints = append(hints, Hint{"r", "retry"}, Hint{"s", "skip, use gVisor"})
 	}
 	return hints
 }
 
 func (s *controlPlaneScreen) Update(msg tea.Msg) tea.Cmd {
 	if cmd, handled := s.comp.update(msg); handled {
+		// Staging starts on its own once the control plane is up.
+		if s.comp.ok() && s.stage != nil && !s.stage.started {
+			return tea.Batch(cmd, s.stage.start())
+		}
 		return cmd
+	}
+	if s.stage != nil {
+		if cmd, handled := s.stage.update(msg); handled {
+			if s.stage.ok() {
+				s.deps.Setup.MicroVMDeployed = true
+			}
+			return cmd
+		}
 	}
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
 		case "m":
 			s.showDrawer = !s.showDrawer
 		case "enter":
-			if s.comp.ok() {
+			if s.done() {
 				return goNext
 			}
 		case "r":
 			if s.comp.failed != nil {
 				return s.comp.restart()
 			}
+			if s.stage != nil && s.stage.failed != nil {
+				return s.stage.restart()
+			}
+		case "s":
+			// The cluster keeps the gVisor config ate-setup already applied,
+			// so a skipped micro-VM staging leaves a working install rather
+			// than a broken one. Record the class it actually ended up with.
+			if s.stage != nil && s.stage.failed != nil {
+				s.deps.Setup.SandboxClass = state.SandboxGVisor
+				return goNext
+			}
 		case "b", "esc":
-			if !s.comp.running() {
+			if !s.comp.running() && (s.stage == nil || !s.stage.running()) {
 				s.comp.stop()
 				return goBack
 			}
@@ -337,224 +384,112 @@ func (s *controlPlaneScreen) View(w int) string {
 	}
 	subtitle += "\nEgress credential provider: " + snapshot.CredentialProvider() + " (set ATE_CREDENTIAL_PROVIDER to change it)."
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
-	b.WriteString(s.comp.view(w))
+	// Once staging starts the deploy is done; it collapses to one line so
+	// staging's checklist and output get the room, rather than being clamped
+	// away below the deploy's.
+	if s.stage != nil && s.stage.started {
+		b.WriteString(theme.Good.Render(theme.GlyphDone+" Control plane deployed") + theme.Subtle.Render(" ($ "+s.comp.spec.Display+")") + "\n\n")
+		b.WriteString(theme.Subtle.Render("Stages the Micro-VM sandbox binaries to the snapshot bucket and applies\nthe cluster-wide microvm SandboxConfig.") + "\n\n")
+		b.WriteString(s.stage.view(w))
+	} else {
+		b.WriteString(s.comp.view(w))
+	}
 
 	if s.showDrawer {
-		env := strings.Join(s.comp.spec.Env, "\n")
+		env := strings.Join(s.logComp().spec.Env, "\n")
 		b.WriteString("\n" + theme.Panel.Width(min(w-4, 90)).Render(
-			theme.Title.Render("Environment for "+s.comp.spec.Display)+"\n"+theme.Subtle.Render(env)))
+			theme.Title.Render("Environment for "+s.logComp().spec.Display)+"\n"+theme.Subtle.Render(env)))
 	}
-	if s.comp.ok() {
+	switch {
+	case s.done() && s.stage != nil:
+		b.WriteString("\n" + theme.Good.Render("The Substrate control plane is running and the Micro-VM sandbox is staged. Press [enter] to continue."))
+	case s.done():
 		b.WriteString("\n" + theme.Good.Render("The Substrate control plane is running. Press [enter] to continue."))
+	case s.stage != nil && s.stage.failed != nil:
+		b.WriteString("\n" + theme.Warning.Render("The control plane is running, but staging the Micro-VM sandbox failed.\n"+
+			"Press [r] to retry, or [s] to skip it and continue with gVisor."))
 	}
 	return b.String()
 }
 
 // ─── Choose your sandbox runtime ───────────────────────────────────────────
 
-// clusterKVMMsg is the answer to the KVM probe Init starts. It names the
-// cluster it asked about: screens are rebuilt on every visit, so an answer
-// can arrive at a later sandboxScreen than the one that asked.
-type clusterKVMMsg struct {
-	cluster string
-	ready   bool
-	err     error
-}
-
 type sandboxScreen struct {
-	deps            *Deps
-	cursor          int
-	confirmingNoKVM bool
-	// kvmPending is true while the probe Init started is in flight. Until
-	// it answers, a cluster not already known to be KVM-ready reads as
-	// "checking" rather than as having no KVM-capable pool, and Micro-VM
-	// cannot be confirmed.
-	kvmPending   bool
-	kvmErr       error
-	missingTools []string
-	comp         *execComp
+	deps   *Deps
+	cursor int
+	// missing lists the host tools Micro-VM needs that were not on PATH the
+	// last time it was chosen. The doctor only warns about them, since a
+	// gVisor install never runs the asset scripts; here the choice is made,
+	// so a missing tool stops the run before anything is provisioned rather
+	// than at the staging step, after the cluster exists.
+	missing []string
 }
 
 func newSandboxScreen(deps *Deps) *sandboxScreen {
-	var missing []string
-	if !deps.DryRun {
-		missing = doctor.MissingMicroVMTools()
-	}
 	cur := 0
-	if deps.Setup.MicroVM() && len(missing) == 0 {
+	if deps.Setup.MicroVM() {
 		cur = 1
 	}
-	return &sandboxScreen{deps: deps, cursor: cur, missingTools: missing}
+	return &sandboxScreen{deps: deps, cursor: cur}
 }
 
-func (s *sandboxScreen) Init() tea.Cmd {
-	if s.deps.GCP == nil || s.deps.GCP.DryRun {
-		return nil
-	}
-	s.kvmPending = true
-	st := s.deps.Setup
-	project, cluster, zone := st.ProjectID, st.ClusterName, st.Zone
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		ready, err := s.deps.GCP.ClusterKVMReady(ctx, project, cluster, zone)
-		return clusterKVMMsg{cluster: cluster, ready: ready, err: err}
-	}
-}
-
-// awaitingKVM reports whether Micro-VM has to wait for the probe: the
-// cluster is not already known to be KVM-ready and the answer is not in.
-func (s *sandboxScreen) awaitingKVM() bool {
-	return s.kvmPending && !s.deps.Setup.ClusterKVMReady
-}
-
+func (s *sandboxScreen) Init() tea.Cmd      { return nil }
 func (s *sandboxScreen) CapturesText() bool { return false }
-func (s *sandboxScreen) logComp() *execComp { return s.comp }
 
 func (s *sandboxScreen) Hints() []Hint {
-	if s.comp != nil {
-		if s.comp.ok() {
-			return []Hint{{"enter", "continue"}}
-		}
-		if s.comp.failed != nil {
-			return []Hint{{"r", "retry"}, {"s", "skip"}}
-		}
-		return nil
-	}
-	if s.confirmingNoKVM {
-		return []Hint{{"y", "stage anyway"}, {"n", "keep gVisor"}}
-	}
-	if len(s.missingTools) > 0 {
-		return []Hint{{"enter", "confirm"}, {"b", "back"}}
-	}
-	if s.cursor == 1 && s.awaitingKVM() {
-		return []Hint{{"1/2", "choose"}, {"b", "back"}}
-	}
 	return []Hint{{"1/2", "choose"}, {"enter", "confirm"}, {"b", "back"}}
 }
 
-func (s *sandboxScreen) startMicroVMStage() tea.Cmd {
-	s.confirmingNoKVM = false
-	s.deps.Setup.SandboxClass = state.SandboxMicroVM
-	s.comp = newExecComp(s.deps.Runner, s.deps.Builder.InstallMicroVMDeps(s.deps.Setup), steps.MicroVMDeps(), s.deps.LogPath)
-	return s.comp.start()
-}
-
 func (s *sandboxScreen) Update(msg tea.Msg) tea.Cmd {
-	if kvm, ok := msg.(clusterKVMMsg); ok {
-		if kvm.cluster != s.deps.Setup.ClusterName {
-			return nil
-		}
-		s.kvmPending = false
-		s.kvmErr = kvm.err
-		if kvm.err == nil {
-			s.deps.Setup.ClusterKVMReady = kvm.ready
-			if kvm.ready {
-				// A no-KVM prompt raised on an earlier answer (a second
-				// probe from a revisit can land later) no longer applies;
-				// drop it rather than leave 1/2/enter swallowed behind a
-				// hidden y/n.
-				s.confirmingNoKVM = false
-			}
-		}
-		return nil
-	}
-	if s.comp != nil {
-		if cmd, handled := s.comp.update(msg); handled {
-			if s.comp.ok() {
-				s.deps.Setup.MicroVMDeployed = true
-			}
-			return cmd
-		}
-		if key, ok := msg.(tea.KeyMsg); ok {
-			switch key.String() {
-			case "enter":
-				if s.comp.ok() {
-					return goNext
-				}
-			case "r":
-				if s.comp.failed != nil {
-					return s.comp.restart()
-				}
-			case "s":
-				if s.comp.failed != nil {
-					// The cluster keeps the gVisor config ate-setup already
-					// applied, so a skipped micro-VM install leaves a working
-					// install rather than a broken one. Record the class the
-					// cluster actually ended up with.
-					s.deps.Setup.SandboxClass = state.SandboxGVisor
-					return goNext
-				}
-			}
-		}
-		return nil
-	}
-
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return nil
 	}
-	if s.confirmingNoKVM {
-		switch key.String() {
-		case "y", "Y":
-			return s.startMicroVMStage()
-		case "n", "N", "esc", "1":
-			s.confirmingNoKVM = false
-			s.cursor = 0
-		}
-		return nil
-	}
 	switch key.String() {
 	case "1", "up", "k":
-		s.cursor = 0
+		s.cursor, s.missing = 0, nil
 	case "2", "down", "j":
-		if len(s.missingTools) == 0 {
-			s.cursor = 1
-		}
+		s.cursor = 1
 	case "b", "esc":
 		return goBack
 	case "enter":
-		if s.cursor == 0 || len(s.missingTools) > 0 {
+		if s.cursor == 0 {
+			s.missing = nil
 			s.deps.Setup.SandboxClass = state.SandboxGVisor
 			return goNext
 		}
-		if s.awaitingKVM() {
-			// Asking "stage anyway?" now would warn about a missing
-			// KVM pool nobody has checked for yet. The view says the
-			// check is running, and it answers within its timeout.
-			return nil
+		// Re-checked on every enter, so installing the tools in another
+		// terminal and pressing enter again is enough. A dry run never runs
+		// the asset scripts, so it does not need them.
+		if !s.deps.DryRun {
+			if s.missing = s.missingTools(); len(s.missing) > 0 {
+				return nil
+			}
 		}
-		if !s.deps.Setup.ClusterKVMReady {
-			s.confirmingNoKVM = true
-			return nil
-		}
-		return s.startMicroVMStage()
+		s.deps.Setup.SandboxClass = state.SandboxMicroVM
+		return goNext
 	}
 	return nil
+}
+
+// missingTools is the host-tool check, through Deps when it is overridden.
+func (s *sandboxScreen) missingTools() []string {
+	if s.deps.MissingMicroVMTools != nil {
+		return s.deps.MissingMicroVMTools()
+	}
+	return doctor.MissingMicroVMTools()
 }
 
 func (s *sandboxScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Choose your sandbox runtime") + "\n")
 	b.WriteString(theme.Subtle.Render(
-		"gVisor is installed with the control plane and needs nothing here.\n"+
-			"Micro-VM is opt-in: its sandbox binaries are staged to the snapshot\nbucket and a cluster-wide SandboxConfig is applied.") + "\n\n")
+		"Micro-VM needs a node pool with /dev/kvm, so the next step checks your\n"+
+			"cluster for one before anything is provisioned.") + "\n\n")
 
-	if s.comp != nil {
-		b.WriteString(s.comp.view(w))
-		if s.comp.ok() {
-			b.WriteString("\n" + theme.Good.Render("Micro-VM SandboxConfig applied. Press [enter] to continue."))
-		}
-		return b.String()
-	}
-
-	opt2 := "[2] Micro-VM (kata + cloud-hypervisor) — stage assets and apply the SandboxConfig"
-	if len(s.missingTools) > 0 {
-		opt2 = "[2] Micro-VM (kata + cloud-hypervisor) — unavailable on this host"
-	}
 	options := []string{
-		"[1] gVisor — already installed, nothing more to do",
-		opt2,
+		"[1] gVisor — default runtime installed with the control plane",
+		"[2] Micro-VM (kata + cloud-hypervisor) — hardware VM isolation (/dev/kvm required)",
 	}
 	for i, opt := range options {
 		if i == s.cursor {
@@ -563,49 +498,13 @@ func (s *sandboxScreen) View(w int) string {
 			b.WriteString(theme.Subtle.Render("  "+opt) + "\n")
 		}
 	}
-
-	if len(s.missingTools) > 0 {
-		b.WriteString("\n" + theme.Warning.Render(
-			fmt.Sprintf("Note: Micro-VM staging is unavailable on this workstation (missing %s on PATH;\n"+
-				"the Micro-VM sandbox and demo require %s).",
-				strings.Join(s.missingTools, ", "), strings.Join(doctor.MicroVMTools, ", "))))
-		return b.String()
-	}
-
-	st := s.deps.Setup
-	switch {
-	case st.ClusterKVMReady:
-		b.WriteString("\n" + theme.Good.Render(
-			fmt.Sprintf("%s Cluster %q has a KVM-capable node pool (nested virtualization enabled).",
-				theme.GlyphDone, st.ClusterName)))
-	case s.kvmPending:
-		msg := fmt.Sprintf("Checking whether cluster %q has a KVM-capable node pool…", st.ClusterName)
-		if s.cursor == 1 {
-			msg += "\nWait for the check to finish before selecting Micro-VM."
-		}
-		b.WriteString("\n" + theme.Subtle.Render(msg))
-	case s.kvmErr != nil:
-		b.WriteString("\n" + theme.Warning.Render(
-			fmt.Sprintf("Note: could not check whether cluster %q has a KVM-capable node pool (%v).\n"+
-				"Micro-VM workers need /dev/kvm (enableNestedVirtualization or a -metal machine type),\n"+
-				"or they will stay Pending and the demo will time out.",
-				st.ClusterName, s.kvmErr)))
-	default:
-		b.WriteString("\n" + theme.Warning.Render(
-			fmt.Sprintf("Note: cluster %q has no KVM-capable node pool yet. Micro-VM workers need /dev/kvm\n"+
-				"(enableNestedVirtualization or a -metal machine type),\n"+
-				"or they will stay Pending and the demo will time out.",
-				st.ClusterName)))
-	}
-	if !st.ClusterKVMReady && s.confirmingNoKVM {
-		// After a failed probe nothing is known about the pools, so the
-		// prompt must not assert the outcome the note above could not check.
-		warning := "Micro-VM workers will stay Pending on this cluster and the demo will time out.\n"
-		if s.kvmErr != nil {
-			warning = "Could not verify a KVM-capable node pool; Micro-VM workers may stay Pending and the demo may time out.\n"
-		}
-		b.WriteString("\n\n" + theme.Warning.Render(warning+
-			"Press [y] to stage anyway, or [n] to keep gVisor."))
+	if len(s.missing) > 0 {
+		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 88)).Render(
+			theme.Bad.Render("Micro-VM needs "+strings.Join(s.missing, ", ")+" on this machine.")+"\n\n"+
+				"Upstream's asset scripts use them to assemble and upload the micro-VM\n"+
+				"binaries. Install them, then press [enter] again:\n"+
+				"  "+doctor.MicroVMToolsFix+"\n\n"+
+				"Or press [1] then [enter] to continue with gVisor."))
 	}
 	return b.String()
 }

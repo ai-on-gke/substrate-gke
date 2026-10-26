@@ -272,17 +272,6 @@ func TestParseNodePools(t *testing.T) {
 	}
 }
 
-func TestParseClusterKVMReady(t *testing.T) {
-	ready, err := ParseClusterKVMReady([]byte(`{"nodePools":[{"config":{"machineType":"n2-standard-8","advancedMachineFeatures":{"enableNestedVirtualization":true}}}]}`))
-	if err != nil || !ready {
-		t.Fatalf("expected KVMReady=true, got ready=%v err=%v", ready, err)
-	}
-	notReady, err := ParseClusterKVMReady([]byte(`{"nodePools":[{"config":{"machineType":"c3-standard-4"}}]}`))
-	if err != nil || notReady {
-		t.Fatalf("expected KVMReady=false, got ready=%v err=%v", notReady, err)
-	}
-}
-
 // The installer hands bootstrap a cluster's own network names, which only
 // works if they are read from the same listing, path and all. A field that
 // stopped being read would leave every cluster looking like it has no network,

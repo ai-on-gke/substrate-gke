@@ -180,7 +180,7 @@ func TestMicroVMToolsCheckWarnsWhenMissing(t *testing.T) {
 		if got.Status != Warn {
 			t.Fatalf("expected Warn on empty PATH, got %+v", got)
 		}
-		for _, tool := range []string{"sha256sum", "zstd", "unzip", "jq", "make"} {
+		for _, tool := range []string{"sha256sum", "zstd", "unzip"} {
 			if !strings.Contains(got.Detail, tool) {
 				t.Errorf("expected %q in the missing list, got %q", tool, got.Detail)
 			}

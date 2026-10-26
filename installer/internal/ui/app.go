@@ -46,6 +46,11 @@ type Deps struct {
 	DryRun  bool
 	LogPath string
 
+	// MissingMicroVMTools reports which host tools Micro-VM's asset scripts
+	// need are not on PATH; nil means doctor.MissingMicroVMTools. Tests set
+	// it so what the host has installed does not decide whether they pass.
+	MissingMicroVMTools func() []string
+
 	// UpgradeDir is where the upgrade track keeps the two source trees.
 	UpgradeDir string
 
@@ -332,18 +337,11 @@ func (a *App) runSlash(name string) tea.Cmd {
 	case "back", "b":
 		return goBack
 	case "skip", "s":
-		// Only the optional steps may be skipped. Sandbox is one of them:
-		// skipping it before micro-VM staging succeeds falls back to the
-		// gVisor class the control-plane step installed anyway, rather than
-		// leaving a micro-VM choice behind that nothing staged for.
+		// Only the optional steps may be skipped. Skipping Sandbox keeps the
+		// gVisor class the control-plane step installs anyway.
 		s := a.mach.Current()
 		if s == state.Sandbox {
-			if p, ok := a.cur.(execCompProvider); ok && p.logComp() != nil && p.logComp().running() {
-				return nil
-			}
-			if !a.deps.Setup.MicroVMActive() {
-				a.deps.Setup.SandboxClass = state.SandboxGVisor
-			}
+			a.deps.Setup.SandboxClass = state.SandboxGVisor
 			return goNext
 		}
 		if s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {
