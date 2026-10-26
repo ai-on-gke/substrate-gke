@@ -180,7 +180,7 @@ func TestMicroVMToolsCheckWarnsWhenMissing(t *testing.T) {
 		if got.Status != Warn {
 			t.Fatalf("expected Warn on empty PATH, got %+v", got)
 		}
-		for _, tool := range []string{"sha256sum", "zstd", "unzip", "jq", "make"} {
+		for _, tool := range []string{"sha256sum", "zstd"} {
 			if !strings.Contains(got.Detail, tool) {
 				t.Errorf("expected %q in the missing list, got %q", tool, got.Detail)
 			}
@@ -193,6 +193,22 @@ func TestMicroVMToolsCheckWarnsWhenMissing(t *testing.T) {
 		return
 	}
 	t.Fatal(`no "microvm-tools" check found`)
+}
+
+func TestMicroVMToolsFixNamesOnlyTheMissingTools(t *testing.T) {
+	zstd := MicroVMToolsFix([]string{"zstd"})
+	if want := "brew install zstd   # or apt-get install zstd"; zstd != want {
+		t.Errorf("zstd only: %q, want %q", zstd, want)
+	}
+	sha := MicroVMToolsFix([]string{"sha256sum"})
+	for _, want := range []string{"brew install coreutils &&", "libexec/gnubin", "apt-get install coreutils;", "restart the installer"} {
+		if !strings.Contains(sha, want) {
+			t.Errorf("sha256sum only: %q lacks %q", sha, want)
+		}
+	}
+	if strings.Contains(sha, "zstd") {
+		t.Errorf("sha256sum only: %q installs zstd too", sha)
+	}
 }
 
 // With --substrate-root the fetch preamble is a bare `cd`, so a git-less host

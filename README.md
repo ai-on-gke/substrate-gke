@@ -73,13 +73,13 @@ A terminal wizard walks the steps below, running the real command it shows and s
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images from a registry you name, or build your own from a commit (the pin by default) — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
-| 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel, and turn off the separate system node pools). New clusters get only a DNS-based control plane endpoint and require `container.clusters.connect` in IAM in addition to Kubernetes RBAC. Clusters already running Substrate are protected by a reinstall guard |
-| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, the node service account, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
-| 6 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
-| 7 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router gets the client allowlist from step 6. Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
-| 8 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
-| 9 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
-| 10 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
+| 4 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
+| 5 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel, and turn off the separate system node pools). New clusters get only a DNS-based control plane endpoint and require `container.clusters.connect` in IAM in addition to Kubernetes RBAC. Clusters already running Substrate are protected by a reinstall guard; with micro-VM, clusters without a KVM-capable node pool are refused |
+| 6 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, the node service account, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
+| 7 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
+| 8 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router gets the client allowlist from step 7. Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`). With micro-VM, it also stages the micro-VM assets |
+| 9 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
+| 10 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 11 | 🎬 Deploy a demo workload *(`make run-demo` only)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
 
 > [!NOTE]
@@ -108,19 +108,19 @@ A terminal wizard walks the steps below, running the real command it shows and s
 
   New clusters are created at 1.37 on the Rapid channel, so none of this applies to them. Advanced setup can pick a newer version or a different channel, like Regular; the installer rejects a version below 1.37, checks with GKE that the channel offers the version, and warns if it doesn't.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
-- **Sandbox runtime comes right before the demo** so steps 1–9 finish setting up the cluster, storage, and node pools first, and on `make run-demo` step 11 immediately deploys the matching demo (`counter` or `counter-microvm`).
+- **Sandbox runtime comes right before the cluster step** so that, for micro-VM, the installer can make sure the cluster has at least one KVM-capable node.
 - **An existing cluster keeps its own network.** Provision's `setup-gcp bootstrap` warns when an existing cluster's network, subnetwork, or Dataplane V2 setting differs from what it's given, so the installer hands it the cluster's own values; the advanced track's network fields apply to new clusters only.
 
 </details>
 
 ## Sandbox runtimes
 
-Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
+Substrate runs each actor inside a sandbox, and step 4 chooses which kind.
 
 | | gVisor | Micro-VM |
 |---|---|---|
 | Isolation | syscall interception in userspace | hardware virtualization (kata + cloud-hypervisor) |
-| Installed by | the control-plane step, always | step 9, on request |
+| Installed by | the control-plane step, always | the control-plane step, on request |
 | Node requirement | none | **`/dev/kvm` on the node** |
 
 **gVisor** is the default and needs nothing extra: `ate-setup` applies the
@@ -128,10 +128,10 @@ cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
 guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
-rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
-whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
-stages those five assets and applies a cluster-wide `SandboxConfig` named `microvm` that
-points at them. How it stages them depends on the Substrate tree:
+rather than baked into the worker image. Step 5 refuses an existing cluster without a
+KVM-capable node pool, and step 8 (`Turn on Substrate`) stages those five assets and
+applies a cluster-wide `SandboxConfig` named `microvm` that points at them. How it
+stages them depends on the Substrate tree:
 
 - **Up to v1.0.0-rc.1** (the current pin): upstream's `hack/install-microvm-deps.sh
   --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
@@ -167,11 +167,11 @@ upstream's `demos/counter/counter-microvm.yaml.tmpl` and
 `counter-microvm-template.yaml.tmpl` show.
 
 > [!WARNING]
-> **The installer does not yet provision KVM-capable node pools.** A micro-VM worker
-> needs `/dev/kvm`; `atelet` advertises the `ate.dev/kvm` extended resource only on nodes
-> that have the device, and the scheduler places micro-VM workers by that resource. On a
-> cluster of ordinary nodes the install succeeds and micro-VM workers then stay `Pending`
-> indefinitely.
+> **Micro-VM needs KVM-capable nodes.** A micro-VM worker needs `/dev/kvm`; `atelet`
+> advertises the `ate.dev/kvm` extended resource only on nodes that have the device, and
+> the scheduler places micro-VM workers by that resource. When Micro-VM is chosen, a new
+> cluster is created with nested virtualization, and an existing cluster without a
+> KVM-capable node pool is refused at the cluster step.
 >
 > **Before installing**, ask GKE what your node pools are, since nested virtualization can
 > only be set when a pool is created:
@@ -202,9 +202,6 @@ upstream's `demos/counter/counter-microvm.yaml.tmpl` and
 > This second check is only meaningful once Substrate is running: the resource is
 > published by `atelet`, so on a cluster without it every node reports empty regardless of
 > what hardware it has.
->
-> Until node provisioning lands, bring your own KVM-capable pool — a node type with
-> nested virtualization enabled, or bare metal, where KVM is native.
 
 **Upgrading and teardown:** After upgrading a cluster that uses micro-VM across a
 Substrate revision bump, the bucket assets and `microvm` `SandboxConfig` digests must be
@@ -246,7 +243,7 @@ is known before the install. Clients are the workloads that send requests to act
 usually your application's frontend or backend service. `kubectl ate` talks to the API
 server, not the router, and needs no entry; neither do Substrate's own components.
 
-The installer sets the allowlist at step 6, before it turns Substrate on. It is
+The installer sets the allowlist at step 7, before it turns Substrate on. It is
 exported as `ATE_INGRESS_ALLOWED_SPIFFE_IDS` for the run, replacing any value you
 exported; the two lists are never merged.
 
@@ -262,9 +259,8 @@ exported; the two lists are never merged.
   `spiffe://cluster.local/ns/ate-demo-counter/sa/default` and
   `spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default`, and says it
   exports them on your behalf, warning if that replaces a value you exported. Both
-  are listed because the sandbox runtime, which decides the demo, is chosen after
-  step 6. Any pod running as the default service account in those two namespaces can
-  reach any actor.
+  are listed, whichever sandbox runtime step 4 chose. Any pod running as the default
+  service account in those two namespaces can reach any actor.
 
 To add a client after the install, redeploy the router with the full list. Each deploy
 replaces the list rather than adding to it. From the substrate checkout, with the

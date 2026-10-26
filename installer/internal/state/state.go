@@ -37,11 +37,11 @@ const (
 	CheckSetup
 	Images
 	Project
+	Sandbox
 	Cluster
 	Provision
 	IngressClients
 	ControlPlane
-	Sandbox
 	FilestoreCSI
 	Autoscaling
 	Demo
@@ -62,26 +62,23 @@ const (
 // the network — it resolves a revision against a git remote — and the doctor
 // is what reports a missing git or an unreachable network with a fix to paste.
 //
+// Sandbox comes before Cluster so the cluster step can refuse one without KVM.
+//
 // IngressClients comes right before ControlPlane, which hands its SPIFFE IDs
 // to ate-setup as the ingress router's allowlist.
 //
-// Sandbox comes after Autoscaling: the steps before it finish the cluster,
-// control-plane, storage, and node-pool setup, then it chooses the actor
-// sandbox runtime (staging the micro-VM assets and applying the microvm
-// SandboxConfig when Micro-VM is chosen).
-//
 // Order has no demo step: `make run` installs Substrate for your own
-// workloads. DemoOrder, for `make run-demo`, adds Demo after Sandbox, which
-// deploys the counter demo matching the chosen runtime.
+// workloads. DemoOrder, for `make run-demo`, adds Demo after Autoscaling,
+// which deploys the counter demo matching the chosen runtime.
 var Order = []Step{
-	Welcome, CheckSetup, Images, Project, Cluster, Provision,
-	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Complete,
+	Welcome, CheckSetup, Images, Project, Sandbox, Cluster, Provision,
+	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Complete,
 }
 
 // DemoOrder is the install flow of a demo run (--demo, `make run-demo`).
 var DemoOrder = []Step{
-	Welcome, CheckSetup, Images, Project, Cluster, Provision,
-	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
+	Welcome, CheckSetup, Images, Project, Sandbox, Cluster, Provision,
+	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Demo, Complete,
 }
 
 // InstallOrder is the install flow for a run, DemoOrder for a demo run and
@@ -108,6 +105,8 @@ func (s Step) Title() string {
 	switch s {
 	case Welcome:
 		return "Welcome"
+	case Sandbox:
+		return "Choose your sandbox runtime"
 	case Images:
 		return "Choose your images"
 	case CheckSetup:
@@ -122,8 +121,6 @@ func (s Step) Title() string {
 		return "Allow ingress clients"
 	case ControlPlane:
 		return "Turn on Substrate"
-	case Sandbox:
-		return "Choose your sandbox runtime"
 	case FilestoreCSI:
 		return "Install Filestore CSI driver"
 	case Autoscaling:
@@ -287,9 +284,8 @@ type Setup struct {
 	Subnetwork  string
 	MachineType string
 
-	ClusterName     string
-	ClusterIsNew    bool
-	ClusterKVMReady bool
+	ClusterName  string
+	ClusterIsNew bool
 
 	// ClusterNetwork, ClusterSubnetwork and ClusterDataplaneV2 describe the
 	// existing cluster the run connects to, as gcloud listed it. Bootstrap is
@@ -464,7 +460,6 @@ func (s *Setup) SelectCluster(c gcp.Cluster) {
 	s.ClusterName = c.Name
 	s.Zone = c.Location
 	s.ClusterIsNew = false
-	s.ClusterKVMReady = c.KVMReady
 	s.ClusterNetwork = c.NetworkName()
 	s.ClusterSubnetwork = c.SubnetworkName()
 	s.ClusterDataplaneV2 = c.DataplaneV2
@@ -477,7 +472,6 @@ func (s *Setup) SelectCluster(c gcp.Cluster) {
 func (s *Setup) NewCluster(name string) {
 	s.ClusterName = name
 	s.ClusterIsNew = true
-	s.ClusterKVMReady = false
 	s.ClusterNetwork = ""
 	s.ClusterSubnetwork = ""
 	s.ClusterDataplaneV2 = false
