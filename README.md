@@ -67,12 +67,12 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
-| 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
-| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
-| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
-| 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster had GKE's managed Filestore driver on, provision has already turned it off ([agent-substrate/substrate#2357](https://github.com/agent-substrate/substrate/issues/2357)), so skipping this leaves that cluster with none |
-| 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
-| 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
+| 4 | 📦 Choose your sandbox runtime | gVisor (the default, installed with the control plane) or micro-VM. Choosing micro-VM checks for the host tools its asset scripts need — see [Sandbox runtimes](#sandbox-runtimes) |
+| 5 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard; with micro-VM, existing clusters without a KVM-capable node pool are refused |
+| 6 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
+| 7 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. With micro-VM, it then runs `hack/install-microvm-deps.sh --install` to stage the micro-VM assets and apply the `microvm` SandboxConfig |
+| 8 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster had GKE's managed Filestore driver on, provision has already turned it off ([agent-substrate/substrate#2357](https://github.com/agent-substrate/substrate/issues/2357)), so skipping this leaves that cluster with none |
+| 9 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 10 | 🎬 Deploy a demo workload *(optional)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
 
 > [!NOTE]
@@ -101,19 +101,19 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 
   New clusters are created at 1.37 on the Rapid channel, the only one that carries 1.37 right now, so none of this applies to them. Advanced setup can pick a different version and channel, like 1.36 on Regular; the installer checks with GKE that the channel offers the version and warns if it doesn't.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
-- **Sandbox runtime comes right before the demo** so steps 1–8 finish setting up the cluster, storage, and node pools first, and step 10 immediately deploys the matching demo (`counter` or `counter-microvm`).
+- **Sandbox runtime comes right before the cluster step**, the first one whose answer depends on it: micro-VM needs a node pool with `/dev/kvm`, so the cluster list marks and refuses existing clusters without one before anything is provisioned. The micro-VM assets are staged later, by "Turn on Substrate", right after the control plane is up — the first point both the snapshot bucket and the SandboxConfig CRD exist.
 - **An existing cluster keeps its own network.** Provision's `setup-gcp bootstrap` warns when an existing cluster's network, subnetwork, or Dataplane V2 setting differs from what it's given, so the installer hands it the cluster's own values; the advanced track's network fields apply to new clusters only.
 
 </details>
 
 ## Sandbox runtimes
 
-Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
+Substrate runs each actor inside a sandbox, and step 4 chooses which kind.
 
 | | gVisor | Micro-VM |
 |---|---|---|
 | Isolation | syscall interception in userspace | hardware virtualization (kata + cloud-hypervisor) |
-| Installed by | the control-plane step, always | step 9, on request |
+| Installed by | the control-plane step, always | the control-plane step, when chosen at step 4 |
 | Node requirement | none | **`/dev/kvm` on the node** |
 
 **gVisor** is the default and needs nothing extra: `ate-setup` applies the
@@ -121,11 +121,12 @@ cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
 guest kernel, the guest rootfs and the base kata config — are fetched from the snapshot
-bucket at boot rather than baked into the worker image. Step 9 (`Choose your sandbox
-runtime`) reports whether the cluster you selected has a KVM-capable node pool, and on
-choosing Micro-VM it runs upstream's `hack/install-microvm-deps.sh --install` to assemble
-those five assets, upload them under `kata-assets/` in the snapshot bucket, and apply a
-cluster-wide `SandboxConfig` named `microvm` that points at them.
+bucket at boot rather than baked into the worker image. Choosing it at step 4 checks that
+`sha256sum`, `zstd` and `unzip` are installed, and step 5 refuses existing clusters
+without a KVM-capable node pool. Step 7 (`Turn on Substrate`) then also runs upstream's
+`hack/install-microvm-deps.sh --install` to assemble those five assets, upload them under
+`kata-assets/` in the snapshot bucket, and apply a cluster-wide `SandboxConfig` named
+`microvm` that points at them.
 
 Actor templates must then name it explicitly:
 
@@ -135,45 +136,34 @@ sandboxConfig:
   configName: microvm
 ```
 
-> [!WARNING]
-> **The installer does not yet provision KVM-capable node pools.** A micro-VM worker
-> needs `/dev/kvm`; `atelet` advertises the `ate.dev/kvm` extended resource only on nodes
-> that have the device, and the scheduler places micro-VM workers by that resource. On a
-> cluster of ordinary nodes the install succeeds and micro-VM workers then stay `Pending`
-> indefinitely.
+> [!NOTE]
+> **KVM node-pool requirements (`/dev/kvm`):** Micro-VM workers require `/dev/kvm`;
+> `atelet` advertises the `ate.dev/kvm` extended resource on nodes with `/dev/kvm`, and
+> the scheduler places micro-VM workers on those nodes.
 >
-> **Before installing**, ask GKE what your node pools are, since nested virtualization can
-> only be set when a pool is created:
+> - **New clusters created by the installer** automatically enable nested virtualization
+>   (`--enable-nested-virtualization=true` on the default `c3-standard-4` worker pool).
+> - **Existing clusters** are checked at cluster selection when **Micro-VM** is chosen. An
+>   existing cluster must have at least one node pool with
+>   `enableNestedVirtualization: true` (`n1`, `n2`, `n2d`, `c3`) or a bare-metal (`-metal`)
+>   machine type; otherwise add a pool before installing:
 >
 > ```bash
-> gcloud container node-pools list --cluster CLUSTER --location LOCATION \
->   --format='table(name,config.machineType,config.advancedMachineFeatures.enableNestedVirtualization)'
+> gcloud container node-pools create microvm-pool --cluster CLUSTER --location LOCATION \
+>   --project PROJECT --machine-type n2-standard-4 --enable-nested-virtualization
 > ```
 >
-> You need at least one pool with `enableNestedVirtualization: True`. Note that `e2`
-> machine types cannot do nested virtualization at all — use `n1`, `n2`, `n2d`, or a
-> bare-metal (`-metal`) machine type.
->
 > **If you taint that pool** to reserve it, use `ate.dev/sandboxClass=microvm:NoSchedule`.
-> That is the only toleration micro-VM worker pods carry, so a pool tainted with any other
-> key repels them — and nothing above catches it: the pool has the hardware, `atelet`
-> advertises `ate.dev/kvm`, the capacity check below reports the resource present, and the
-> workers still sit `Pending`. To reserve a pool with a different key, add your own
-> toleration to the WorkerPool's `spec.template.tolerations`, which is merged with the
-> built-in one rather than replacing it.
+> That is the only toleration micro-VM worker pods carry by default. To reserve a pool
+> with a different key, add your own toleration to the WorkerPool's
+> `spec.template.tolerations`, which is merged with the built-in one rather than replacing
+> it.
 >
-> **After installing**, confirm `atelet` actually found the device:
+> **After installing**, confirm `atelet` found `/dev/kvm`:
 >
 > ```bash
 > kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.capacity.ate\.dev/kvm}{"\n"}{end}'
 > ```
->
-> This second check is only meaningful once Substrate is running: the resource is
-> published by `atelet`, so on a cluster without it every node reports empty regardless of
-> what hardware it has.
->
-> Until node provisioning lands, bring your own KVM-capable pool — a node type with
-> nested virtualization enabled, or bare metal, where KVM is native.
 
 **Upgrading and teardown:** The upgrade flow (`--upgrade`) updates the control plane and
 gVisor `SandboxConfig`, but does not re-stage `kata-assets/`; after upgrading a cluster

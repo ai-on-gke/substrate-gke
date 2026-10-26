@@ -976,7 +976,8 @@ type clusterScreen struct {
 	// cluster for existing install), "installed" (cluster already runs
 	// Substrate), "partial" (ate-system namespace without atelet),
 	// "teardown-confirm"/"teardown" (deleting the control plane so the
-	// install can continue here), "confirm" (incompatible cluster chosen).
+	// install can continue here), "no-kvm" (cluster lacks a KVM node pool
+	// when Micro-VM was chosen), "confirm" (incompatible cluster chosen).
 	mode              string
 	nameInput         textinput.Model
 	comp              *execComp
@@ -1086,6 +1087,8 @@ func (s *clusterScreen) Hints() []Hint {
 			return []Hint{{"y", "use it anyway (unsupported)"}, {"esc", "choose another"}}
 		}
 		return []Hint{{"y", "enable and continue"}, {"esc", "choose another"}}
+	case "no-kvm":
+		return []Hint{{"r", "re-check"}, {"esc", "choose another"}}
 	}
 	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
 }
@@ -1125,8 +1128,9 @@ func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
 
 // decide routes a probe result: a running install is blocked, a bare
 // ate-system namespace (an interrupted install — upstream's deploy is
-// documented safe to re-run) asks, and a clean cluster continues through the
-// pre-existing beta-API check.
+// documented safe to re-run) asks, a cluster without KVM blocks when Micro-VM
+// was chosen, and a clean cluster continues through the pre-existing beta-API
+// check.
 func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.Cmd {
 	switch {
 	case res.Partial():
@@ -1134,6 +1138,9 @@ func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.C
 		return nil
 	case res.Installed:
 		s.mode, s.installedVersions = "installed", res.Versions
+		return nil
+	case s.deps.Setup.MicroVM() && !c.KVMReady:
+		s.mode = "no-kvm"
 		return nil
 	case !c.SubstrateReady():
 		s.mode = "confirm"
@@ -1226,6 +1233,12 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			switch {
 			case !kept:
 				s.mode = "list"
+			case s.mode == "no-kvm" && s.clusters[s.cursor].KVMReady:
+				// A KVM-capable pool was added since the gate stopped this
+				// cluster, which is what [r] re-checks for. The probe that
+				// got it here found no install, so continue the selection.
+				c := s.clusters[s.cursor]
+				return tea.Batch(s.decide(c, s.probed[c.Name+"/"+c.Location]), s.bgProbes())
 			case s.mode == "confirm" && s.clusters[s.cursor].SubstrateReady():
 				// The APIs were turned on out of band between the reloads.
 				// The confirmation is about a problem the cluster no longer
@@ -1364,6 +1377,18 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				return s.choose(s.clusters[s.cursor])
 			}
 			s.mode = "list"
+			return nil
+
+		case "no-kvm":
+			switch key {
+			case "r":
+				// Stays in no-kvm while the list reloads, so the reload keeps
+				// the selection; the clustersMsg handler routes it again once
+				// the cluster has a KVM-capable pool.
+				return s.Init()
+			case "b", "esc":
+				s.mode = "list"
+			}
 			return nil
 		}
 
@@ -1557,6 +1582,10 @@ func (s *clusterScreen) View(w int) string {
 			badge = theme.Bad.Render(theme.GlyphFail + " beta APIs missing")
 			short = theme.Bad.Render(theme.GlyphFail + " no beta APIs")
 		}
+		if s.deps.Setup.MicroVM() && !c.KVMReady {
+			badge += theme.Bad.Render(" · " + theme.GlyphFail + " no KVM pool")
+			short += theme.Bad.Render(" · " + theme.GlyphFail + " no KVM")
+		}
 		if res, ok := s.probed[c.Name+"/"+c.Location]; ok && res.Installed {
 			label, shortLabel := " · substrate installed", " · installed"
 			if res.Partial() {
@@ -1709,6 +1738,18 @@ func (s *clusterScreen) View(w int) string {
 		// border.
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 78)).Render(
 			theme.Warning.Render(title) + "\n\n" + strings.Join(paras, "\n\n")))
+	case "no-kvm":
+		sel := s.clusters[s.cursor]
+		cmd := fmt.Sprintf("gcloud container node-pools create microvm-pool --cluster %s --location %s --project %s --machine-type n2-standard-4 --enable-nested-virtualization",
+			sel.Name, sel.Location, s.deps.Setup.ProjectID)
+		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 88)).Render(
+			theme.Bad.Render(fmt.Sprintf("Cluster %q has no KVM-capable node pool.", sel.Name))+"\n\n"+
+				"Micro-VM sandboxes require /dev/kvm on worker nodes (enableNestedVirtualization\n"+
+				"on n1/n2/n2d/c3, or a -metal machine type). Without a KVM-capable pool,\n"+
+				"Micro-VM workers stay Pending and cannot schedule.\n\n"+
+				"Add a KVM-capable node pool first:\n"+
+				"  "+cmd+"\n\n"+
+				theme.Key.Render("[r]")+" re-check   "+theme.Key.Render("[esc]")+" choose another"))
 	default:
 		// Wrapped to the content width rather than broken by hand: at 80
 		// columns the hand-broken lines ran past the edge and were cut.
@@ -1716,6 +1757,13 @@ func (s *clusterScreen) View(w int) string {
 			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer. Below "+gcp.PodCertificateGARelease.String()+", in the control plane or any node pool, it also needs the beta PodCertificate APIs, "+
 				"which GKE serves only for clusters that opted in; provision turns them on for a cluster without them, "+
 				"and its pools below "+gcp.PodCertificateGARelease.String()+" must then be replaced. New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
+		// The same kind of note for the runtime chosen one step back: the
+		// "no KVM pool" badge says which clusters fail, this says why.
+		if s.deps.Setup.MicroVM() {
+			b.WriteString("\n\n" + theme.Subtle.Width(max(w-2, 20)).Render(
+				"MicroVM needs a node pool with nested virtualization enabled (/dev/kvm). "+
+					"Nested virtualization can only be set when a pool is created, so an existing cluster without such a pool needs to add one first."))
+		}
 	}
 	return b.String()
 }

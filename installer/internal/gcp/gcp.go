@@ -474,42 +474,6 @@ func poolVersions(pools []rawNodePool) []PoolVersion {
 	return out
 }
 
-// ClusterKVMReady queries gcloud to check whether the named cluster currently
-// has a KVM-capable node pool. It describes only the target cluster rather than
-// listing every cluster in the project so large projects do not time out.
-func (c *Client) ClusterKVMReady(ctx context.Context, projectID, cluster, location string) (bool, error) {
-	if c.DryRun {
-		clusters, err := c.ListClusters(ctx, projectID)
-		if err != nil {
-			return false, err
-		}
-		for _, cl := range clusters {
-			if cl.Name == cluster && (location == "" || cl.Location == location) {
-				return cl.KVMReady, nil
-			}
-		}
-		return false, nil
-	}
-	out, err := c.run(ctx, "container", "clusters", "describe", cluster,
-		"--project="+projectID, "--location="+location, "--format=json")
-	if err != nil {
-		return false, err
-	}
-	return ParseClusterKVMReady(out)
-}
-
-// ParseClusterKVMReady decodes `gcloud container clusters describe --format=json`
-// and reports whether any of the cluster's node pools is KVM-capable.
-func ParseClusterKVMReady(data []byte) (bool, error) {
-	var raw struct {
-		NodePools []rawNodePool `json:"nodePools"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return false, fmt.Errorf("parsing cluster description: %w", err)
-	}
-	return kvmReady(raw.NodePools), nil
-}
-
 // ParseClusters decodes `gcloud container clusters list --format=json`.
 func ParseClusters(data []byte) ([]Cluster, error) {
 	var raw []struct {

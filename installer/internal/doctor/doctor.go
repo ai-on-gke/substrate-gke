@@ -205,10 +205,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 				if missing := MissingMicroVMTools(); len(missing) > 0 {
 					return Result{Warn,
 						fmt.Sprintf("missing %s; needed only if you select the Micro-VM sandbox", strings.Join(missing, ", ")),
-						// Homebrew installs coreutils g-prefixed (gsha256sum);
-						// upstream's scripts call sha256sum by name, so the
-						// gnubin directory has to be on PATH for them too.
-						`brew install coreutils zstd jq && export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"   # or apt-get install coreutils zstd unzip jq make`}
+						MicroVMToolsFix}
 				}
 				return Result{Pass, strings.Join(MicroVMTools, ", ") + " on PATH", ""}
 			},
@@ -273,10 +270,15 @@ func gkeAuthPluginFix(sdkRoot string) string {
 	return "gcloud components install " + gkeAuthPlugin
 }
 
-// MicroVMTools are the host utilities the micro-VM path needs beyond the
-// always-checked ones: sha256sum, zstd and unzip for upstream's asset
-// scripts, and make and jq for the demo on older trees such as v0.1.0.
-var MicroVMTools = []string{"sha256sum", "zstd", "unzip", "jq", "make"}
+// MicroVMTools are the host utilities upstream's micro-VM asset scripts
+// (hack/microvm-assets/assemble.sh and hack/install-microvm-deps.sh) require:
+// sha256sum (virtiofsd checksum), zstd (tar --zstd on kata-static), and unzip.
+var MicroVMTools = []string{"sha256sum", "zstd", "unzip"}
+
+// MicroVMToolsFix installs MicroVMTools. Homebrew installs coreutils
+// g-prefixed (gsha256sum); upstream's scripts call sha256sum by name, so the
+// gnubin directory has to be on PATH for them too.
+const MicroVMToolsFix = `brew install coreutils zstd && export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"   # or apt-get install coreutils zstd unzip`
 
 // MissingMicroVMTools returns whichever of MicroVMTools are not on PATH.
 func MissingMicroVMTools() []string {
