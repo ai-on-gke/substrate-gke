@@ -117,6 +117,16 @@ func typeReleaseImages(t *testing.T, app *App) {
 	typeOver(t, app, testImageTag)
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter"))
+	skipPluginImages(t, app)
+}
+
+// skipPluginImages takes the GKE plugin images step's default, skipping it,
+// when the walk is on it. Only the install flow has that step.
+func skipPluginImages(t *testing.T, app *App) {
+	t.Helper()
+	if app.mach.Current() == state.PluginImages {
+		pump(t, app, key("enter"))
+	}
 }
 
 // typeOver clears the images screen's focused field, which may hold a
@@ -169,7 +179,7 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	// typed and the offered commit is accepted. Nothing is built, so the
 	// project is never asked for a registry to push to.
 	press("enter")
-	typeReleaseImages(t, app)
+	typeReleaseImages(t, app) // and skips the GKE plugin images
 	if app.mach.Current() != state.Project {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
@@ -416,6 +426,7 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	// Only this path asks for a registry.
 	press("2", "enter")
 	press("enter")
+	skipPluginImages(t, app)
 	// Project screen in Advanced track:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
 	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel, 8:Repo, 9:RepositoryName
@@ -1339,7 +1350,7 @@ func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {
 	}
 	pump(t, app, key("enter")) // submit
 
-	if app.mach.Current() != state.Project {
+	if app.mach.Current() != state.PluginImages {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
 	if app.deps.Setup.Prebuilt() {
@@ -1375,7 +1386,7 @@ func TestImagesScreenAcceptsAnOverriddenRegistry(t *testing.T) {
 	pump(t, app, key("enter")) // tag → commit
 	pump(t, app, key("enter")) // submit, keeping the offered commit
 
-	if app.mach.Current() != state.Project {
+	if app.mach.Current() != state.PluginImages {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
 	st := app.deps.Setup
@@ -1445,7 +1456,7 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	}
 	pump(t, app, key("enter")) // submit; the dry-run resolver answers with the pin
 
-	if app.mach.Current() != state.Project {
+	if app.mach.Current() != state.PluginImages {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
 	if !app.deps.Setup.Prebuilt() {
@@ -3023,6 +3034,138 @@ func TestDemoScreenWarnsThatReleasesHaveNoDemoImage(t *testing.T) {
 			view := newDemoScreen(deps).View(120)
 			if got := strings.Contains(view, "do not publish the counter demo's image"); got != tc.warn {
 				t.Errorf("warning shown = %v, want %v:\n%s", got, tc.warn, view)
+			}
+		})
+	}
+}
+
+// testPluginRepo, testPluginImageRepo, testPluginImageTag and testPluginCommit
+// stand in for published GKE plugin images, which version apart from
+// Substrate's.
+const (
+	testPluginRepo      = "https://github.com/agent-substrate-plugins/gke-credential-provider"
+	testPluginImageRepo = "ghcr.io/agent-substrate-plugins/gke-credential-provider"
+	testPluginImageTag  = "v0.1.0"
+	testPluginCommit    = "0123456789abcdef0123456789abcdef01234567"
+)
+
+// pluginImagesApp walks to the GKE plugin images step with pre-built
+// Substrate images.
+func pluginImagesApp(t *testing.T) *App {
+	t.Helper()
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	pump(t, app, key("enter")) // welcome → doctor
+	pump(t, app, key("enter")) // doctor → images
+	pump(t, app, key("enter")) // pre-built images
+	typeOver(t, app, testImageRepo)
+	pump(t, app, key("enter"))
+	typeOver(t, app, testImageTag)
+	pump(t, app, key("enter"))
+	pump(t, app, key("enter")) // submit
+	if app.mach.Current() != state.PluginImages {
+		t.Fatalf("after images: %v", app.mach.Current())
+	}
+	return app
+}
+
+// typePluginField replaces the plugin images screen's focused field.
+func typePluginField(t *testing.T, app *App, text string) {
+	t.Helper()
+	scr := app.cur.(*pluginImagesScreen)
+	scr.fields[scr.focus].SetValue("")
+	typeText(t, app, text)
+}
+
+// No GKE plugin is published yet, so the step skips by default, and skipping
+// clears plugin images given earlier in the run.
+func TestPluginImagesStepSkipsByDefault(t *testing.T) {
+	app := pluginImagesApp(t)
+	st := app.deps.Setup
+	st.PluginSourceRepo, st.PluginImageRepo, st.PluginImageTag, st.PluginCommit = testPluginRepo, testPluginImageRepo, testPluginImageTag, testPluginCommit
+	if view := app.View(); !strings.Contains(view, "Choose your GKE plugin images") {
+		t.Errorf("plugin images view:\n%s", view)
+	}
+	pump(t, app, key("enter"))
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after the plugin step: %v", app.mach.Current())
+	}
+	if st.GKEPlugins() || st.PluginSourceRepo != "" || st.PluginImageTag != "" || st.PluginCommit != "" {
+		t.Errorf("skipping left plugin images recorded: %+v", st)
+	}
+}
+
+// The plugin images come with their own source tree, registry, tag and
+// commit, the same four things the Substrate images step names, and are
+// recorded apart from the Substrate images.
+func TestPluginImagesStepRecordsItsOwnImages(t *testing.T) {
+	app := pluginImagesApp(t)
+	pump(t, app, key("1"))
+	pump(t, app, key("enter"))
+
+	scr := app.cur.(*pluginImagesScreen)
+	want := []string{"Source tree", "Image registry", "Image tag", "Commit the images were built from"}
+	if !slices.Equal(scr.labels, want) {
+		t.Fatalf("labels = %q, want %q", scr.labels, want)
+	}
+	if scr.value(pluginRegistryField) != snapshot.PluginRegistry {
+		t.Errorf("registry = %q, want the default %q", scr.value(pluginRegistryField), snapshot.PluginRegistry)
+	}
+	typePluginField(t, app, testPluginRepo)
+	pump(t, app, key("enter"))
+	typePluginField(t, app, testPluginImageRepo)
+	pump(t, app, key("enter"))
+	typePluginField(t, app, testPluginImageTag)
+	pump(t, app, key("enter"))
+	typePluginField(t, app, testPluginCommit)
+	pump(t, app, key("enter")) // submit
+
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after the plugin step: %v (%s)", app.mach.Current(), scr.errText)
+	}
+	st := app.deps.Setup
+	if st.PluginSourceRepo != testPluginRepo || st.PluginImageRepo != testPluginImageRepo || st.PluginImageTag != testPluginImageTag || st.PluginCommit != testPluginCommit {
+		t.Errorf("plugin images not recorded: %+v", st)
+	}
+	if st.ImageRepo != testImageRepo || st.ImageTag != testImageTag {
+		t.Errorf("the Substrate images moved: %s:%s", st.ImageRepo, st.ImageTag)
+	}
+}
+
+// Nothing resolves the plugin values against a remote, so their form is
+// checked at the prompt: an https source tree, a registry, a valid tag, and a
+// full commit SHA.
+func TestPluginImagesStepRejectsMalformedValues(t *testing.T) {
+	for name, tc := range map[string]struct {
+		field int
+		value string
+		err   string
+	}{
+		"no source tree":     {pluginSourceField, "", "https git URL"},
+		"ssh source tree":    {pluginSourceField, "git@github.com:agent-substrate-plugins/x.git", "https git URL"},
+		"no registry":        {pluginRegistryField, "", "registry is required"},
+		"no tag":             {pluginTagField, "", "tag is required"},
+		"malformed tag":      {pluginTagField, "my/team:v1", ""},
+		"abbreviated commit": {pluginCommitField, "0123456", "40-character SHA"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app := pluginImagesApp(t)
+			pump(t, app, key("1"))
+			pump(t, app, key("enter"))
+			scr := app.cur.(*pluginImagesScreen)
+			values := []string{testPluginRepo, testPluginImageRepo, testPluginImageTag, testPluginCommit}
+			values[tc.field] = tc.value
+			for i, v := range values {
+				scr.fields[i].SetValue(v)
+			}
+			scr.setFocus(pluginCommitField)
+			pump(t, app, key("enter")) // submit
+
+			if app.mach.Current() != state.PluginImages || scr.errText == "" || scr.focus != tc.field {
+				t.Fatalf("step=%v err=%q focus=%d, want to stay with focus %d", app.mach.Current(), scr.errText, scr.focus, tc.field)
+			}
+			if !strings.Contains(scr.errText, tc.err) {
+				t.Errorf("err = %q, want it to mention %q", scr.errText, tc.err)
 			}
 		})
 	}

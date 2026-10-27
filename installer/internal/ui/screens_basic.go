@@ -281,7 +281,7 @@ func (s *doctorScreen) View(w int) string {
 		b.WriteString(theme.Bad.Render("Fix the failed checks above, then press [r] to re-run."))
 	case s.dockerWarned():
 		b.WriteString(theme.Warning.Render(
-			"Docker is only needed to build Substrate 0.2 or later from source, and step 3\n" +
+			"Docker is only needed to build Substrate 0.2 or later from source, and step 4\n" +
 				"checks it again against the registry you push to. Press [enter] to continue,\n" +
 				"or fix the warnings above and press [r]."))
 	default:
