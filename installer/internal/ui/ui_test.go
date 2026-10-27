@@ -92,29 +92,40 @@ func key(s string) tea.Msg {
 	}
 }
 
+
 // testClientID stands in for a client SPIFFE ID typed at the IngressClients
 // step.
-const testClientID = "spiffe://cluster.local/ns/shop/sa/frontend"
-
-// testImageRepo and testImageTag stand in for a published image set. No
-// registry is published by default, so the pre-built track always types one.
+//
+// testImageRepo and testImageTag stand in for a published image set. The
+// release registry's tag is empty until the pin's release has images, so the
+// walks type their own registry and tag rather than depend on the defaults.
 const (
+	testClientID = "spiffe://cluster.local/ns/shop/sa/frontend"
 	testImageRepo = "registry.example.com/substrate"
 	testImageTag  = "v0.6.0"
 )
 
-// typeReleaseImages fills the pre-built track's registry and tag and accepts
-// the manifest commit, from the registry field to the next step. Each value
-// goes in as one pasted key message rather than a message per character:
+// typeReleaseImages replaces the pre-built track's registry and tag and
+// accepts the manifest commit, from the registry field to the next step. Each
+// value goes in as one pasted key message rather than a message per character:
 // every message is a full pump through the app, and the walks that call this
 // would otherwise push the package past go test's 10 minute default.
 func typeReleaseImages(t *testing.T, app *App) {
 	t.Helper()
-	typeText(t, app, testImageRepo)
+	typeOver(t, app, testImageRepo)
 	pump(t, app, key("enter"))
-	typeText(t, app, testImageTag)
+	typeOver(t, app, testImageTag)
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter"))
+}
+
+// typeOver clears the images screen's focused field, which may hold a
+// default, and types text into it.
+func typeOver(t *testing.T, app *App, text string) {
+	t.Helper()
+	scr := app.cur.(*imagesScreen)
+	scr.fields[scr.focus].SetValue("")
+	typeText(t, app, text)
 }
 
 func testApp(t *testing.T) *App {
@@ -1389,7 +1400,7 @@ func TestImagesScreenRejectsAMalformedTag(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
-	typeText(t, app, testImageRepo)
+	typeOver(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
 
 	scr := app.cur.(*imagesScreen)
@@ -1422,9 +1433,9 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
-	typeText(t, app, testImageRepo)
+	typeOver(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
-	typeText(t, app, testImageTag)
+	typeOver(t, app, testImageTag)
 	pump(t, app, key("enter")) // tag → commit
 
 	scr := app.cur.(*imagesScreen)
@@ -2995,6 +3006,28 @@ func TestDemoSummary(t *testing.T) {
 	}
 }
 
+// Upstream releases publish no demo images, so the demo step warns before a
+// deploy that would pull one from the release registry, and only then.
+func TestDemoScreenWarnsThatReleasesHaveNoDemoImage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		repo string
+		warn bool
+	}{
+		"release registry": {snapshot.ReleaseRepo, true},
+		"own registry":     {testImageRepo, false},
+		"source build":     {"", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps := testApp(t).deps
+			deps.Setup.ImageRepo, deps.Setup.ImageTag = tc.repo, testImageTag
+			view := newDemoScreen(deps).View(120)
+			if got := strings.Contains(view, "do not publish the counter demo's image"); got != tc.warn {
+				t.Errorf("warning shown = %v, want %v:\n%s", got, tc.warn, view)
+			}
+		})
+	}
+}
+
 // TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo verifies that the
 // sandbox step (Choose your sandbox runtime) reflects the selected cluster's
 // KVM status, stages the micro-VM assets when option 2 is picked, and that
@@ -3503,10 +3536,11 @@ func TestProvisionChecklistNamesTheSelectedCommit(t *testing.T) {
 	}
 }
 
-// No registry is published by default, so the pre-built track offers no
-// registry or tag and refuses to go on without them. Its manifest commit, like
-// the source track's revision, starts at the pin.
-func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
+// The pre-built track offers upstream's release registry, and its tag once the
+// pin's release has images there; until then it refuses to go on without a
+// tag. With no registry it refuses as well. Its manifest commit, like the
+// source track's revision, starts at the pin.
+func TestImagesScreenOffersTheReleaseRegistryAndThePin(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
@@ -3514,12 +3548,24 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 	pump(t, app, key("enter")) // pre-built images
 
 	scr := app.cur.(*imagesScreen)
-	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != snapshot.Commit {
-		t.Fatalf("pre-built fields = %q, %q, %q; want empty, empty, the pin", scr.value(0), scr.value(1), scr.value(2))
+	if scr.value(0) != snapshot.ReleaseRepo || scr.value(1) != snapshot.ReleaseVersion || scr.value(2) != snapshot.Commit {
+		t.Fatalf("pre-built fields = %q, %q, %q; want %q, %q, the pin", scr.value(0), scr.value(1), scr.value(2), snapshot.ReleaseRepo, snapshot.ReleaseVersion)
 	}
-	pump(t, app, key("enter"))
-	pump(t, app, key("enter"))
-	pump(t, app, key("enter")) // submit with nothing typed
+	if snapshot.ReleaseVersion == "" {
+		if view := app.View(); !strings.Contains(view, "no published images yet") {
+			t.Errorf("the screen should say the pin's release has no images:\n%s", view)
+		}
+		pump(t, app, key("enter"))
+		pump(t, app, key("enter"))
+		pump(t, app, key("enter")) // submit with the tag empty
+		if app.mach.Current() != state.Images || !strings.Contains(scr.errText, "tag is required") || scr.focus != 1 {
+			t.Fatalf("an empty tag was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
+		}
+	}
+
+	scr.fields[0].SetValue("")
+	scr.setFocus(2)
+	pump(t, app, key("enter")) // submit with no registry
 	if app.mach.Current() != state.Images || !strings.Contains(scr.errText, "registry is required") || scr.focus != 0 {
 		t.Fatalf("an empty registry was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
 	}

@@ -859,8 +859,9 @@ func TestFetchedRequiresTheCompletionMarker(t *testing.T) {
 	}
 }
 
-// testImageRepo and testImageTag stand in for a published image set. No
-// registry is published by default, so a pre-built install always names one.
+// testImageRepo and testImageTag stand in for a published image set, so the
+// tests do not depend on ReleaseRepo and ReleaseVersion, which move with the
+// pin.
 const (
 	testImageRepo = "registry.example.com/substrate"
 	testImageTag  = "v0.6.0"

@@ -71,7 +71,7 @@ A terminal wizard walks the steps below, running the real command it shows and s
 | # | Step | What happens |
 |---|---|---|
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
-| 2 | 🖼️ Choose your images | Pre-built images from a registry you name, or build your own from a commit (the pin by default) — see [Where the images come from](#where-the-images-come-from) |
+| 2 | 🖼️ Choose your images | Pre-built images (upstream's release registry by default), or build your own from a commit (the pin by default) — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
@@ -277,16 +277,24 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** | **Build from source** |
 |---|---|---|
 | **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
-| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag | The pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag |
+| **Default value** | Registry `ghcr.io/agent-substrate/substrate`; no tag yet (see the note below); the commit defaults to the pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag | The pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
 
 > [!NOTE]
-> No registry of pre-built images is published at the moment. The GKE release
-> registry (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated
-> and has no images for v0.6.0; a replacement will be published in a different
-> registry. Until then, a pre-built install needs images you or your team
-> published, and building from source is the way to install the pin.
+> Upstream's release workflow publishes each release's images to
+> `ghcr.io/agent-substrate/substrate`, tagged with the release tag. It replaces
+> the deprecated GKE release registry
+> (`us-docker.pkg.dev/gke-substrate-release/substrate`). v0.6.0 was released
+> before that workflow existed and gets no images, so until the pin moves to a
+> release that has them, the tag is left empty: a pre-built install needs a
+> tag you name, with the commit it was built from, and building from source is
+> the way to install the pin.
+>
+> Releases publish the control plane, worker, credential provider, and
+> envoy-dataplane images, not the demo images. With images from
+> `ghcr.io/agent-substrate/substrate`, the counter demo step fails on the
+> missing demo image; skip it, or build from source to run the demo.
 
 For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
@@ -389,7 +397,7 @@ make screenshots  # regenerate the README screenshots from the dry-run wizard
 
 ### Bumping the pinned commit
 
-This changes what fresh installs get. Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion` next to it to match the `go` directive in that revision's `go.mod`.
+This changes what fresh installs get. Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion` next to it to match the `go` directive in that revision's `go.mod`. When `Commit` is a release tag whose images are published to `ReleaseRepo` (`ghcr.io/agent-substrate/substrate`), set `ReleaseVersion` to that tag; leave it empty otherwise.
 
 ```bash
 make substrate-pin        # print the current pinned values
@@ -399,7 +407,7 @@ make substrate-pin-check  # verify MinGoVersion against upstream's go.mod — ru
 > [!WARNING]
 > Skipping `make substrate-pin-check` after a bump lets the preflight doctor pass while the install fails mid-bootstrap.
 
-`Commit` is a default, not a limit: the images step offers it as the revision to build from and as the commit pre-built images were built from, and accepts any other revision. There is no default image registry or tag to bump with it.
+`Commit`, `ReleaseRepo`, and `ReleaseVersion` are defaults, not limits: the images step offers `Commit` as the revision to build from and as the commit pre-built images were built from, offers `ReleaseRepo` and `ReleaseVersion` as the pre-built registry and tag, and accepts any other values. With `ReleaseVersion` set, the pre-built track is marked recommended and the screen warns when the registry or tag is changed without the commit.
 
 ## Glossary
 

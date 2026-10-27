@@ -62,22 +62,47 @@ const (
 	// branch.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
-	// match the `go` directive in that revision's go.mod.
+	// match the `go` directive in that revision's go.mod. Set ReleaseVersion
+	// to the tag naming the new Commit once its images are published.
 	Commit = "d3f2363590a11b2f50489971985ba033b4c9eff7"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
 	// when checking Go before the first fetch.
 	MinGoVersion = "1.27.0"
-)
 
-// There is no default image registry. The GKE release registry
-// (us-docker.pkg.dev/gke-substrate-release/substrate) is deprecated and has no
-// images for Commit, and no registry replaces it yet, so a pre-built install
-// names the registry and tag of images published for Commit, or for whatever
-// commit it gives the images step. A registry is read-only to an install:
-// images are pulled from it and never pushed to it, which is why installing
-// pre-built images leaves KO_DOCKER_REPO out of the picture.
+	// ReleaseRepo is where upstream's release workflow publishes the images
+	// of each vX.Y.Z tag, every image tagged with the release tag. It is the
+	// registry the wizard offers by default. It replaces the deprecated GKE
+	// release registry (us-docker.pkg.dev/gke-substrate-release/substrate).
+	//
+	// A registry is read-only to an install: images are pulled from it and
+	// never pushed to it, which is why installing pre-built images leaves
+	// KO_DOCKER_REPO out of the picture.
+	//
+	// Releases publish the control plane, worker, credential provider and
+	// envoy-dataplane images, not the demo images (upstream's
+	// cmd/ate-setup/internal/images released list), so a demo deployed with
+	// --image-repo pointing here finds no image for the demo workload.
+	ReleaseRepo = "ghcr.io/agent-substrate/substrate"
+
+	// ReleaseVersion is the tag the wizard offers by default: the upstream
+	// release tag naming Commit, whose images ReleaseRepo holds. The two move
+	// together, because the manifests read out of that tree have to match the
+	// images this tag names.
+	//
+	// It is empty while Commit's release has no images in ReleaseRepo, and
+	// then the wizard offers the registry but asks for the tag. v0.6.0 was
+	// released before upstream published images, and upstream's release
+	// workflow refuses to publish images for a release that is already
+	// published, so v0.6.0 never gets any; the first tag with images is a
+	// later one.
+	//
+	// Both of these are defaults, not limits: the wizard takes any registry
+	// and tag the user types, along with the commit those images were built
+	// from.
+	ReleaseVersion = ""
+)
 
 // TransferGSAName is the snapshot transfer service account's name: what
 // setup-gcp creates (its DefaultTransferGSAName) and what ate-setup is given
