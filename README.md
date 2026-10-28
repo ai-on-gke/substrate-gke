@@ -314,15 +314,17 @@ For source builds using the default registry, the installer creates `ate-images`
 
 ### GKE plugin images
 
-The step after the images asks the same questions about the GKE plugins, starting with the GKE credential provider (GCP egress credential injection). The plugins are to be published from their own repositories under [`agent-substrate-plugins`](https://github.com/agent-substrate-plugins), with their own commits, versions, and images, so their answers do not follow from Substrate's.
+The step after the images asks the same questions about the GKE plugins. The plugins are published from their own repositories under [`agent-substrate-plugins`](https://github.com/agent-substrate-plugins), with their own commits, versions, and images, so their answers do not follow from Substrate's. The first is the GKE credential provider, the Google Secret Manager egress credential provider in [`credprovider-gcp-secret-manager`](https://github.com/agent-substrate-plugins/credprovider-gcp-secret-manager).
 
 | | **Pre-built plugin images** | **Skip** *(default)* |
 |---|---|---|
 | **You provide** | Source tree (an https git URL), image registry, image tag, and the full commit SHA the images were built from | Nothing |
-| **Default value** | Registry `ghcr.io/agent-substrate-plugins`; the other fields start empty | — |
+| **Default value** | The credential provider's repository; registry `ghcr.io/agent-substrate-plugins/credprovider-gcp-secret-manager`; no tag yet; commit [`55a0595b`](https://github.com/agent-substrate-plugins/credprovider-gcp-secret-manager/commit/55a0595b22c506838b761ecb8001a939fd9ecfbd), the head of its `main` | — |
 
 > [!NOTE]
-> No plugin repository or image exists yet, and the install does not deploy any plugin: the step only records what you give it, and checks the values' form at the prompt without reaching a remote. The credential provider used is still the one `ATE_CREDENTIAL_PROVIDER` selects (the bundled Kubernetes Secrets provider by default). The upgrade flow does not have this step.
+> The credential provider publishes no images yet: it has no release tags and no publishing workflow, so the tag is left for you to give, and the registry path is where its images are expected (`.../gsm-credential-provider`), not where any are. It also needs a Substrate newer than v0.6.0, the pin. The install does not deploy it: the step only records what you give it, and checks the values' form at the prompt without reaching a remote. The credential provider used is still the one `ATE_CREDENTIAL_PROVIDER` selects (the bundled Kubernetes Secrets provider by default). The upgrade flow does not have this step.
+>
+> The pins are `PluginCommit`, `PluginRegistry`, and `PluginReleaseVersion` in `installer/internal/snapshot/plugins.go`. When the repository publishes a release, set `PluginReleaseVersion` to its tag and `PluginCommit` to the commit that tag names, and check `PluginRegistry` against its publishing workflow.
 
 ## How Substrate itself is obtained
 

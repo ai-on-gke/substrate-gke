@@ -3108,9 +3108,6 @@ func TestPluginImagesStepRecordsItsOwnImages(t *testing.T) {
 	if !slices.Equal(scr.labels, want) {
 		t.Fatalf("labels = %q, want %q", scr.labels, want)
 	}
-	if scr.value(pluginRegistryField) != snapshot.PluginRegistry {
-		t.Errorf("registry = %q, want the default %q", scr.value(pluginRegistryField), snapshot.PluginRegistry)
-	}
 	typePluginField(t, app, testPluginRepo)
 	pump(t, app, key("enter"))
 	typePluginField(t, app, testPluginImageRepo)
@@ -3129,6 +3126,54 @@ func TestPluginImagesStepRecordsItsOwnImages(t *testing.T) {
 	}
 	if st.ImageRepo != testImageRepo || st.ImageTag != testImageTag {
 		t.Errorf("the Substrate images moved: %s:%s", st.ImageRepo, st.ImageTag)
+	}
+}
+
+// The step offers the pinned GKE credential provider: its repository,
+// registry, release tag and commit. While the provider publishes no release
+// the tag is empty and required; with one typed, the pinned values are
+// recorded as offered. Coming back to the step shows what was recorded.
+func TestPluginImagesStepOffersThePinnedCredentialProvider(t *testing.T) {
+	app := pluginImagesApp(t)
+	pump(t, app, key("1"))
+	pump(t, app, key("enter"))
+
+	scr := app.cur.(*pluginImagesScreen)
+	got := []string{scr.value(pluginSourceField), scr.value(pluginRegistryField), scr.value(pluginTagField), scr.value(pluginCommitField)}
+	want := []string{snapshot.PluginRepoURL, snapshot.PluginRegistry, snapshot.PluginReleaseVersion, snapshot.PluginCommit}
+	if !slices.Equal(got, want) {
+		t.Fatalf("plugin fields = %q, want %q", got, want)
+	}
+	if !fullSHA.MatchString(snapshot.PluginCommit) {
+		t.Errorf("PluginCommit %q is not a full commit SHA, so the step would refuse its own default", snapshot.PluginCommit)
+	}
+	if snapshot.PluginReleaseVersion == "" {
+		if view := app.View(); !strings.Contains(view, "no published images yet") {
+			t.Errorf("the screen should say the provider has no published images:\n%s", view)
+		}
+		scr.setFocus(pluginCommitField)
+		pump(t, app, key("enter")) // submit with the tag empty
+		if app.mach.Current() != state.PluginImages || !strings.Contains(scr.errText, "tag is required") || scr.focus != pluginTagField {
+			t.Fatalf("an empty tag was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
+		}
+		typePluginField(t, app, testPluginImageTag)
+	}
+	scr.setFocus(pluginCommitField)
+	pump(t, app, key("enter")) // submit
+
+	if app.mach.Current() != state.Project {
+		t.Fatalf("after the plugin step: %v (%s)", app.mach.Current(), scr.errText)
+	}
+	st := app.deps.Setup
+	if st.PluginSourceRepo != snapshot.PluginRepoURL || st.PluginImageRepo != snapshot.PluginRegistry || st.PluginCommit != snapshot.PluginCommit {
+		t.Errorf("the pinned plugin images were not recorded: %+v", st)
+	}
+
+	st.PluginImageTag = "v9.9.9" // stands in for a value the run already holds
+	back := newPluginImagesScreen(app.deps)
+	back.enterImages()
+	if back.value(pluginTagField) != "v9.9.9" {
+		t.Errorf("coming back offered tag %q, not the recorded one", back.value(pluginTagField))
 	}
 }
 

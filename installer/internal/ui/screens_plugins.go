@@ -30,9 +30,10 @@ import (
 // plugins are published from their own repositories with their own commits
 // and versions, so none of these follows from the Substrate images.
 //
-// Skipping is the default, because no plugin is published yet and nothing
-// deploys one (see snapshot.PluginSourceOrg). Unlike the images step, the
-// source tree is a field: no plugin repository is fixed yet.
+// Skipping is the default, because the GKE credential provider publishes no
+// images yet and nothing deploys it (see the note above snapshot.PluginSourceOrg).
+// Unlike the images step, the source tree is a field: it starts at the
+// credential provider's repository, and later plugins live in others.
 type pluginImagesScreen struct {
 	deps *Deps
 	// mode: "choose", "images".
@@ -67,21 +68,22 @@ func (s *pluginImagesScreen) Hints() []Hint {
 }
 
 // enterImages offers what the run already holds, so coming back to the step
-// shows the values given before, and otherwise the plugin organization's
-// registry. The source tree starts empty because no repository name is fixed.
+// shows the values given before, and otherwise the pinned GKE credential
+// provider: its repository, registry, release tag (empty while it publishes
+// none) and commit.
 func (s *pluginImagesScreen) enterImages() tea.Cmd {
 	st := s.deps.Setup
-	registry := st.PluginImageRepo
-	if registry == "" {
-		registry = snapshot.PluginRegistry
+	repo, registry, tag, commit := st.PluginSourceRepo, st.PluginImageRepo, st.PluginImageTag, st.PluginCommit
+	if !st.GKEPlugins() {
+		repo, registry, tag, commit = snapshot.PluginRepoURL, snapshot.PluginRegistry, snapshot.PluginReleaseVersion, snapshot.PluginCommit
 	}
 	s.mode, s.focus, s.errText = "images", 0, ""
 	s.labels = []string{"Source tree", "Image registry", "Image tag", "Commit the images were built from"}
 	s.fields = []textinput.Model{
-		newInput(st.PluginSourceRepo, snapshot.PluginSourceOrg+"/<repository>"),
+		newInput(repo, snapshot.PluginRepoURL),
 		newInput(registry, snapshot.PluginRegistry),
-		newInput(st.PluginImageTag, "the tag the plugin images were published under"),
-		newInput(st.PluginCommit, "40 hex characters"),
+		newInput(tag, "the release tag the plugin images were published under"),
+		newInput(commit, "40 hex characters"),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
@@ -185,9 +187,9 @@ func (s *pluginImagesScreen) View(w int) string {
 	if s.mode == "choose" {
 		options := []struct{ name, desc string }{
 			{"[1] Install pre-built plugin images",
-				"Records a plugin source tree, registry, tag and commit. The plugins are\npublished apart from Substrate, with their own commits and versions."},
+				"Records a plugin source tree, registry, tag and commit, starting at the\nGKE credential provider (credprovider-gcp-secret-manager). The plugins\nare published apart from Substrate, with their own commits and versions."},
 			{"[2] Skip — no GKE plugins",
-				"No plugin is published yet and the install does not deploy one, so\nthis changes nothing about the install."},
+				"The credential provider publishes no images yet and the install does\nnot deploy it, so this changes nothing about the install."},
 		}
 		for i, o := range options {
 			panel, title := theme.Panel, theme.Subtle
@@ -211,6 +213,9 @@ func (s *pluginImagesScreen) View(w int) string {
 	if s.errText != "" {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
 		return b.String()
+	}
+	if snapshot.PluginReleaseVersion == "" {
+		b.WriteString(theme.Subtle.Render("The credential provider has no published images yet. Give the tag of\nimages you published, and the commit they were built from.") + "\n")
 	}
 	b.WriteString(theme.Subtle.Render("The plugin repositories live under " + snapshot.PluginSourceOrg + ".\nNothing deploys the plugins yet; these values are recorded for when\nthe install does."))
 	return b.String()
