@@ -462,3 +462,27 @@ func TestTeardownSourcesDevEnvUnlessNoDevEnv(t *testing.T) {
 		t.Errorf("teardown.sh with NO_DEV_ENV=1 used .ate-dev-env.sh; calls:\n%s", guarded.calls)
 	}
 }
+
+// --all deletes the node service account, and only after the cluster: nodes
+// still running as it would lose logging, monitoring and image pulls.
+func TestTeardownAllDeletesNodeServiceAccountAfterCluster(t *testing.T) {
+	run := runTeardown(t, "", teardownEnv, nil, "--all")
+	if run.exitCode != 0 {
+		t.Fatalf("teardown --all exited %d, want 0:\n%s", run.exitCode, run.output)
+	}
+	cluster := strings.Index(run.calls, "container clusters delete substrate-test")
+	role := strings.Index(run.calls, "projects remove-iam-policy-binding acme --member=serviceAccount:ate-gke-node@acme.iam.gserviceaccount.com --role=roles/container.defaultNodeServiceAccount")
+	account := strings.Index(run.calls, "iam service-accounts delete ate-gke-node@acme.iam.gserviceaccount.com")
+	if cluster < 0 || role < 0 || account < 0 {
+		t.Fatalf("--all skipped the cluster or the node service account; calls:\n%s", run.calls)
+	}
+	if !(cluster < role && role < account) {
+		t.Errorf("--all must delete the cluster, then revoke the node role, then delete the account; calls:\n%s", run.calls)
+	}
+
+	vars := map[string]string{"PROJECT_ID": "acme", "NODE_GSA_NAME": "custom-node", "NO_DEV_ENV": "1"}
+	run = runTeardown(t, "", vars, nil, "--delete-node-service-account")
+	if run.exitCode != 0 || !strings.Contains(run.calls, "iam service-accounts delete custom-node@acme.iam.gserviceaccount.com") {
+		t.Errorf("--delete-node-service-account ignored NODE_GSA_NAME (exit %d); calls:\n%s", run.exitCode, run.calls)
+	}
+}

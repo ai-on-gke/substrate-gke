@@ -58,7 +58,6 @@ func TestProjectGrantsPreserveConditionalBindings(t *testing.T) {
 		grant func(context.Context, *Config) error
 	}{
 		{"GKE node grant", grantGkeNodePermissions},
-		{"atelet grant", grantAteletPermissions},
 		// Not raised in review: `create cloudsql` reads and writes the same
 		// project policy the same way.
 		{"Cloud SQL grant", grantCloudSQLProjectRoles},
@@ -66,6 +65,8 @@ func TestProjectGrantsPreserveConditionalBindings(t *testing.T) {
 	for _, g := range grants {
 		t.Run(g.name, func(t *testing.T) {
 			f := newFakeGCP(t)
+			// The GKE node grant looks up the node service account first.
+			newFakeREST(t)
 			f.policy.Bindings = []*iampb.Binding{conditionalBinding()}
 			f.policy.Version = 3
 
@@ -185,66 +186,38 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// Review question: does the atelet grant (bootstrap step 5) log under the
-// GKE node and API server labels? Its log lines appear in the installer's
-// step output, so they must name atelet in both the skip and the update path.
-func TestAteletGrantLogsUnderItsOwnName(t *testing.T) {
-	member := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
-	tests := []struct {
-		name     string
-		bindings []*iampb.Binding
-	}{
-		{"update path", nil},
-		{"skip path", []*iampb.Binding{
-			{Role: "roles/storage.objectAdmin", Members: []string{member}},
-			{Role: "roles/artifactregistry.reader", Members: []string{member}},
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeGCP(t)
-			f.policy.Bindings = tt.bindings
-			logs := captureLogs(t)
-
-			if err := grantAteletPermissions(context.Background(), iamConfig()); err != nil {
-				t.Fatal(err)
-			}
-
-			out := logs.String()
-			if !strings.Contains(out, "atelet") {
-				t.Errorf("atelet grant logs do not mention atelet:\n%s", out)
-			}
-			for _, wrong := range []string{"GKE node", "api server"} {
-				if strings.Contains(out, wrong) {
-					t.Errorf("atelet grant logs %q:\n%s", wrong, out)
-				}
-			}
-		})
-	}
-}
-
-// atelet's project-level storage.objectAdmin is granted only with
-// --atelet-snapshot-access; artifactregistry.reader is granted either way.
-func TestAteletProjectGrantFollowsSnapshotAccess(t *testing.T) {
-	member := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
+// atelet gets nothing on the project: its image pull grant is on the
+// repository bootstrap created, under atelet's own name, and it is told which
+// command grants it the user's actor image repositories.
+func TestAteletGrantIsRepositoryScoped(t *testing.T) {
+	const member = "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
+	const repo = "projects/acme/locations/us-west1/repositories/ate-images"
 	for _, access := range []bool{false, true} {
 		t.Run(fmt.Sprintf("snapshot access %v", access), func(t *testing.T) {
 			f := newFakeGCP(t)
+			r := newFakeREST(t)
+			logs := captureLogs(t)
 			cfg := iamConfig()
 			cfg.AteletSnapshotAccess = access
+			cfg.CreateArtifactRepository = true
+			cfg.Region, cfg.ArtifactRegistryRepository = "us-west1", "ate-images"
 
 			if err := grantAteletPermissions(context.Background(), cfg); err != nil {
 				t.Fatal(err)
 			}
 
-			if len(f.written) != 1 {
-				t.Fatalf("policy written %d times, want 1", len(f.written))
+			if len(f.written) != 0 {
+				t.Errorf("atelet grant wrote the project policy: %v", f.written)
 			}
-			if !hasPlainGrant(f.written[0], "roles/artifactregistry.reader", member) {
-				t.Errorf("atelet lacks artifactregistry.reader; bindings: %v", f.written[0].GetBindings())
+			if len(r.written[repo]) != 1 || !hasPlainGrant(r.written[repo][0], imagePullRole, member) {
+				t.Errorf("atelet lacks %s on %s: %v", imagePullRole, repo, r.written[repo])
 			}
-			if got := hasPlainGrant(f.written[0], "roles/storage.objectAdmin", member); got != access {
-				t.Errorf("atelet has project storage.objectAdmin = %v, want %v", got, access)
+			out := logs.String()
+			if !strings.Contains(out, "atelet") || strings.Contains(out, "the nodes") {
+				t.Errorf("atelet grant logs do not name atelet alone:\n%s", out)
+			}
+			if !strings.Contains(out, "add-iam-policy-binding <repository> --project=<project> --location=<location> --member="+member) {
+				t.Errorf("atelet grant does not print the actor image repository command:\n%s", out)
 			}
 		})
 	}

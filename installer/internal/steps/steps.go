@@ -70,9 +70,10 @@ func Bootstrap(fetchLabel string, artifactRegistry, clusterIsNew, enableBetaAPIs
 		items = append(items, ChecklistItem{"Create the Artifact Registry repository", contains("Creating Artifact Registry repository")})
 	}
 	return append(items,
+		ChecklistItem{"Create the GKE node service account", contains("Creating the GKE node service account")},
 		ChecklistItem{clusterStep, contains("Creating GKE Cluster")},
 		ChecklistItem{"Create the GCS snapshot and asset buckets", contains("Creating GCS buckets for snapshots")},
-		ChecklistItem{"Grant GKE node permissions", contains("Granting GKE Node permissions")},
+		ChecklistItem{"Grant the nodes image pull access", contains("Granting GKE Node permissions")},
 		ChecklistItem{"Grant atelet Workload Identity permissions", contains("Granting Atelet permissions")},
 		ChecklistItem{"Create the snapshot transfer service account", contains("Creating the snapshot transfer service account")},
 		ChecklistItem{"Bind bucket IAM policies", contains("Creating IAM policy bindings for the buckets")},

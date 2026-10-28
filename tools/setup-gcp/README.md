@@ -79,8 +79,13 @@ Filestore CSI driver disabled). The control plane has no IP endpoint: it is
 reachable only through its DNS endpoint, where IAM authorizes every request
 (`container.clusters.connect`) before it reaches the API server.
 `gcloud container clusters get-credentials` uses the DNS endpoint
-automatically. An existing cluster keeps its Filestore add-on setting and its
-control plane endpoints.
+automatically. Its nodes boot with Secure Boot and integrity monitoring, and
+run as a dedicated node service account (`ate-gke-node` by default) that holds
+only `roles/container.defaultNodeServiceAccount`, instead of the Compute Engine
+default service account, which usually holds Editor on the project. `create
+cluster` creates that account first; `create iam` grants it image pull access.
+An existing cluster keeps its Filestore add-on setting, its control plane
+endpoints and its nodes' service account.
 
 If the cluster already exists, settings that can be changed in place
 (Workload Identity, beta APIs, Managed OpenTelemetry) are updated. Settings fixed at creation (network, subnetwork, Dataplane V2, nested
@@ -155,6 +160,7 @@ go -C tools/setup-gcp run . create cluster [flags]
 | `--network` | VPC network name. | `NETWORK` | `default` |
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
 | `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
+| `--node-service-account-name` | Name of the service account the nodes of a new cluster run as. `teardown.sh` reads the same variable. | `NODE_GSA_NAME` | `ate-gke-node` |
 | `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for microVM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |
@@ -271,12 +277,13 @@ go -C tools/setup-gcp run . create iam [flags]
 | Flag | Description | Default Env Var | Fallback Default |
 | :--- | :--- | :--- | :--- |
 | `--bucket` | GCS bucket name. | `BUCKET_NAME` | None (Required for bucket bindings*) |
-| `--gke-nodes` | Grant GKE nodes permission to pull images. | - | `true` |
-| `--atelet` | Grant atelet project-level permissions. | - | `true` |
+| `--gke-nodes` | Create the node service account, grant it its project role, and print the command that grants it read access to the image repository. | - | `true` |
+| `--node-service-account-name` | Name of the node service account. `teardown.sh` reads the same variable. | `NODE_GSA_NAME` | `ate-gke-node` |
+| `--atelet` | Print the commands that grant atelet read access to the Substrate and actor image repositories. | - | `true` |
 | `--transfer-service-account` | Create the snapshot transfer service account and let ate-api-server create tokens for it. | - | `true` |
 | `--transfer-gsa-name` | Name of the snapshot transfer service account to create. ate-setup and `teardown.sh` read the same variable. | `SNAPSHOT_TRANSFER_GSA_NAME` | `ate-snapshot-transfer` |
 | `--bucket-bindings` | Grant ate-api-server and the snapshot transfer service account access to the snapshot bucket, and atelet read access to the asset bucket. | - | `true` |
-| `--atelet-snapshot-access` | Also grant atelet `storage.objectAdmin` on the project, and `storage.objectAdmin` and `storage.bucketViewer` on the snapshot bucket. Substrate releases up to v0.5.0 need these; see below. | `ATELET_SNAPSHOT_ACCESS` | `true` |
+| `--atelet-snapshot-access` | Also grant atelet `storage.objectAdmin` and `storage.bucketViewer` on the snapshot bucket. Substrate releases up to v0.5.0 need these; see below. | `ATELET_SNAPSHOT_ACCESS` | `true` |
 
 *\*Note: Required for bucket bindings unless the `BUCKET_NAME` environment variable is set.*
 
@@ -297,13 +304,15 @@ their Kubernetes ServiceAccounts (`ate-system/atelet` and
 directly as IAM principals. The one Google service account `create iam`
 creates is the snapshot transfer account⁵, which ate-api-server's credential
 exchange impersonates and downscopes per actor for every snapshot transfer.
+It also creates the node service account³, which the nodes of a cluster this
+tool creates run as.
 This only works on a cluster with Workload Identity enabled. `create cluster`
 enables the `PROJECT_ID.svc.id.goog` pool, and a pre-existing cluster must
 have it enabled too, or their GCS calls fail with `401`.
 
 | Member | Role | Resource | Why |
 | :--- | :--- | :--- | :--- |
-| atelet WI principal¹ | `roles/artifactregistry.reader` | project² | Pull sandbox runtime assets |
+| atelet WI principal¹ | `roles/artifactregistry.reader` | the Substrate image repository, and each actor image repository | Pull actor images. Granted like the nodes' grant on the Substrate image repository; for your actor image repositories setup-gcp prints the command |
 | ate-api-server WI principal¹ | `roles/storage.objectAdmin` | snapshot bucket | Copy external snapshots for tags, delete the ones nothing refers to |
 | ate-api-server WI principal¹ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
 | snapshot transfer SA⁵ | `roles/storage.objectAdmin` | snapshot bucket | Snapshot transfers, on tokens the credential exchange downscopes per actor |
@@ -311,18 +320,18 @@ have it enabled too, or their GCS calls fail with `401`.
 | ate-api-server WI principal¹ | `roles/iam.serviceAccountTokenCreator` | snapshot transfer SA⁵ | The credential exchange impersonates it |
 | Cloud SQL GSA⁶ | `roles/iam.serviceAccountTokenCreator` | snapshot transfer SA⁵ | Granted by `create cloudsql`: with Cloud SQL, ate-api-server's pod runs as this account |
 | atelet WI principal¹ | `roles/storage.objectViewer` | asset bucket (`BUCKET_NAME-assets`) | Read microVM sandbox assets |
-| atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | project² | Read/write actor snapshots in GCS |
 | atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | snapshot bucket | Read/write snapshot objects |
 | atelet WI principal¹ ⁴ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
-| default compute SA³ | `roles/artifactregistry.reader` | project² | Nodes pull images from Artifact Registry, which also serves gcr.io |
+| node SA³ | `roles/container.defaultNodeServiceAccount` | project | Node logging, monitoring and operation, and nothing else |
+| each node pool's SA⁷ | `roles/artifactregistry.reader` | the image repository | Nodes pull images from Artifact Registry, which also serves gcr.io. `bootstrap --create-repository` grants it on the repository it creates; otherwise setup-gcp prints the `gcloud artifacts repositories add-iam-policy-binding` command, filled in from `ATE_IMAGE_REPO` or `KO_DOCKER_REPO` |
 
 ¹ `principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/ate-system/sa/SERVICE_ACCOUNT` — note it is keyed to the **project number**, not the ID.
-² Project-level today; scoping these down is tracked in the TODOs in `cmd/iam.go`.
-³ `PROJECT_NUMBER-compute@developer.gserviceaccount.com`. It gets no storage role, since root on a node can use it. Installs set up before this also granted it `roles/storage.objectViewer` on the project. Remove that with
-`gcloud projects remove-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" --role=roles/storage.objectViewer --condition=None`.
+² setup-gcp grants nothing on the project except the node SA's role, which only exists there. Installs set up before this also granted atelet `roles/artifactregistry.reader` and `roles/storage.objectAdmin` on the project; `teardown.sh --revoke-atelet-permissions` removes them.
+³ `NAME@PROJECT_ID.iam.gserviceaccount.com`, with `NAME` from `NODE_GSA_NAME` (`ate-gke-node` by default). Root on a node can use whatever this account holds, so it gets no storage role and no project-wide image pull role. Installs set up before it granted the Compute Engine default service account (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`) `roles/artifactregistry.reader`, and earlier ones `roles/storage.objectViewer`, on the project; `teardown.sh --revoke-gke-node-permissions` removes both.
 ⁴ Only with `--atelet-snapshot-access` (on by default). Substrate releases up to v0.5.0 move snapshots with atelet's own identity and need these. Later revisions run every snapshot transfer on a token scoped to its actor, issued by ate-api-server's credential exchange, and do not; pass `--atelet-snapshot-access=false` for them.
 ⁵ `NAME@PROJECT_ID.iam.gserviceaccount.com`, with `NAME` from `SNAPSHOT_TRANSFER_GSA_NAME`. setup-gcp, `teardown.sh` and the installer default it to `ate-snapshot-transfer`. ate-setup has no default and, from Substrate v0.6.0, requires it on GKE. Releases before v0.6.0 do not use the account.
 ⁶ `ate-api-server@PROJECT_ID.iam.gserviceaccount.com` by default, see [cloud-sql.md](cloud-sql.md).
+⁷ `bootstrap` grants the service account of every node pool in the cluster, so a cluster you brought can pull too: the node SA³ for a cluster this tool created, or `PROJECT_NUMBER-compute@developer.gserviceaccount.com` for a pool that names no service account. `create iam` grants only the node SA.
 
 Manual equivalent:
 
@@ -332,9 +341,24 @@ ATELET="${WI}/atelet"
 ATE_API="${WI}/ate-api-server"
 TRANSFER_NAME="${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}"
 TRANSFER="${TRANSFER_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+NODE_NAME="${NODE_GSA_NAME:-ate-gke-node}"
+NODE="${NODE_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
+gcloud iam service-accounts create "${NODE_NAME}" --project="${PROJECT_ID}" \
+  --display-name="Substrate GKE nodes"
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${NODE}" --role=roles/container.defaultNodeServiceAccount
+# The Substrate image repository: the nodes and atelet.
+for member in "serviceAccount:${NODE}" "${ATELET}"; do
+  gcloud artifacts repositories add-iam-policy-binding SUBSTRATE_REPOSITORY \
+    --project=REPOSITORY_PROJECT --location=LOCATION \
+    --member="${member}" --role=roles/artifactregistry.reader
+done
+# Each repository your actor images come from: atelet only.
+gcloud artifacts repositories add-iam-policy-binding ACTOR_REPOSITORY \
+  --project=REPOSITORY_PROJECT --location=LOCATION \
   --member="${ATELET}" --role=roles/artifactregistry.reader
+
 gcloud iam service-accounts create "${TRANSFER_NAME}" --project="${PROJECT_ID}" \
   --display-name="Substrate snapshot transfers"
 gcloud iam service-accounts add-iam-policy-binding "${TRANSFER}" --project="${PROJECT_ID}" \
@@ -427,6 +451,7 @@ go -C tools/setup-gcp run . bootstrap [flags]
 | `--network` | VPC network name. | `NETWORK` | `default` |
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
 | `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
+| `--node-service-account-name` | Name of the service account the nodes of a new cluster run as. `teardown.sh` reads the same variable. | `NODE_GSA_NAME` | `ate-gke-node` |
 | `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for microVM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |
@@ -457,10 +482,11 @@ go -C tools/setup-gcp run . create repository --project-id <project> --region <r
 [`teardown.sh`](teardown.sh) deletes what `bootstrap` creates, in reverse
 order: dashboards, bucket IAM bindings, the snapshot transfer service
 account, project IAM bindings, the snapshot and asset buckets and their
-contents, and the cluster. It reads the same environment variables
-(`PROJECT_ID`, `PROJECT_NUMBER`, `CLUSTER_NAME`, `CLUSTER_LOCATION`,
-`BUCKET_NAME`, and `SNAPSHOT_TRANSFER_GSA_NAME`, default
-`ate-snapshot-transfer`) and shells out to `gcloud`. Each step can run alone; see
+contents, the cluster, and then the node service account its nodes ran as.
+It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
+`CLUSTER_NAME`, `CLUSTER_LOCATION`, `BUCKET_NAME`,
+`SNAPSHOT_TRANSFER_GSA_NAME`, default `ate-snapshot-transfer`, and
+`NODE_GSA_NAME`, default `ate-gke-node`) and shells out to `gcloud`. Each step can run alone; see
 `tools/setup-gcp/teardown.sh` with no arguments for the list. It sources
 `.ate-dev-env.sh` from the working directory unless `NO_DEV_ENV=1` is set.
 
@@ -469,8 +495,8 @@ tools/setup-gcp/teardown.sh [--all|--cluster-scoped]
 ```
 
 * `--all` deletes everything, including the dashboards, the snapshot transfer
-  service account and the project-level IAM bindings, which every Substrate
-  cluster in the project shares.
+  and node service accounts and the node service account's project role, which every
+  Substrate cluster in the project shares.
 * `--cluster-scoped` deletes only this cluster, its buckets and the bindings on
   them. Use it while other Substrate clusters still use the project.
 

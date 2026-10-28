@@ -202,8 +202,8 @@ func TestBootstrapRepositoryOptIn(t *testing.T) {
 		{"flag enables over environment", "false", "repository name must be", []string{"--create-repository"}},
 		{"environment enables creation", "true", "repository name must be", nil},
 		{"flag disables environment", "true", "--bucket-name is required", []string{"--create-repository=false"}},
-		{"eight steps by default", "", "Step 1/8:", []string{"--repository-name=ate-images", "--bucket-name=test-bucket"}},
-		{"nine steps when enabled", "", "Step 1/9:", []string{"--repository-name=ate-images", "--bucket-name=test-bucket", "--create-repository"}},
+		{"nine steps by default", "", "Step 1/9:", []string{"--repository-name=ate-images", "--bucket-name=test-bucket"}},
+		{"ten steps when enabled", "", "Step 1/10:", []string{"--repository-name=ate-images", "--bucket-name=test-bucket", "--create-repository"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := []string{"-test.run=^TestBootstrapRepositoryOptIn$", "--", "bootstrap", "--project-id=test-project", "--region=europe-west1", "--repository-name=invalid/name", "--bucket-name="}
