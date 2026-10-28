@@ -30,6 +30,7 @@ import (
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gkeoverlay"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/theme"
@@ -44,11 +45,62 @@ func main() {
 		fetchTree     = flag.String("fetch-substrate", "", "fetch a substrate checkout into this directory and exit (the pinned commit, or --commit)")
 		fetchCommit   = flag.String("commit", "", "with --fetch-substrate: the commit to fetch instead of the pinned one")
 		setupGCP      = flag.String("setup-gcp", "", "path to this repository's tools/setup-gcp (default: found above the working directory or the executable)")
+		gkeOverlay    = flag.String("gke-overlay", "", "path to this repository's deploy/gke (default: found above the working directory or the executable)")
+		addOverlay    = flag.String("add-gke-overlay", "", "add deploy/gke to the substrate tree in this directory if it lacks upstream's GKE manifests, and exit")
+		checkOverlay  = flag.String("check-gke-overlay", "", "report whether the substrate tree in this directory needs deploy/gke, without changing it, and exit")
 	)
 	flag.Parse()
 
+	// setup-gcp and deploy/gke are found relative to this repository's
+	// checkout: above the working directory (`go run .` from installer/) or
+	// the executable (`make build` writes bin/).
+	cwd, _ := os.Getwd()
+	exeDir := ""
+	exe, exeErr := os.Executable()
+	if exeErr == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	findOverlay := func() string {
+		dir, err := gkeoverlay.Find(*gkeOverlay, cwd, exeDir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return dir
+	}
+
+	// The install and upgrade steps run these two in the fetched tree before
+	// ate-setup reads it. See gkeoverlay for why, and for when they go away.
+	if *addOverlay != "" {
+		// Hide the change from git only in a tree the installer fetched,
+		// never in a checkout of the user's.
+		hide := snapshot.Fetched(*addOverlay, true)
+		if err := gkeoverlay.Apply(os.Stdout, absPath(*addOverlay), findOverlay(), hide); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *checkOverlay != "" {
+		tree := absPath(*checkOverlay)
+		// deploy/gke sits two levels below the repository root.
+		installerDir := filepath.Join(filepath.Dir(filepath.Dir(findOverlay())), "installer")
+		add := "(cd " + snapshot.ShellQuote(installerDir) + " && go run . --add-gke-overlay " + snapshot.ShellQuote(tree) + ")"
+		if err := gkeoverlay.Check(os.Stdout, tree, add); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if *fetchTree != "" {
 		if err := snapshot.FetchTree(context.Background(), *fetchTree, *fetchCommit); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		// Upstream's runbook deploys from this tree, so it gets deploy/gke
+		// the way the install's own tree does.
+		if err := gkeoverlay.Apply(os.Stdout, absPath(*fetchTree), findOverlay(), true); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -80,16 +132,17 @@ func main() {
 		return
 	}
 
-	// Bootstrap runs setup-gcp from this repository. Resolve it before the
-	// wizard starts, so a missing copy fails here rather than mid-install.
-	cwd, _ := os.Getwd()
-	exeDir := ""
-	if exe, err := os.Executable(); err == nil {
-		exeDir = filepath.Dir(exe)
-	}
+	// Bootstrap runs setup-gcp from this repository, and the deploy adds
+	// deploy/gke by re-running this executable. Resolve all three before the
+	// wizard starts, so a missing one fails here rather than mid-install.
 	setupGCPDir, err := snapshot.FindSetupGCP(*setupGCP, cwd, exeDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	overlayDir := findOverlay()
+	if exeErr != nil {
+		fmt.Fprintln(os.Stderr, "error: cannot locate the installer's own executable, which the deploy step runs to add deploy/gke:", exeErr)
 		os.Exit(1)
 	}
 
@@ -120,6 +173,8 @@ func main() {
 		LogPath: logPath,
 	}
 	deps.Builder.SetupGCP = setupGCPDir
+	deps.Builder.GKEOverlay = overlayDir
+	deps.Builder.Self = exe
 	if dir, err := snapshot.DefaultUpgradeDir(); err == nil {
 		deps.UpgradeDir = dir
 	} else {
@@ -255,4 +310,12 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 			note(routerNote)
 		}
 	}
+}
+
+// absPath returns path made absolute, or path itself if that fails.
+func absPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }

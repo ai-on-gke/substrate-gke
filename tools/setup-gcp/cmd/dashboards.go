@@ -26,7 +26,10 @@ import (
 	"cloud.google.com/go/monitoring/dashboard/apiv1/dashboardpb"
 	"github.com/spf13/cobra"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-on-gke/substrate-gke/tools/setup-gcp/dashboards"
 )
@@ -37,12 +40,18 @@ var dashboardFiles = []string{
 	"ate-snapshot-dashboard.json",
 }
 
+// dashboardUpdateAttempts bounds how often an update is retried after
+// Cloud Monitoring rejects its etag as out of date.
+const dashboardUpdateAttempts = 3
+
 // createMonitoringDashboards creates or updates each dashboard in
 // dashboardFiles. It is idempotent: dashboards are matched by displayName and
 // updated in place, because CreateDashboard always creates a new dashboard (so
-// calling it repeatedly would produce duplicates).
+// calling it repeatedly would produce duplicates). A project can still hold
+// several dashboards with one displayName, for example from runs before this
+// matching existed; each of them is updated.
 func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
-	client, err := dashboard.NewDashboardsClient(ctx)
+	client, err := dashboard.NewDashboardsClient(ctx, clientOptions...)
 	if err != nil {
 		return fmt.Errorf("create dashboards client: %w", err)
 	}
@@ -51,7 +60,7 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 	parent := "projects/" + cfg.ProjectID
 
 	// Index existing dashboards by displayName to decide create vs update.
-	existing := map[string]*dashboardpb.Dashboard{}
+	existing := map[string][]*dashboardpb.Dashboard{}
 	it := client.ListDashboards(ctx, &dashboardpb.ListDashboardsRequest{Parent: parent})
 	for {
 		d, err := it.Next()
@@ -61,7 +70,7 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 		if err != nil {
 			return fmt.Errorf("list dashboards: %w", err)
 		}
-		existing[d.GetDisplayName()] = d
+		existing[d.GetDisplayName()] = append(existing[d.GetDisplayName()], d)
 	}
 
 	// An empty DashboardDir means the definitions embedded in the binary.
@@ -83,16 +92,20 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}
 
-		if cur, ok := existing[d.GetDisplayName()]; ok {
-			// Update in place: reuse the existing resource name and etag.
-			d.Name = cur.GetName()
-			d.Etag = cur.GetEtag()
-			slog.Info("Updating dashboard",
-				slog.String("displayName", d.GetDisplayName()),
-				slog.String("name", d.GetName()),
-				slog.String("file", filepath.Base(path)))
-			if _, err := client.UpdateDashboard(ctx, &dashboardpb.UpdateDashboardRequest{Dashboard: d}); err != nil {
-				return fmt.Errorf("update dashboard %q: %w", d.GetDisplayName(), err)
+		if matches := existing[d.GetDisplayName()]; len(matches) > 0 {
+			if len(matches) > 1 {
+				slog.Warn("Several dashboards share this display name; updating each of them",
+					slog.String("displayName", d.GetDisplayName()),
+					slog.Int("count", len(matches)))
+			}
+			for _, cur := range matches {
+				slog.Info("Updating dashboard",
+					slog.String("displayName", d.GetDisplayName()),
+					slog.String("name", cur.GetName()),
+					slog.String("file", filepath.Base(path)))
+				if err := updateDashboard(ctx, client, cur.GetName(), d); err != nil {
+					return fmt.Errorf("update dashboard %q (%s): %w", d.GetDisplayName(), cur.GetName(), err)
+				}
 			}
 		} else {
 			slog.Info("Creating dashboard",
@@ -104,6 +117,30 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// updateDashboard replaces the dashboard called name with def's content.
+// The etag from ListDashboards can be out of date by the time of the update
+// (ai-on-gke/substrate-gke#69), so it reads the current etag with
+// GetDashboard first, and reads it again and retries when the update still
+// fails with Aborted because something changed the dashboard in between.
+func updateDashboard(ctx context.Context, client *dashboard.DashboardsClient, name string, def *dashboardpb.Dashboard) error {
+	var err error
+	for range dashboardUpdateAttempts {
+		var cur *dashboardpb.Dashboard
+		cur, err = client.GetDashboard(ctx, &dashboardpb.GetDashboardRequest{Name: name})
+		if err != nil {
+			return fmt.Errorf("get current etag: %w", err)
+		}
+		d := proto.Clone(def).(*dashboardpb.Dashboard)
+		d.Name = cur.GetName()
+		d.Etag = cur.GetEtag()
+		_, err = client.UpdateDashboard(ctx, &dashboardpb.UpdateDashboardRequest{Dashboard: d})
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+	}
+	return err
 }
 
 var dashboardsCmd = &cobra.Command{

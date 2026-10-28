@@ -5,9 +5,11 @@ This tool automates the provisioning and configuration of Google Cloud Platform 
 This tool was moved here from `tools/setup-gcp` in
 [agent-substrate/substrate](https://github.com/agent-substrate/substrate)
 ([agent-substrate/substrate#2304](https://github.com/agent-substrate/substrate/issues/2304)),
-imported from upstream commit `f69f41d3`. It is a separate Go module; run the
-commands below from the root of this repository. The installer's provisioning
-step runs this copy, whatever Substrate revision it installs.
+imported from upstream commit `f69f41d3` and last synced with upstream commit
+`ed3f2e4f`. Upstream is removing its copy, so new changes belong here. It is a
+separate Go module; run the commands below from the root of this repository.
+The installer's provisioning step runs this copy, whatever Substrate revision
+it installs.
 
 ## Overview
 
@@ -38,10 +40,10 @@ It uses a hierarchical command structure:
 
 All CLI flags can be configured via environment variables. If an environment variable is set, it will be used as the default value for the corresponding flag. Command-line flags always take precedence over environment variables.
 
-A convenient way to manage these is to copy the example environment file from a Substrate checkout, customize it, and source it before running the tool:
+A convenient way to manage these is to copy the example environment file, customize it, and source it before running the tool:
 
 ```bash
-cp <substrate checkout>/hack/ate-dev-env.sh.example .ate-dev-env.sh
+cp tools/setup-gcp/ate-dev-env.sh.example .ate-dev-env.sh
 # Edit .ate-dev-env.sh to match your project and preferences
 source .ate-dev-env.sh
 ```
@@ -181,7 +183,7 @@ go -C tools/setup-gcp run . create cluster [flags]
 | `--network` | VPC network name. | `NETWORK` | `default` |
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
 | `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
-| `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for micro-VM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
+| `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for microVM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |
 | `--boot-disk-provisioned-iops` | Provisioned IOPS for the node pool boot disk (`hyperdisk-balanced` only; must be set together with `--boot-disk-provisioned-throughput`). | `BOOT_DISK_PROVISIONED_IOPS` | None |
@@ -271,7 +273,7 @@ one of the options below.
 ### 3. Create Bucket
 
 Creates the GCS bucket for snapshots and the asset bucket, `NAME-assets`, for
-micro-VM sandbox assets. `NAME` can have at most 56 characters, so the asset
+microVM sandbox assets. `NAME` can have at most 56 characters, so the asset
 bucket's name fits GCS's limit of 63.
 
 ```bash
@@ -281,7 +283,7 @@ go -C tools/setup-gcp run . create bucket [flags]
 **Flags:**
 | Flag | Description | Default Env Var | Fallback Default |
 | :--- | :--- | :--- | :--- |
-| `--name` | Name of the GCS snapshot bucket. The micro-VM asset bucket is created beside it as `NAME-assets`. | `BUCKET_NAME` | None (Required*) |
+| `--name` | Name of the GCS snapshot bucket. The microVM asset bucket is created beside it as `NAME-assets`. | `BUCKET_NAME` | None (Required*) |
 
 *\*Note: Required unless the `BUCKET_NAME` environment variable is set.*
 
@@ -309,7 +311,7 @@ go -C tools/setup-gcp run . create iam [flags]
 #### What `create iam` actually grants
 
 On a fresh GCP project these bindings do not exist, and nothing else creates
-them. Without them atelet cannot fetch micro-VM assets, snapshots cannot be
+them. Without them atelet cannot fetch microVM assets, snapshots cannot be
 moved (`403` from GCS on the first suspend/resume), ate-api cannot copy or
 collect them, and nodes cannot pull images. `bootstrap` and `create iam` apply
 them for you. The table below is the reference for auditing them, or for
@@ -336,7 +338,7 @@ have it enabled too, or their GCS calls fail with `401`.
 | snapshot transfer SA⁵ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
 | ate-api-server WI principal¹ | `roles/iam.serviceAccountTokenCreator` | snapshot transfer SA⁵ | The credential exchange impersonates it |
 | Cloud SQL GSA⁶ | `roles/iam.serviceAccountTokenCreator` | snapshot transfer SA⁵ | Granted by `create cloudsql`: with Cloud SQL, ate-api-server's pod runs as this account |
-| atelet WI principal¹ | `roles/storage.objectViewer` | asset bucket (`BUCKET_NAME-assets`) | Read micro-VM sandbox assets |
+| atelet WI principal¹ | `roles/storage.objectViewer` | asset bucket (`BUCKET_NAME-assets`) | Read microVM sandbox assets |
 | atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | project² | Read/write actor snapshots in GCS |
 | atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | snapshot bucket | Read/write snapshot objects |
 | atelet WI principal¹ ⁴ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
@@ -398,7 +400,7 @@ and its grants, and ate-setup refuses to deploy ate-api-server on GKE until
 tokens.
 
 Substrate does not support upgrading a cluster in place yet. A cluster with
-micro-VM workers has to be recreated: each node indexes a sandbox runtime by
+microVM workers has to be recreated: each node indexes a sandbox runtime by
 the digests of its assets, which do not change when the assets move to the
 asset bucket, so a node keeps fetching them from the snapshot bucket. The
 commands below still apply when the new cluster reuses the GCP project.
@@ -409,7 +411,7 @@ a revision whose node plugin gets snapshot credentials from ate-api-server's
 credential exchange first. On an older release, removing these grants makes
 every suspend and resume fail with `403`. Remove those grants after running
 `create bucket` and `create iam`, and after rerunning
-`hack/install-microvm-deps.sh --install` if you use micro-VM workers, so the
+`hack/install-microvm-deps.sh --install` if you use microVM workers, so the
 assets are in the asset bucket. `ATELET` is set as in the manual equivalent
 above:
 
@@ -453,12 +455,12 @@ go -C tools/setup-gcp run . bootstrap [flags]
 | `--network` | VPC network name. | `NETWORK` | `default` |
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
 | `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
-| `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for micro-VM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
+| `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for microVM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |
 | `--boot-disk-provisioned-iops` | Provisioned IOPS for the node pool boot disk (`hyperdisk-balanced` only; must be set together with `--boot-disk-provisioned-throughput`). | `BOOT_DISK_PROVISIONED_IOPS` | None |
 | `--boot-disk-provisioned-throughput` | Provisioned throughput in MiB/s for the node pool boot disk (`hyperdisk-balanced` only; must be set together with `--boot-disk-provisioned-iops`). | `BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS` | None |
-| `--bucket-name` | Name of the GCS bucket for snapshots, at most 56 characters. The micro-VM asset bucket is created beside it as `BUCKET_NAME-assets`. | `BUCKET_NAME` | None (Required*) |
+| `--bucket-name` | Name of the GCS bucket for snapshots, at most 56 characters. The microVM asset bucket is created beside it as `BUCKET_NAME-assets`. | `BUCKET_NAME` | None (Required*) |
 | `--atelet-snapshot-access` | Grant atelet the snapshot storage roles Substrate releases up to v0.5.0 need (see [What `create iam` actually grants](#what-create-iam-actually-grants)). | `ATELET_SNAPSHOT_ACCESS` | `true` |
 | `--transfer-gsa-name` | Name of the snapshot transfer service account to create. ate-setup and `teardown.sh` read the same variable. | `SNAPSHOT_TRANSFER_GSA_NAME` | `ate-snapshot-transfer` |
 | `--create-repository` | Create a Docker image repository for source builds. | `CREATE_ARTIFACT_REPOSITORY` | `false` |
@@ -489,7 +491,18 @@ contents, and the cluster. It reads the same environment variables
 `ate-snapshot-transfer`) and shells out to `gcloud`. Each step can run alone; see
 `tools/setup-gcp/teardown.sh` with no arguments for the list. It sources
 `.ate-dev-env.sh` from the working directory unless `NO_DEV_ENV=1` is set.
-`--all` checks all five variables before deleting anything.
+
+```bash
+tools/setup-gcp/teardown.sh [--all|--cluster-scoped]
+```
+
+* `--all` deletes everything, including the dashboards, the snapshot transfer
+  service account and the project-level IAM bindings, which every Substrate
+  cluster in the project shares.
+* `--cluster-scoped` deletes only this cluster, its buckets and the bindings on
+  them. Use it while other Substrate clusters still use the project.
+
+Both check all five variables before deleting anything.
 
 A resource or binding that is already gone counts as deleted, so re-running
 after a partial teardown is safe. Any other failure (a denied permission, a
@@ -508,7 +521,9 @@ Image repositories are kept by default, including with `--all`. Add
 
 Change it whenever `bootstrap` gains or changes a resource. Most users should
 run [`tools/cleanup-gcp`](../cleanup-gcp) instead, which takes flags, looks up
-the project number, asks for confirmation, and runs `teardown.sh --all`.
+the project number, asks for confirmation, and runs `teardown.sh --all`. Run
+`teardown.sh --cluster-scoped` directly instead when other Substrate clusters
+share the project.
 
 ## Examples
 
@@ -530,7 +545,7 @@ go -C tools/setup-gcp run . bootstrap \
   --machine-type="n2-standard-8"
 ```
 
-### Bootstrap a cluster whose nodes cannot run micro-VM workers
+### Bootstrap a cluster whose nodes cannot run microVM workers
 
 Nested virtualization is on by default, so turning it off is the case that
 needs a flag:

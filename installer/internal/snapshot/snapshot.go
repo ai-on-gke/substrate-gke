@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gkeoverlay"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
@@ -456,6 +457,12 @@ type Builder struct {
 	// SetupGCP is the absolute path of this repository's setup-gcp module,
 	// which Bootstrap runs. See FindSetupGCP.
 	SetupGCP string
+	// GKEOverlay is the absolute path of this repository's deploy/gke, and
+	// Self the installer's own executable, which the deploy and upgrade
+	// steps re-run with --add-gke-overlay (or --check-gke-overlay) to add it
+	// to the fetched tree. See gkeoverlay.Find. With either empty, as in
+	// tests that do not set them, the steps skip that line.
+	GKEOverlay, Self string
 	// repo and commit are the tree to fetch. They start at the pin and move
 	// only when the wizard's images step picks something else.
 	repo, commit string
@@ -820,13 +827,45 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	}
 }
 
+// overlayCommand is the shell line that runs this installer on the
+// Substrate tree at dir (a shell word, already quoted) to add deploy/gke to
+// it when the tree no longer ships upstream's GKE manifests. With add false
+// it only reports, for a checkout the user supplied: the installer never
+// modifies those. It is empty when the Builder has no GKEOverlay or Self.
+//
+// TODO: Replace with `--component <GKEOverlay>/components/gke` on the
+// ate-setup deploy once upstream ships `ate-setup deploy --component`
+// (agent-substrate/substrate PR 3179) or `ate-setup render`
+// (agent-substrate/substrate#3240). See gkeoverlay.
+func (b *Builder) overlayCommand(dir string, add bool) string {
+	if b.GKEOverlay == "" || b.Self == "" {
+		return ""
+	}
+	flag := " --check-gke-overlay "
+	if add {
+		flag = " --add-gke-overlay "
+	}
+	return ShellQuote(b.Self) + " --gke-overlay " + ShellQuote(b.GKEOverlay) + flag + dir
+}
+
+// withOverlay prefixes command with overlayCommand for the current
+// directory, which inTree has made the Substrate tree.
+func (b *Builder) withOverlay(command string) string {
+	if line := b.overlayCommand(".", b.Managed); line != "" {
+		return line + "\n" + command
+	}
+	return command
+}
+
 // DeployAteSystem installs the Substrate control plane with the upstream
 // cmd/ate-setup. ate-setup fetches cluster credentials itself from
 // PROJECT_ID/CLUSTER_NAME/CLUSTER_LOCATION, and ko builds and pushes the
-// control-plane images from the checkout's source.
+// control-plane images from the checkout's source. Before ate-setup runs,
+// deploy/gke is added to the tree if the tree needs it (see overlayCommand).
 func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	display, argv := imageArgs(st)
 	sim := append(b.fetchSimLines(),
+		gkeoverlay.NotNeededLine,
 		"[step]: deploy_ate_system",
 		"[step]: deploy_crds",
 		"[step]: ensure_apiserver_prerequisites",
@@ -848,7 +887,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
-		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
+		Argv:    b.inTree(b.withOverlay("go run ./cmd/ate-setup deploy ate-system" + argv)),
 		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(), dataplaneEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",

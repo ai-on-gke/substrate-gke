@@ -41,7 +41,8 @@ fi
 # require checks that each named variable is set, so a step fails up front
 # with the variable's name rather than mid-deletion with a gcloud error. Each
 # step declares only what it uses: deleting a bucket must not demand a node
-# pool name. --all checks the union before its first step.
+# pool name. --all and --cluster-scoped check the union before their first
+# step.
 require() {
   for var in "$@"; do
     if [ -z "${!var:-}" ]; then
@@ -123,16 +124,18 @@ transfer_service_account() {
 function usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
-  echo "  --revoke-gke-node-permissions         Revoke GKE nodes permission to pull images"
-  echo "  --revoke-atelet-permissions           Revoke atelet's project-level IAM bindings"
   echo "  --delete-iam-policy-bindings          Delete bucket IAM policy bindings for atelet, ate-api-server and the transfer account"
-  echo "  --delete-transfer-service-account     Delete the snapshot transfer service account"
-  echo "  --delete-snapshot-bucket              Delete the snapshot bucket and the micro-VM asset bucket"
+  echo "  --delete-snapshot-bucket              Delete the snapshot bucket and the microVM asset bucket"
   echo "  --delete-gvisor-node-pool             Delete gVisor node pool"
   echo "  --delete-cluster                      Delete GKE cluster"
+  echo "  --cluster-scoped                      Run the steps above (reverse order of setup)"
+  echo "Project-wide options. These affect every Substrate cluster in the project:"
   echo "  --delete-dashboards                   Delete the Substrate monitoring dashboards"
-  echo "  --delete-repository                   Delete the Artifact Registry repository and its images"
-  echo "  --all                                 Run all teardown steps (reverse order of setup)"
+  echo "  --delete-transfer-service-account     Delete the snapshot transfer service account"
+  echo "  --revoke-atelet-permissions           Revoke atelet's project-level IAM bindings"
+  echo "  --revoke-gke-node-permissions         Revoke GKE nodes permission to pull images, on every cluster that uses the default compute service account"
+  echo "  --all                                 Run every step above (reverse order of setup)"
+  echo "  --delete-repository                   Delete the Artifact Registry repository and its images (not part of --all)"
   exit 1
 }
 
@@ -251,7 +254,7 @@ delete_transfer_service_account() {
     --project="${PROJECT_ID}" --quiet
 }
 
-# Delete the snapshot and micro-VM asset buckets (Reverse of create_buckets)
+# Delete the snapshot and microVM asset buckets (Reverse of create_buckets)
 delete_snapshot_bucket() {
   require PROJECT_ID BUCKET_NAME
   echo "Deleting snapshot and asset buckets..."
@@ -352,9 +355,19 @@ if ! command -v gcloud >/dev/null 2>&1; then
   exit 1
 fi
 
+# buckets_and_cluster deletes the buckets, the node pool and the cluster, for
+# --cluster-scoped and --all. Deleting the cluster removes its node pools, so
+# neither insists on a pool name a caller (e.g. an installer) may not track.
+buckets_and_cluster=(delete_snapshot_bucket)
+if [ -n "${NODE_POOL_NAME:-}" ]; then
+  buckets_and_cluster+=(delete_gvisor_node_pool)
+fi
+buckets_and_cluster+=(delete_cluster)
+
 steps=()
 delete_repository_requested=false
 all_requested=false
+cluster_scoped_requested=false
 for arg in "$@"; do
   case "${arg}" in
     --revoke-gke-node-permissions) steps+=(revoke_gke_node_permissions) ;;
@@ -369,15 +382,13 @@ for arg in "$@"; do
       steps+=(delete_repository)
       delete_repository_requested=true
       ;;
+    --cluster-scoped)
+      cluster_scoped_requested=true
+      steps+=(delete_iam_policy_bindings "${buckets_and_cluster[@]}")
+      ;;
     --all)
       all_requested=true
-      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions delete_snapshot_bucket)
-      # Deleting the cluster removes its node pools, so --all does not insist
-      # on a pool name a caller (e.g. an installer) may not track.
-      if [ -n "${NODE_POOL_NAME:-}" ]; then
-        steps+=(delete_gvisor_node_pool)
-      fi
-      steps+=(delete_cluster)
+      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}")
       ;;
     *) usage ;;
   esac
@@ -385,7 +396,7 @@ done
 if ${delete_repository_requested}; then
   validate_repository_config
 fi
-if ${all_requested}; then
+if ${all_requested} || ${cluster_scoped_requested}; then
   require PROJECT_ID PROJECT_NUMBER BUCKET_NAME CLUSTER_NAME CLUSTER_LOCATION
 fi
 for step in "${steps[@]}"; do

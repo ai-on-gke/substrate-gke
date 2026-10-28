@@ -24,7 +24,8 @@ teardown:
 	./tools/cleanup-gcp --project "$(PROJECT_ID)" --cluster "$(CLUSTER_NAME)" --location "$(CLUSTER_LOCATION)" --bucket "$(BUCKET_NAME)" \
 		$(if $(and $(filter command line,$(origin ARTIFACT_REGISTRY_REPOSITORY)),$(ARTIFACT_REGISTRY_REPOSITORY)),--repository "$(ARTIFACT_REGISTRY_REPOSITORY)") \
 		$(if $(filter true,$(DELETE_REPOSITORY)),--delete-repository) \
-		$(if $(filter true,$(KEEP_REPOSITORY)),--keep-repository)
+		$(if $(filter true,$(KEEP_REPOSITORY)),--keep-repository) \
+		$(if $(filter true,$(CLUSTER_SCOPED)),--cluster-scoped)
 
 # Run the preflight checks only.
 doctor:

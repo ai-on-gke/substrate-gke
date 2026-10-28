@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gkeoverlay"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
@@ -93,6 +94,14 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 	}
 	lines = append(lines, fetch("stage_installed", installedDir, b.repo, st.InstalledCommit, notUpstream)...)
 	lines = append(lines, fetch("stage_next", nextDir, b.repo, b.commit, "")...)
+	// The runbook deploys the new release from nextDir and rolls back from
+	// installedDir, so both get deploy/gke if they need it. Both are trees
+	// this installer fetched, so it adds rather than only checks.
+	for _, dir := range []string{installedDir, nextDir} {
+		if line := b.overlayCommand(ShellQuote(dir), true); line != "" {
+			lines = append(lines, line)
+		}
+	}
 	return execx.Spec{
 		Label:   "fetch the installed and the new Substrate trees",
 		Display: fmt.Sprintf("git fetch substrate@%s (installed) and substrate@%s (new)", shorten(st.InstalledCommit), shorten(b.commit)),
@@ -100,6 +109,8 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 		SimLines: []string{
 			fmt.Sprintf("Fetched substrate@%s into %s", shorten(st.InstalledCommit), installedDir),
 			fmt.Sprintf("Fetched substrate@%s into %s", shorten(b.commit), nextDir),
+			gkeoverlay.NotNeededLine,
+			gkeoverlay.NotNeededLine,
 		},
 	}
 }

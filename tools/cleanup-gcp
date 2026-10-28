@@ -18,7 +18,9 @@
 # (`setup-gcp bootstrap`) creates: monitoring dashboards, IAM bindings, the
 # snapshot transfer service account, the snapshot and micro-VM asset buckets,
 # and the GKE cluster. Image repositories are kept unless --delete-repository
-# is given.
+# is given. With --cluster-scoped it deletes only the cluster, its buckets and
+# the bindings on them, and keeps what every Substrate cluster in the project
+# shares (dashboards, transfer service account, project-level IAM bindings).
 #
 # It is a thin wrapper: the deletions themselves live in
 # tools/setup-gcp/teardown.sh, next to the bootstrap they reverse, so a new
@@ -45,6 +47,7 @@ BUCKET_NAME=""
 GCE_REGION=""
 ARTIFACT_REGISTRY_REPOSITORY="ate-images"
 KEEP_REPOSITORY=true
+CLUSTER_SCOPED=false
 ASSUME_YES=false
 
 usage() {
@@ -60,6 +63,9 @@ Options:
   --repository NAME       Repository created during setup (default: ate-images)
   --delete-repository     Also delete the repository and its images
   --keep-repository       Keep the repository (default); overrides an earlier --delete-repository
+  --cluster-scoped        Delete only the cluster, its buckets and their bindings; keep the
+                          dashboards, transfer service account and project-level IAM bindings
+                          that other Substrate clusters in the project share
   --yes                   Skip the confirmation prompt
 
 The installer prints a command with the values for your installation.
@@ -86,6 +92,7 @@ while [[ "$#" -gt 0 ]]; do
       shift ;;
     --delete-repository) KEEP_REPOSITORY=false ;;
     --keep-repository) KEEP_REPOSITORY=true ;;
+    --cluster-scoped) CLUSTER_SCOPED=true ;;
     --yes) ASSUME_YES=true ;;
     *) usage ;;
   esac
@@ -112,20 +119,33 @@ if [ ! -x "${TEARDOWN}" ]; then
   echo "cannot find ${TEARDOWN}; run cleanup-gcp from a substrate-gke checkout" >&2
   exit 1
 fi
-set -- --all
+if ${CLUSTER_SCOPED}; then
+  set -- --cluster-scoped
+else
+  set -- --all
+fi
 if ! ${KEEP_REPOSITORY}; then
   set -- "$@" --delete-repository
 fi
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-cat <<EOF
-About to delete from project ${PROJECT_ID}:
+echo "About to delete from project ${PROJECT_ID}:"
+if ${CLUSTER_SCOPED}; then
+  echo "  - the setup-gcp IAM bindings on the two buckets below"
+else
+  cat <<EOF
   - the Substrate monitoring dashboards
   - the setup-gcp IAM bindings (project and bucket level)
   - the snapshot transfer service account
+EOF
+fi
+cat <<EOF
   - gs://${BUCKET_NAME} and every snapshot in it
   - gs://${BUCKET_NAME}-assets and the micro-VM assets in it
   - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
 EOF
+if ${CLUSTER_SCOPED}; then
+  echo "  The dashboards, the snapshot transfer service account and the project-level IAM bindings will be kept."
+fi
 if ${KEEP_REPOSITORY}; then
   echo "  Image repositories will be kept."
 else

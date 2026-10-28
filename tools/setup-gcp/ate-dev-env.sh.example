@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+# Example environment for a GKE install driven by hand (docs/manual-gke-setup.md).
+# setup-gcp, tools/setup-gcp/teardown.sh and upstream's ate-setup read these
+# variables. Copy this file to .ate-dev-env.sh, edit it, and source it.
+#
+# The GKE settings of agent-substrate/substrate's hack/ate-dev-env.sh.example,
+# adapted to this repository (as of upstream ed3f2e4f). Settings that are not
+# GKE-specific, such as ATE_CREDENTIAL_PROVIDER, are in upstream's file.
+
+export PROJECT_ID="${USER}-gke-dev"
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")"
+export PROJECT_NUMBER
+
+export GCE_REGION=us-west1
+export CLUSTER_LOCATION=us-west1-c
+
+export NETWORK=default
+export SUBNETWORK=default
+
+export CLUSTER_NAME=substrate-poc
+# Substrate needs GKE 1.36 with the beta PodCertificate APIs, which setup-gcp
+# enables, or 1.37 and later, which serve them under v1. GKE serves a version
+# only in the release channels that carry it; at the time of writing 1.37 is
+# only on rapid. Empty values create the cluster at GKE's default version and
+# channel. See tools/setup-gcp/README.md ("Create Cluster").
+export CLUSTER_VERSION=1.37
+export RELEASE_CHANNEL=rapid
+# Only teardown.sh reads this: --delete-gvisor-node-pool needs it, and --all
+# and --cluster-scoped delete the pool on its own when it is set.
+export NODE_POOL_NAME=gvisor-pool
+export NODE_MACHINE_TYPE=c3-standard-4
+# Nested virtualization exposes /dev/kvm, which microVM workers need.
+export ENABLE_NESTED_VIRTUALIZATION=true
+# Boot disk customizations (optional; defaults to GKE's default boot disk).
+# export BOOT_DISK_SIZE_GB=500
+# export BOOT_DISK_TYPE=hyperdisk-balanced
+
+# Set this if you use an existing cluster under a different kubectl context.
+export KUBECTL_CONTEXT=
+
+# At most 56 characters: setup-gcp creates "${BUCKET_NAME}-assets" beside it.
+export BUCKET_NAME="snapshot-substrate-test-${PROJECT_ID}"
+# Cluster-wide location ate-api-server stores snapshots under. From Substrate
+# v0.6.0, ate-setup refuses to deploy on GKE without it.
+export SNAPSHOT_LOCATION="gs://${BUCKET_NAME}/"
+# Google service account snapshot transfers run as on GCS. setup-gcp creates
+# it, and ate-setup and teardown.sh read the same name. From Substrate v0.6.0,
+# ate-setup refuses to deploy ate-api-server on GKE without it.
+export SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer
+
+# Where a build from source pushes its images. `setup-gcp bootstrap
+# --create-repository` creates an Artifact Registry repository
+# (ARTIFACT_REGISTRY_REPOSITORY, default ate-images) in GCE_REGION.
+export KO_DOCKER_REPO="${GCE_REGION}-docker.pkg.dev/${PROJECT_ID}/ate-images"
+export KO_DEFAULTPLATFORMS=linux/amd64

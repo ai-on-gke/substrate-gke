@@ -35,6 +35,8 @@ func TestCleanupGcpDelegatesToLocalTool(t *testing.T) {
 		{name: "custom target", args: "--delete-repository --region europe-west4 --repository shared-images", location: "us-west1-c", region: "europe-west4", repository: "shared-images"},
 		{name: "keep overrides deletion", args: "--delete-repository --keep-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
 		{name: "regional cluster", location: "us-central1", region: "us-central1", repository: "ate-images"},
+		{name: "cluster scoped", args: "--cluster-scoped", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
+		{name: "cluster scoped with repository", args: "--cluster-scoped --delete-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
 		{name: "declined", decline: true, location: "us-west1-c", wantErr: "aborted"},
 		{name: "deletion failure", failure: true, location: "us-west1-c", wantErr: "deletion failed"},
 	} {
@@ -99,6 +101,12 @@ echo 12345
 				return
 			}
 			flags := "--all"
+			if strings.Contains(tc.args, "--cluster-scoped") {
+				flags = "--cluster-scoped"
+				if strings.Contains(string(out), "monitoring dashboards") || !strings.Contains(string(out), "will be kept") {
+					t.Errorf("cluster-scoped confirmation should keep the project-wide resources:\n%s", out)
+				}
+			}
 			if strings.Contains(tc.args, "--delete-repository") && !strings.Contains(tc.args, "--keep-repository") {
 				flags += " --delete-repository"
 			} else if !strings.Contains(string(out), "Image repositories will be kept.") || strings.Contains(string(out), tc.repository) {

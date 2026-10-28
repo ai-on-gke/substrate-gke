@@ -20,6 +20,7 @@ package steps
 import (
 	"strings"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gkeoverlay"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
@@ -80,11 +81,14 @@ func Bootstrap(fetchLabel string, artifactRegistry, clusterIsNew, enableBetaAPIs
 }
 
 // Deploy tracks the phases of `ate-setup deploy ate-system`, keyed off its
-// `[step]:` markers and ko's build progress. A pre-built install has no build
-// phase at all — resolving a published tag to a digest prints nothing — so
-// that row is left out rather than left permanently unlit.
+// `[step]:` markers and ko's build progress, preceded by the check that adds
+// this repository's deploy/gke to the tree when the tree lacks upstream's GKE
+// manifests (see gkeoverlay). A pre-built install has no build phase at all —
+// resolving a published tag to a digest prints nothing — so that row is left
+// out rather than left permanently unlit.
 func Deploy(prebuilt bool) []ChecklistItem {
 	items := []ChecklistItem{
+		{"Add the GKE manifests (deploy/gke) if the tree lacks them", contains(gkeoverlay.LinePrefix)},
 		{"Apply namespace, CRDs, and RBAC", contains("deploy_crds")},
 		{"Generate CAs, JWT pools, and API server config", contains("ensure_apiserver_prerequisites")},
 	}

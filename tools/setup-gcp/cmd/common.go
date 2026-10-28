@@ -25,7 +25,8 @@ import (
 	"google.golang.org/api/option"
 )
 
-// clientOptions are passed to the gRPC clients (GKE, Resource Manager).
+// clientOptions are passed to the gRPC clients (GKE, Resource Manager, Cloud
+// Monitoring dashboards).
 // restClientOptions are passed to the JSON API clients (Cloud Storage, IAM).
 // Both are empty in production; tests point them at in-process fake servers.
 var (

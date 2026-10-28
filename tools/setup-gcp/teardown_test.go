@@ -380,6 +380,49 @@ func TestTeardownAllChecksEveryVariableFirst(t *testing.T) {
 	}
 }
 
+// --cluster-scoped deletes this cluster, its buckets and the bindings on
+// them, and nothing that other Substrate clusters in the project share: the
+// dashboards, the transfer service account and the project-level bindings.
+func TestTeardownClusterScopedKeepsProjectWideResources(t *testing.T) {
+	run := runTeardown(t, "", teardownEnv, nil, "--cluster-scoped")
+	if run.exitCode != 0 {
+		t.Fatalf("teardown --cluster-scoped exited %d, want 0:\n%s", run.exitCode, run.output)
+	}
+	for _, want := range []string{
+		"storage buckets remove-iam-policy-binding gs://acme-snapshots",
+		"storage buckets remove-iam-policy-binding gs://acme-snapshots-assets",
+		"storage buckets delete gs://acme-snapshots ",
+		"storage buckets delete gs://acme-snapshots-assets ",
+		"container clusters delete substrate-test",
+	} {
+		if !strings.Contains(run.calls, want) {
+			t.Errorf("--cluster-scoped did not run %q; calls:\n%s", want, run.calls)
+		}
+	}
+	for _, unwanted := range []string{
+		"monitoring dashboards",
+		"iam service-accounts delete",
+		"projects remove-iam-policy-binding",
+		"artifacts repositories delete",
+	} {
+		if strings.Contains(run.calls, unwanted) {
+			t.Errorf("--cluster-scoped ran a project-wide step (%q); calls:\n%s", unwanted, run.calls)
+		}
+	}
+}
+
+// Like --all, --cluster-scoped checks every variable it needs before the
+// first gcloud call.
+func TestTeardownClusterScopedChecksEveryVariableFirst(t *testing.T) {
+	run := runTeardown(t, "", map[string]string{"PROJECT_ID": "acme", "NO_DEV_ENV": "1"}, nil, "--cluster-scoped")
+	if run.exitCode == 0 {
+		t.Errorf("teardown --cluster-scoped exited 0 with only PROJECT_ID set:\n%s", run.output)
+	}
+	if run.calls != "" {
+		t.Errorf("teardown --cluster-scoped ran gcloud before finding a variable missing; calls:\n%s", run.calls)
+	}
+}
+
 // Review question: is the missing-variable message stale? It points at
 // hack/ate-dev-env.sh.example, which lives in agent-substrate/substrate, and
 // creating a dev-env file does nothing under cleanup-gcp (NO_DEV_ENV=1).

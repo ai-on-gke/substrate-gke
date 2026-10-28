@@ -314,7 +314,7 @@ cd installer && go run . --substrate-root=/path/to/substrate
 
 A checkout you supply this way is used as-is and never modified or deleted.
 
-GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repository's [`tools/setup-gcp`](tools/setup-gcp/README.md), not a copy from the Substrate tree, whatever revision you chose. The tool moved here from upstream ([agent-substrate/substrate#2304](https://github.com/agent-substrate/substrate/issues/2304)). The installer finds it above its working directory or its executable; pass `--setup-gcp=/path/to/tools/setup-gcp` if you run the installer from somewhere else.
+GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repository's [`tools/setup-gcp`](tools/setup-gcp/README.md), not a copy from the Substrate tree, whatever revision you chose. The tool moved here from upstream ([agent-substrate/substrate#2304](https://github.com/agent-substrate/substrate/issues/2304)). The installer finds it above its working directory or its executable; pass `--setup-gcp=/path/to/tools/setup-gcp` if you run the installer from somewhere else. To run setup-gcp and ate-setup yourself, without the installer, see [Setting up GKE by hand](docs/manual-gke-setup.md).
 
 <details>
 <summary><strong>Failure and retry behavior</strong> (click to expand)</summary>
@@ -355,6 +355,8 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
 The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
+
+This deletes the dashboards, the snapshot transfer service account and the project-level IAM bindings too, which every Substrate cluster in the project shares. If other Substrate clusters still use the project, add `--cluster-scoped` (or `CLUSTER_SCOPED=true` with `make teardown`): it deletes only this cluster, its buckets and the bindings on them.
 
 Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line.
 

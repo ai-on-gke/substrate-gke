@@ -2,3 +2,5 @@ bin/
 *.swp
 .DS_Store
 /tools/setup-gcp/setup-gcp
+# Local environment copied from tools/setup-gcp/ate-dev-env.sh.example.
+.ate-dev-env.sh

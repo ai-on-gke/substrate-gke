@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gkeoverlay"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
@@ -74,18 +75,22 @@ func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
 
 func TestDeployChecklistTracksAteSetupOutput(t *testing.T) {
 	items := Deploy(false)
+	if got := feed(items, []string{gkeoverlay.NotNeededLine}); got != 0 {
+		t.Fatalf("active = %d, want 0 (GKE overlay check)", got)
+	}
 	lines := []string{
+		gkeoverlay.NotNeededLine,
 		"[step]: deploy_ate_system",
 		"[step]: deploy_crds",
 		"[step]: ensure_apiserver_prerequisites",
 		"[step]: create_jwt_authority_pool_secret",
 		"Building github.com/agent-substrate/substrate/cmd/atelet for linux/amd64",
 	}
-	if got := feed(items, lines); got != 2 {
-		t.Fatalf("active = %d, want 2 (ko build phase)", got)
+	if got := feed(items, lines); got != 3 {
+		t.Fatalf("active = %d, want 3 (ko build phase)", got)
 	}
-	if got := Progress(items, 2, "[step]: Waiting for ATE system components to be ready..."); got != 3 {
-		t.Fatalf("active = %d, want 3 (wait phase)", got)
+	if got := Progress(items, 3, "[step]: Waiting for ATE system components to be ready..."); got != 4 {
+		t.Fatalf("active = %d, want 4 (wait phase)", got)
 	}
 }
 
@@ -98,16 +103,16 @@ func TestDeployChecklistTracksAVanityImportBuild(t *testing.T) {
 		"[step]: ensure_apiserver_prerequisites",
 		"Building go.ate.dev/substrate/cmd/atelet for linux/amd64",
 	}
-	if got := feed(items, lines); got != 2 {
-		t.Fatalf("active = %d, want 2 (ko build phase)", got)
+	if got := feed(items, lines); got != 3 {
+		t.Fatalf("active = %d, want 3 (ko build phase)", got)
 	}
 }
 
 func TestProgressNeverMovesBackward(t *testing.T) {
 	items := Deploy(false)
 	// A late ko "Building" line must not rewind past the wait phase.
-	if got := Progress(items, 3, "Building github.com/agent-substrate/substrate/cmd/atenet-dns"); got != 3 {
-		t.Fatalf("active = %d, want 3", got)
+	if got := Progress(items, 4, "Building github.com/agent-substrate/substrate/cmd/atenet-dns"); got != 4 {
+		t.Fatalf("active = %d, want 4", got)
 	}
 	// An unrelated line leaves the cursor alone.
 	if got := Progress(items, 1, "some noise"); got != 1 {
