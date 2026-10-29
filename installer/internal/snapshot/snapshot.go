@@ -640,6 +640,9 @@ func (b *Builder) env(st *state.Setup) []string {
 		// here. Trees that predate the account ignore it.
 		"SNAPSHOT_TRANSFER_GSA_NAME=" + TransferGSAName,
 		"SNAPSHOT_LOCATION=" + SnapshotLocation(st),
+		// Read only when bootstrap creates the cluster; see
+		// SeparateSystemNodesLine for how deploy uses the pools.
+		"SEPARATE_SYSTEM_NODES=" + strconv.FormatBool(!st.SharedSystemNodes),
 		"KUBECTL_CONTEXT=",
 		"NO_DEV_ENV=1",
 	}
@@ -711,6 +714,52 @@ func imageArgs(st *state.Setup) (display, argv string) {
 	return fmt.Sprintf(" --image-repo %s --image-tag %s", st.ImageRepo, st.ImageTag),
 		fmt.Sprintf(" --image-repo %s --image-tag %s", ShellQuote(st.ImageRepo), ShellQuote(st.ImageTag))
 }
+
+// Lines cordonLines prints, one for each outcome it deploys with.
+const (
+	SeparateSystemNodesLine = "Keeping Substrate's system components on the ate-system-infra and ate-postgres node pools"
+	SharedSystemNodesLine   = "No ate-system-infra and ate-postgres node pools; Substrate's system components share the worker nodes"
+)
+
+// cordonLines sets ATE_INSTALL_CORDON_CONTROL_PLANE for the deploy: true
+// when the cluster has nodes labeled for both system pools (see setup-gcp's
+// systempools.go), so ate-setup pins the system components and bundled
+// PostgreSQL to them; false otherwise, including for a caller who exported
+// it. ate-setup refuses to deploy with it set and no PostgreSQL node, and
+// leaves the system components Pending without system nodes, so it is only
+// set when both exist. A cluster the user brought has neither, unless they
+// added them with the commands bootstrap printed.
+//
+// The check runs in a child shell, so its throwaway KUBECONFIG goes with it
+// and ate-setup fetches its own credentials as before. It exits
+// systemPoolsAbsent when a pool is missing; any other failure (gcloud,
+// kubectl, the API server) stops the deploy rather than read as "no pools"
+// and quietly install the system components onto the worker nodes.
+//
+// The label values and the variable are those of the Substrate release the
+// installer pins (v0.6.0); later releases renamed them.
+func cordonLines(st *state.Setup) string {
+	lines := []string{"export ATE_INSTALL_CORDON_CONTROL_PLANE=false"}
+	if st.SharedSystemNodes {
+		return strings.Join(append(lines, "echo "+ShellQuote(SharedSystemNodesLine)), "\n") + "\n"
+	}
+	check := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone),
+		`system=$(kubectl get nodes -l ate.dev/workloadType=ate-control-plane -o name)`,
+		`postgres=$(kubectl get nodes -l ate.dev/workloadType=ate-postgres -o name)`,
+		fmt.Sprintf(`[ -n "$system" ] && [ -n "$postgres" ] || exit %d`, systemPoolsAbsent))
+	return strings.Join(append(lines,
+		"pools=0",
+		"bash -euo pipefail -c "+ShellQuote(strings.Join(check, "\n"))+" || pools=$?",
+		`case "$pools" in`,
+		"  0) export ATE_INSTALL_CORDON_CONTROL_PLANE=true; echo "+ShellQuote(SeparateSystemNodesLine)+" ;;",
+		fmt.Sprintf("  %d) echo %s ;;", systemPoolsAbsent, ShellQuote(SharedSystemNodesLine)),
+		`  *) echo "Could not check the cluster for the system node pools" >&2; exit "$pools" ;;`,
+		"esac"), "\n") + "\n"
+}
+
+// systemPoolsAbsent is the exit status of cordonLines' check when a system
+// pool is missing, kept apart from the 1 that set -e gives any failure.
+const systemPoolsAbsent = 3
 
 // FetchLine and CachedLine are the two outcomes the fetch preamble reports.
 // The install checklists key their "fetch" phase off both, so they are
@@ -897,7 +946,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
-		Argv:    b.inTree(b.withOverlay("go run ./cmd/ate-setup deploy ate-system" + argv)),
+		Argv:    b.inTree(b.withOverlay(cordonLines(st) + "go run ./cmd/ate-setup deploy ate-system" + argv)),
 		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",

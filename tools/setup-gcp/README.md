@@ -87,6 +87,21 @@ cluster` creates that account first; `create iam` grants it image pull access.
 An existing cluster keeps its Filestore add-on setting, its control plane
 endpoints and its nodes' service account.
 
+By default a new cluster also gets two one-node pools for Substrate's system
+components, so a sandbox escape on a worker node does not land next to them:
+`ate-system-infra` (`e2-standard-4`) for the API server, controller, router,
+egress gateway and the rest, and `ate-postgres` (`e2-standard-4`, since the
+bundled PostgreSQL requests 2 CPUs) for the bundled PostgreSQL. Each is labeled and tainted
+`ate.dev/workloadType=<type>:NoSchedule` (`ate-control-plane` and
+`ate-postgres`, the values of the Substrate release the installer pins), so
+nothing else schedules there, and runs as the node service account with Secure
+Boot. The installer deploys with `ATE_INSTALL_CORDON_CONTROL_PLANE=true` when a
+cluster has nodes with both labels, which pins the system components to them.
+For an existing cluster without them, `create cluster` and `bootstrap` print the
+`gcloud container node-pools create` commands that add them, and the installer
+leaves the system components on the worker nodes. Turn the pools off with
+`--separate-system-nodes=false`.
+
 If the cluster already exists, settings that can be changed in place
 (Workload Identity, beta APIs, Managed OpenTelemetry) are updated. Settings fixed at creation (network, subnetwork, Dataplane V2, nested
 virtualization) and the node pool boot disk are only reported as warnings when
@@ -161,6 +176,9 @@ go -C tools/setup-gcp run . create cluster [flags]
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
 | `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
 | `--node-service-account-name` | Name of the service account the nodes of a new cluster run as. `teardown.sh` reads the same variable. | `NODE_GSA_NAME` | `ate-gke-node` |
+| `--separate-system-nodes` | Give a new cluster the `ate-system-infra` and `ate-postgres` node pools. | `SEPARATE_SYSTEM_NODES` | `true` |
+| `--system-infra-machine-type` | Machine type for the `ate-system-infra` pool. | `SYSTEM_INFRA_MACHINE_TYPE` | `e2-standard-4` |
+| `--postgres-machine-type` | Machine type for the `ate-postgres` pool. It needs more than 2 vCPUs: the bundled PostgreSQL requests 2. | `POSTGRES_MACHINE_TYPE` | `e2-standard-4` |
 | `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for microVM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |
@@ -452,6 +470,9 @@ go -C tools/setup-gcp run . bootstrap [flags]
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
 | `--machine-type` | Machine type for the node pool. | `NODE_MACHINE_TYPE` | `c3-standard-4` |
 | `--node-service-account-name` | Name of the service account the nodes of a new cluster run as. `teardown.sh` reads the same variable. | `NODE_GSA_NAME` | `ate-gke-node` |
+| `--separate-system-nodes` | Give a new cluster the `ate-system-infra` and `ate-postgres` node pools. | `SEPARATE_SYSTEM_NODES` | `true` |
+| `--system-infra-machine-type` | Machine type for the `ate-system-infra` pool. | `SYSTEM_INFRA_MACHINE_TYPE` | `e2-standard-4` |
+| `--postgres-machine-type` | Machine type for the `ate-postgres` pool. It needs more than 2 vCPUs: the bundled PostgreSQL requests 2. | `POSTGRES_MACHINE_TYPE` | `e2-standard-4` |
 | `--enable-nested-virtualization` | Create the node pool with nested virtualization, exposing `/dev/kvm` for microVM workers. | `ENABLE_NESTED_VIRTUALIZATION` | `true` |
 | `--boot-disk-size` | Boot disk size in GB for the node pool (0 = GKE default). | `BOOT_DISK_SIZE_GB` | None |
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |

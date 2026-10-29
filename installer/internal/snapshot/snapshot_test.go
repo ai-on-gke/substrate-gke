@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1916,5 +1917,87 @@ func TestDeployNamesTheEnvoyDataplane(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_ATENET_DATAPLANE=envoy") {
 		t.Errorf("deploy env lacks ATE_ATENET_DATAPLANE=envoy: %v", env)
+	}
+}
+
+// Deploy pins the system components only when the cluster has both system
+// pools, and never inherits the caller's choice.
+func TestDeployAteSystemCordonsOnlyWithSystemPools(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	st := prebuiltSetup(t)
+	script := strings.Join(b.DeployAteSystem(st).Argv, " ")
+	for _, want := range []string{
+		"export ATE_INSTALL_CORDON_CONTROL_PLANE=false",
+		"kubectl get nodes -l ate.dev/workloadType=ate-control-plane",
+		"kubectl get nodes -l ate.dev/workloadType=ate-postgres",
+		"export ATE_INSTALL_CORDON_CONTROL_PLANE=true",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("deploy script lacks %q:\n%s", want, script)
+		}
+	}
+	if !slices.Contains(b.Bootstrap(st).Env, "SEPARATE_SYSTEM_NODES=true") {
+		t.Errorf("bootstrap env lacks SEPARATE_SYSTEM_NODES=true")
+	}
+
+	st.SharedSystemNodes = true
+	script = strings.Join(b.DeployAteSystem(st).Argv, " ")
+	if !strings.Contains(script, "export ATE_INSTALL_CORDON_CONTROL_PLANE=false") || strings.Contains(script, "CORDON_CONTROL_PLANE=true") || strings.Contains(script, "kubectl get nodes") {
+		t.Errorf("shared system nodes must deploy uncordoned without checking:\n%s", script)
+	}
+	if !slices.Contains(b.Bootstrap(st).Env, "SEPARATE_SYSTEM_NODES=false") {
+		t.Errorf("bootstrap env lacks SEPARATE_SYSTEM_NODES=false")
+	}
+}
+
+// The check runs as its own script: with the pools present it succeeds, and
+// with either missing it fails, against a fake kubectl and gcloud.
+func TestCordonCheckScript(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		nodes      map[string]string
+		kubectlErr bool
+		want       string
+	}{
+		{"both pools", map[string]string{"ate-control-plane": "node/a", "ate-postgres": "node/b"}, false, SeparateSystemNodesLine},
+		{"no postgres pool", map[string]string{"ate-control-plane": "node/a"}, false, SharedSystemNodesLine},
+		{"no pools", nil, false, SharedSystemNodesLine},
+		// A failed check must stop the deploy, not read as "no pools".
+		{"kubectl fails", map[string]string{"ate-control-plane": "node/a", "ate-postgres": "node/b"}, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			write := func(name, body string) {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env bash\n"+body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("gcloud", "exit 0\n")
+			kubectl := "case \"$*\" in\n"
+			for label, out := range tc.nodes {
+				kubectl += fmt.Sprintf("  *workloadType=%s*) echo %s ;;\n", label, out)
+			}
+			if tc.kubectlErr {
+				kubectl = "echo 'Unable to connect to the server' >&2; exit 1\n" + kubectl
+			}
+			write("kubectl", kubectl+"esac\n")
+			script := cordonLines(testSetup(t)) + `echo "cordon=$ATE_INSTALL_CORDON_CONTROL_PLANE"`
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if tc.want == "" {
+				if err == nil || strings.Contains(string(out), "cordon=") {
+					t.Fatalf("a failed check did not stop the script:\n%s", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			wantCordon := "cordon=" + strconv.FormatBool(tc.want == SeparateSystemNodesLine)
+			if !strings.Contains(string(out), tc.want) || !strings.Contains(string(out), wantCordon) {
+				t.Errorf("got\n%s\nwant %q and %q", out, tc.want, wantCordon)
+			}
+		})
 	}
 }

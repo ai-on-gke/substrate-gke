@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/spf13/cobra"
 )
@@ -89,6 +90,11 @@ var bootstrapCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// And the node service account, which the system pools that
+		// warnMissingSystemPools suggests for an existing cluster run as.
+		if !slices.Contains(nodeAccounts, nodeGSAEmail(&cfg)) {
+			nodeAccounts = append(nodeAccounts, nodeGSAEmail(&cfg))
+		}
 		if err := grantNodeImagePull(ctx, &cfg, nodeAccounts); err != nil {
 			return err
 		}
@@ -129,6 +135,7 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&cfg.Subnetwork, "subnetwork", getEnv("SUBNETWORK", "default"), "VPC subnetwork name [env: SUBNETWORK]")
 	bootstrapCmd.Flags().StringVar(&cfg.MachineType, "machine-type", resolveMachineTypeDefault(), "Machine type for the node pool [env: NODE_MACHINE_TYPE]")
 	addNodeGSANameFlag(bootstrapCmd)
+	addSystemNodeFlags(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&cfg.EnableNestedVirtualization, "enable-nested-virtualization", getEnv("ENABLE_NESTED_VIRTUALIZATION", true), "Create the node pool with nested virtualization, exposing /dev/kvm for micro-VM workers; needs a machine type that supports it. Turn off with --enable-nested-virtualization=false [env: ENABLE_NESTED_VIRTUALIZATION]")
 	bootstrapCmd.Flags().Int32Var(&cfg.BootDiskSizeGB, "boot-disk-size", getEnv("BOOT_DISK_SIZE_GB", int32(0)), "Boot disk size in GB for the node pool; 0 = GKE default (100 GB) [env: BOOT_DISK_SIZE_GB]")
 	bootstrapCmd.Flags().StringVar(&cfg.BootDiskType, "boot-disk-type", getEnv("BOOT_DISK_TYPE", ""), "Boot disk type for the node pool; empty = GKE default, or hyperdisk-balanced when provisioned IOPS/throughput are set [env: BOOT_DISK_TYPE]")
