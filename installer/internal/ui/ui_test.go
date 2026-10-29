@@ -1997,7 +1997,9 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	if scr.mode != "installed" {
 		t.Fatalf("mode = %q, want installed", scr.mode)
 	}
-	press("t", "y") // simulated teardown, then the install continues
+	press("t")
+	typeText(t, app, "substrate-installed")
+	press("enter") // simulated teardown, then the install continues
 	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterName != "substrate-installed" {
 		t.Errorf("after dry-run teardown: step=%v cluster=%q, want Provision/substrate-installed",
 			app.mach.Current(), app.deps.Setup.ClusterName)
@@ -2669,7 +2671,8 @@ func TestTeardownReprobesForReal(t *testing.T) {
 		t.Fatalf("mode = %q, want installed", s.mode)
 	}
 	drive(key("t"))
-	drive(key("y"))
+	drive(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("substrate-poc"), Paste: true})
+	drive(key("enter"))
 	if deps.Setup.ClusterName != "substrate-poc" {
 		t.Errorf("teardown+reprobe: mode=%q cluster=%q, want substrate-poc chosen after the clean reprobe",
 			s.mode, deps.Setup.ClusterName)
@@ -2725,9 +2728,9 @@ func (r *teardownClusterRunner) Start(ctx context.Context, spec execx.Spec) <-ch
 	return r.inner.Start(ctx, spec)
 }
 
-// The blocked panel can run the teardown itself: [t] asks, [y] deletes the
-// control plane (keeping the cluster), the guard re-probes, and the install
-// continues on the now-clean cluster without leaving the wizard.
+// The blocked panel can run the teardown itself: [t] asks, the cluster's name
+// confirms, the delete runs (keeping the cluster), the guard re-probes, and
+// the install continues on the now-clean cluster without leaving the wizard.
 func TestInstalledClusterTeardownFromWizard(t *testing.T) {
 	app := testApp(t)
 	app.deps.Runner = &teardownClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -2742,15 +2745,33 @@ func TestInstalledClusterTeardownFromWizard(t *testing.T) {
 	if scr.mode != "teardown-confirm" {
 		t.Fatalf("mode = %q, want teardown-confirm", scr.mode)
 	}
-	if view := app.View(); !strings.Contains(view, "delete ate-system") {
-		t.Errorf("confirm view does not say what it runs:\n%s", view)
+	// The dialog names everything the delete takes, not just the control plane.
+	view := flat(app.View())
+	for _, want := range []string{"delete ate-system", "suspended", "ActorTemplate, atespace, and WorkerPool", "database volume", "belong to no actor"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("confirm view is missing %q:\n%s", want, view)
+		}
+	}
+	// Only the exact name confirms, and its letters are typed, not taken as
+	// the log viewer's [v].
+	press("v")
+	if scr.confirmInput.Value() != "v" {
+		t.Fatalf("[v] did not type into the confirmation: %q", scr.confirmInput.Value())
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	typeText(t, app, "substrate")
+	press("enter")
+	if scr.mode != "teardown-confirm" {
+		t.Fatalf("a partial name started the teardown: mode = %q", scr.mode)
 	}
 	// Backing out returns to the blocked panel, not the list.
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc})
 	if scr.mode != "installed" {
 		t.Fatalf("after esc: mode = %q, want installed", scr.mode)
 	}
-	press("t", "y") // tear down, re-probe clean, continue the install
+	press("t")
+	typeText(t, app, "substrate-poc")
+	press("enter") // tear down, re-probe clean, continue the install
 	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterName != "substrate-poc" {
 		t.Errorf("after teardown: step=%v cluster=%q, want Provision/substrate-poc",
 			app.mach.Current(), app.deps.Setup.ClusterName)
