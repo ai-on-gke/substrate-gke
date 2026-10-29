@@ -1147,9 +1147,8 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	}
 }
 
-// microVMEnv is base (env or controlPlaneEnv) plus the two settings
-// upstream's micro-VM script reads that no other step needs. ate-setup's port
-// of the script
+// microVMEnv is base (env or controlPlaneEnv) plus the two settings the
+// micro-VM steps read that no other step needs. ate-setup's micro-VM staging
 // (agent-substrate/substrate#2092) ignores ARCH, since it stages both amd64
 // and arm64 on GKE, and reads ATE_INSTALL_KIND the same way.
 //
@@ -1161,10 +1160,12 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // laptop that stages arm64 binaries into the bucket, and the failure surfaces
 // much later, as a cold boot that cannot exec them.
 //
-// ATE_INSTALL_KIND=false selects the GCS staging path over the in-cluster
-// rustfs one. It is already the script's default; naming it here keeps a
-// developer's exported value from redirecting a GKE install's assets into a
-// kind bucket that does not exist.
+// ATE_INSTALL_KIND=false selects ate-setup's GCS staging path over the
+// in-cluster rustfs one, and keeps a developer's exported value from turning
+// the counter-microvm demo deploy into a kind one. It is already the default;
+// naming it here keeps that exported value from redirecting a GKE install's
+// assets into a kind bucket that does not exist. This repository's
+// tools/setup-gcp/install-microvm-deps.sh only stages to GCS and ignores it.
 //
 // The KUBECTL_CONTEXT that env blanks matters most here: with one set,
 // install-microvm-deps.sh skips its up-front context check and install-ate.sh
@@ -1177,13 +1178,16 @@ func microVMEnv(base []string) []string {
 	return append(base, "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
 }
 
-// legacyMicroVMScript is upstream's shell micro-VM installer. Its presence in
-// the checkout selects how InstallMicroVMDeps stages the assets:
-// agent-substrate/substrate#2092 ported it into ate-setup (`deploy
-// sandboxconfig --sandbox-classes`) and deleted it in the same commit, so the
-// script and the flag never coexist. The pinned Commit (v1.0.0-rc.1) predates
-// #2092 and still has the script; upstream main and release-1.0 do not.
-const legacyMicroVMScript = "hack/install-microvm-deps.sh"
+// legacyMicroVMAssembler is upstream's provider-neutral micro-VM asset
+// assembler, which tools/setup-gcp/install-microvm-deps.sh drives along with
+// upstream's SandboxConfig template. Its presence in the checkout selects how
+// InstallMicroVMDeps stages the assets: agent-substrate/substrate#2092 ported
+// upstream's micro-VM installer into ate-setup (`deploy sandboxconfig
+// --sandbox-classes`) and deleted the shell installer, assemble.sh and the
+// template in the same commit, so the assembler and the flag never coexist.
+// The pinned Commit (v1.0.0-rc.1) predates #2092 and still has the assembler;
+// upstream main and release-1.0 do not.
+const legacyMicroVMAssembler = "hack/microvm-assets/assemble.sh"
 
 // microVMATESetup stages the micro-VM assets and applies the `microvm`
 // SandboxConfig on trees from agent-substrate/substrate#2092 on. It stages
@@ -1192,20 +1196,18 @@ const legacyMicroVMScript = "hack/install-microvm-deps.sh"
 // sandboxClassesEnv.
 const microVMATESetup = "go run ./cmd/ate-setup deploy sandboxconfig"
 
-// InstallMicroVMDeps stages the micro-VM sandbox assets and applies the
-// cluster-wide `microvm` SandboxConfig from the pinned checkout: with
-// ate-setup where the tree has it (see legacyMicroVMScript), else with
-// upstream's hack/install-microvm-deps.sh.
+// InstallMicroVMDeps stages the micro-VM sandbox assets in the GCS asset
+// bucket and applies the cluster-wide `microvm` SandboxConfig from the pinned
+// checkout: with ate-setup where the tree has it (see legacyMicroVMAssembler),
+// else with this repository's tools/setup-gcp/install-microvm-deps.sh, which
+// takes upstream's assemble.sh and SandboxConfig template from the checkout.
 //
 // This is a separate step because micro-VM is opt-in: deploy ate-system is
 // kept to gVisor (see sandboxClassesEnv), and the micro-VM SandboxConfig
-// needs its sandbox binaries — cloud-hypervisor, virtiofsd, the guest kernel,
-// the guest rootfs and the base kata config — staged in the asset bucket
-// first, because the runtime fetches them from the bucket at boot rather than
-// carrying them in the worker image.
-//
-// Upstream's tooling is driven rather than reimplemented in Go: it pins the
-// staged assets' sha256 digests into the SandboxConfig at apply time.
+// needs its sandbox binaries — cloud-hypervisor, virtiofsd, the guest kernel
+// and the guest rootfs — staged in the asset bucket first, because the
+// runtime fetches them from the bucket at boot rather than carrying them in
+// the worker image.
 //
 // Credentials are fetched into a throwaway KUBECONFIG the same way the probes
 // do. Both paths refuse to run without a resolvable context — deliberately,
@@ -1217,19 +1219,22 @@ const microVMATESetup = "go run ./cmd/ate-setup deploy sandboxconfig"
 // so the ate-setup branch passes the control-plane step's settings and image
 // flags, and records both sandbox classes. The script ignores them.
 //
-// TODO(#99): Drop the script branch, ARCH in microVMEnv, and the
+// TODO(#99): Drop the script branch (and with it
+// tools/setup-gcp/install-microvm-deps.sh), ARCH in microVMEnv, and the
 // sha256sum/zstd/unzip entries in doctor.MicroVMTools once Commit is past
 // agent-substrate/substrate#2092 and older commits typed into the images step
 // no longer need them.
 func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 	display, argv := imageArgs(st)
 	lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
+	stageScript := ShellQuote(filepath.Join(b.SetupGCP, MicroVMDepsScript)) + " --install"
+	stageDisplay := SetupGCPPath + "/" + MicroVMDepsScript + " --install"
 	// Display is fixed before the tree is inspected, so each branch says
 	// which one ran: that line is how the log tells them apart.
 	lines = append(lines,
-		"if [ -f "+legacyMicroVMScript+" ]; then",
-		"  echo "+ShellQuote("Staging with: "+legacyMicroVMScript+" --install"),
-		"  "+legacyMicroVMScript+" --install",
+		"if [ -f "+legacyMicroVMAssembler+" ]; then",
+		"  echo "+ShellQuote("Staging with: "+stageDisplay),
+		"  "+stageScript,
 		"else",
 		"  echo "+ShellQuote("Staging with: "+microVMATESetup+display),
 		"  "+microVMATESetup+argv,
@@ -1244,14 +1249,14 @@ func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 		DisplayIsSummary: true,
 		Argv:             b.inTree(strings.Join(lines, "\n")),
 		Env:              append(env, sandboxClassesEnv(state.SandboxGVisor, state.SandboxMicroVM)),
-		// The dry run follows the pinned Commit, which still has the script.
+		// The dry run follows the pinned Commit, which still has the assembler.
 		SimLines: append(b.fetchSimLines(),
-			"Staging with: "+legacyMicroVMScript+" --install",
+			"Staging with: "+SetupGCPPath+"/"+MicroVMDepsScript+" --install",
 			"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
 			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"-assets/kata-assets/ ...",
 			"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
 			"sandboxconfig.ate.dev/microvm created",
-			"[install-microvm-deps]: Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm).",
+			"[install-microvm-deps]: Done. Installed cluster-wide microvm SandboxConfig.",
 		),
 	}
 }

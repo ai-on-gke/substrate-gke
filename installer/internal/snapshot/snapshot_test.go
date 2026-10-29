@@ -343,18 +343,22 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 
 // The micro-VM script uploads assets and applies a cluster-scoped resource, so
 // pointing it at the wrong cluster is not a no-op. It must target the cluster
-// the wizard chose, never whatever context happens to be ambient.
+// the wizard chose, never whatever context happens to be ambient. It is this
+// repository's copy that stages to GCS, not upstream's hack script, whose GCS
+// path is moving here (#82).
 func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 	st := testSetup(t)
 	st.ClusterName = "clu'ster $HOME"
 	st.Zone = "us-central1-a; id -u"
+	b := NewBuilder(fakeCheckout(t), false)
+	b.SetupGCP = "/home/o'brien/substrate gke/tools/setup-gcp"
 
-	script := NewBuilder(fakeCheckout(t), false).InstallMicroVMDeps(st).Argv[2]
+	script := b.InstallMicroVMDeps(st).Argv[2]
 	for _, want := range []string{
 		"gcloud container clusters get-credentials " + ShellQuote(st.ClusterName),
 		"--location " + ShellQuote(st.Zone),
 		"--project " + ShellQuote(st.ProjectID),
-		"hack/install-microvm-deps.sh --install",
+		ShellQuote(b.SetupGCP+"/install-microvm-deps.sh") + " --install",
 		microVMATESetup,
 	} {
 		if !strings.Contains(script, want) {
@@ -364,25 +368,28 @@ func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 	if err := exec.Command("bash", "-n", "-c", script).Run(); err != nil {
 		t.Errorf("script is not valid shell: %v\n%s", err, script)
 	}
+	if strings.Contains(script, "hack/install-microvm-deps.sh") {
+		t.Errorf("script runs upstream's hack/install-microvm-deps.sh:\n%s", script)
+	}
 }
 
 // Runs the branch the micro-VM staging step takes under real bash, with go
-// and the script stubbed, in a tree with upstream's shell installer (the
+// and setup-gcp's script stubbed, in a tree with upstream's assemble.sh (the
 // pinned rc.1) and one without it (core main, from
 // agent-substrate/substrate#2092 on).
 func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
-	b := NewBuilder(fakeCheckout(t), false)
 	source, prebuilt := testSetup(t), prebuiltSetup(t)
 	imageFlags := " --image-repo " + testImageRepo + " --image-tag " + testImageTag
+	setupGCPAnnounce := "Staging with: " + SetupGCPPath + "/" + MicroVMDepsScript + " --install"
 
 	for _, tc := range []struct {
-		name      string
-		st        *state.Setup
-		hasScript bool
-		want      string
-		announce  string
+		name         string
+		st           *state.Setup
+		hasAssembler bool
+		want         string
+		announce     string
 	}{
-		{"old tree", source, true, "install-microvm-deps.sh --install", "Staging with: hack/install-microvm-deps.sh --install"},
+		{"old tree", source, true, "install-microvm-deps.sh --install", setupGCPAnnounce},
 		{"new tree", source, false, "go run ./cmd/ate-setup deploy sandboxconfig", "Staging with: " + microVMATESetup},
 		{"pre-built, new tree", prebuilt, false, "go run ./cmd/ate-setup deploy sandboxconfig" + imageFlags, "Staging with: " + microVMATESetup + imageFlags},
 	} {
@@ -390,9 +397,15 @@ func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 			tc.st.SandboxClass = state.SandboxMicroVM
 			dir := t.TempDir()
 			bin := filepath.Join(dir, "bin")
-			stubs := map[string]string{filepath.Join(bin, "go"): `echo "go $*" >> calls`}
-			if tc.hasScript {
-				stubs[filepath.Join(dir, legacyMicroVMScript)] = `echo "install-microvm-deps.sh $*" >> calls`
+			b := NewBuilder(fakeCheckout(t), false)
+			b.SetupGCP = filepath.Join(t.TempDir(), "substrate gke", SetupGCPPath)
+			stubs := map[string]string{
+				filepath.Join(bin, "go"): `echo "go $*" >> calls`,
+				// Present in both trees: only the assembler decides.
+				filepath.Join(b.SetupGCP, MicroVMDepsScript): `echo "install-microvm-deps.sh $*" >> calls`,
+			}
+			if tc.hasAssembler {
+				stubs[filepath.Join(dir, legacyMicroVMAssembler)] = `echo "assemble.sh $*" >> calls`
 			}
 			for path, body := range stubs {
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -406,7 +419,7 @@ func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 			// Everything from the branch on: the fetch and the
 			// get-credentials before it need a network.
 			script := b.InstallMicroVMDeps(tc.st).Argv[2]
-			script = "set -euo pipefail\n" + script[strings.Index(script, "if [ -f "+legacyMicroVMScript+" ]"):]
+			script = "set -euo pipefail\n" + script[strings.Index(script, "if [ -f "+legacyMicroVMAssembler+" ]"):]
 			cmd := exec.Command("bash", "-c", script)
 			cmd.Dir = dir
 			cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + dir}

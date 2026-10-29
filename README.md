@@ -127,15 +127,17 @@ Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
 cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
-guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
-rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
-whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
-stages those five assets and applies a cluster-wide `SandboxConfig` named `microvm` that
-points at them. How it stages them depends on the Substrate tree:
+guest kernel and the guest rootfs — are fetched from GCS at boot rather than baked into
+the worker image. Step 9 (`Choose your sandbox runtime`) reports whether the cluster you
+selected has a KVM-capable node pool, and on choosing Micro-VM it stages those assets and
+applies a cluster-wide `SandboxConfig` named `microvm` that points at them. How it stages
+them depends on the Substrate tree:
 
-- **Up to v1.0.0-rc.1** (the current pin): upstream's `hack/install-microvm-deps.sh
-  --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
-  snapshot bucket up to Substrate v0.5.0, in `<bucket>-assets` after).
+- **Up to v1.0.0-rc.1** (the current pin): this repository's
+  [`tools/setup-gcp/install-microvm-deps.sh`](tools/setup-gcp/install-microvm-deps.sh)
+  `--install`, run in the Substrate checkout, assembles the four assets for amd64 with
+  upstream's `hack/microvm-assets/assemble.sh` and uploads them under `kata-assets/` in
+  `<bucket>-assets`.
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
   on** (upstream `main` and `release-1.0`, so from v1.0.0-rc.2): `ate-setup deploy
   sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets
@@ -143,7 +145,8 @@ points at them. How it stages them depends on the Substrate tree:
   `microvm-assets/<arch>/<sha256>`. It passes the control-plane step's settings and image
   flags too, because every ate-setup deploy replaces the install record that `--upgrade`
   reads. The control-plane step passes `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a
-  gVisor-only install stages nothing.
+  gVisor-only install stages nothing. #2092 removed `assemble.sh`, so the setup-gcp script
+  does not run on these trees.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
 
@@ -219,13 +222,14 @@ re-staged from the new tree:
   it is). Without `--config`, the run replaces that record with one that lacks the
   control plane's settings.
 - Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. Target the cluster's kube
-  context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
-  hack/install-microvm-deps.sh --install`.
+  context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket> SUBSTRATE_ROOT=<substrate
+  checkout> tools/setup-gcp/install-microvm-deps.sh --install` from this repository.
 
 Full teardown (`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all
 `SandboxConfig` resources automatically. To drop micro-VM without tearing anything else
 down, delete the `microvm` `SandboxConfig` (`kubectl delete sandboxconfig microvm` from
-#2092 on, or `NO_DEV_ENV=1 hack/install-microvm-deps.sh --delete` up to v1.0.0-rc.1). The
+#2092 on, or `NO_DEV_ENV=1 tools/setup-gcp/install-microvm-deps.sh --delete` up to
+v1.0.0-rc.1, which also refuses while a WorkerPool still uses the config). The
 staged assets (`microvm-assets/` or `kata-assets/`) stay in the bucket, unused.
 
 ## Reaching actors through the ingress router

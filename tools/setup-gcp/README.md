@@ -407,7 +407,8 @@ a revision whose node plugin gets snapshot credentials from ate-api-server's
 credential exchange first. On an older release, removing these grants makes
 every suspend and resume fail with `403`. Remove those grants after running
 `create bucket` and `create iam`, and after rerunning
-`hack/install-microvm-deps.sh --install` if you use microVM workers, so the
+`install-microvm-deps.sh --install` (see [Stage micro-VM assets](#stage-micro-vm-assets))
+if you use microVM workers, so the
 assets are in the asset bucket. `ATELET` is set as in the manual equivalent
 above:
 
@@ -476,6 +477,47 @@ To create only the image repository, after enabling the Artifact Registry API:
 ```bash
 go -C tools/setup-gcp run . create repository --project-id <project> --region <region> --name ate-images
 ```
+
+## Stage micro-VM assets
+
+Micro-VM workers fetch their sandbox binaries (cloud-hypervisor, virtiofsd,
+the guest kernel and the guest rootfs) from the asset bucket, `BUCKET_NAME-assets`,
+at boot. [`install-microvm-deps.sh`](install-microvm-deps.sh) puts them there
+and applies the cluster-wide `microvm` SandboxConfig that points at them. The
+installer runs it on the Micro-VM runtime step for Substrate trees up to
+v1.0.0-rc.1. It replaces the GCS path of agent-substrate/substrate's
+`hack/install-microvm-deps.sh` and `hack/microvm-assets/stage-to-gcs.sh`
+([#82](https://github.com/ai-on-gke/substrate-gke/issues/82)).
+
+From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
+on (upstream `main` and `release-1.0`), core stages micro-VM itself with
+`ate-setup deploy sandboxconfig` and no longer has the pieces this script
+reads, so the script stops and points there. The installer switches to
+ate-setup on those trees; see the root README's
+[Sandbox runtimes](../../README.md#sandbox-runtimes) section.
+
+It runs against a Substrate checkout, from which it takes the
+provider-neutral pieces: `hack/microvm-assets/assemble.sh`, which downloads the
+asset set, and `manifests/microvm/sandboxconfig-microvm.yaml.tmpl`. Run it from
+that checkout or name it with `SUBSTRATE_ROOT`:
+
+```bash
+NO_DEV_ENV=1 BUCKET_NAME=<bucket> ARCH=amd64 SUBSTRATE_ROOT=<substrate checkout> \
+  tools/setup-gcp/install-microvm-deps.sh --install
+```
+
+* `ARCH` is the nodes' arch, not the workstation's.
+* It targets `KUBECTL_CONTEXT`, or the kubeconfig's current context, and
+  passes `PROJECT_ID` to `gcloud` when set.
+* It stops before downloading anything if it cannot list
+  `gs://BUCKET_NAME-assets` (`storage.objects.list`, which object-scoped
+  roles such as `roles/storage.objectUser` include); `create bucket` (or
+  `bootstrap`) creates it.
+* The asset set is cached in `SUBSTRATE_ROOT/bin/microvm-assets/ARCH` (or
+  `OUT`) and assembled again only when upstream's pinned versions change.
+* `--delete` removes the SandboxConfig, unless a WorkerPool still uses it, and
+  leaves the bucket alone. It needs neither `BUCKET_NAME` nor a Substrate
+  checkout.
 
 ## Teardown
 
