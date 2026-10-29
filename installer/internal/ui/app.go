@@ -138,6 +138,8 @@ func (a *App) screenFor(s state.Step) Screen {
 		return newWelcomeScreen(a.deps)
 	case state.Images:
 		return newImagesScreen(a.deps)
+	case state.PluginImages:
+		return newPluginImagesScreen(a.deps)
 	case state.CheckSetup:
 		return newDoctorScreen(a.deps)
 	case state.Project:

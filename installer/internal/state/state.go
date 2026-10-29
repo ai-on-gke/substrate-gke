@@ -50,6 +50,10 @@ const (
 	// Machine's order, not from these values.
 	UpgradeSource
 	UpgradePlan
+
+	// PluginImages was added after the upgrade steps for the same reason:
+	// its value leaves every other step's number alone.
+	PluginImages
 )
 
 // Order is the linear flow of the wizard.
@@ -59,6 +63,11 @@ const (
 // registry. It comes after CheckSetup because it is the first step to reach
 // the network — it resolves a revision against a git remote — and the doctor
 // is what reports a missing git or an unreachable network with a fix to paste.
+//
+// PluginImages follows Images: the GKE plugins are published apart from
+// Substrate, with their own commits and versions, so their images get a step
+// of their own. It is not in UpgradeOrder, because nothing deploys a plugin
+// yet and so there is nothing to upgrade.
 //
 // IngressClients comes right before ControlPlane, which hands its SPIFFE IDs
 // to ate-setup as the ingress router's allowlist.
@@ -72,13 +81,13 @@ const (
 // workloads. DemoOrder, for `make run-demo`, adds Demo after Sandbox, which
 // deploys the counter demo matching the chosen runtime.
 var Order = []Step{
-	Welcome, CheckSetup, Images, Project, Cluster, Provision,
+	Welcome, CheckSetup, Images, PluginImages, Project, Cluster, Provision,
 	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Complete,
 }
 
 // DemoOrder is the install flow of a demo run (--demo, `make run-demo`).
 var DemoOrder = []Step{
-	Welcome, CheckSetup, Images, Project, Cluster, Provision,
+	Welcome, CheckSetup, Images, PluginImages, Project, Cluster, Provision,
 	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
 }
 
@@ -108,6 +117,8 @@ func (s Step) Title() string {
 		return "Welcome"
 	case Images:
 		return "Choose your images"
+	case PluginImages:
+		return "Choose your GKE plugin images"
 	case CheckSetup:
 		return "Check your setup"
 	case Project:
@@ -274,6 +285,17 @@ type Setup struct {
 	ImageRepo string
 	ImageTag  string
 
+	// PluginSourceRepo, PluginImageRepo, PluginImageTag and PluginCommit name
+	// the GKE plugin images: their repository, the registry and tag they were
+	// published under, and the commit they were built from. Plugins version
+	// separately from Substrate, so these are independent of ImageRepo and
+	// ImageTag. All are empty when the plugin step was skipped. Nothing
+	// deploys the plugins yet; see snapshot.PluginSourceOrg.
+	PluginSourceRepo string
+	PluginImageRepo  string
+	PluginImageTag   string
+	PluginCommit     string
+
 	ProjectID     string
 	ProjectNumber string
 
@@ -404,6 +426,9 @@ func (s *Setup) BootstrapNetwork() (network, subnetwork string, dataplaneV2 bool
 // Prebuilt reports whether the install pulls published images rather than
 // building them.
 func (s *Setup) Prebuilt() bool { return s.ImageRepo != "" }
+
+// GKEPlugins reports whether GKE plugin images were given.
+func (s *Setup) GKEPlugins() bool { return s.PluginImageRepo != "" }
 
 // CreatesArtifactRepository reports whether this install provisions its build repository.
 func (s *Setup) CreatesArtifactRepository() bool {

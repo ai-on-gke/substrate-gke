@@ -80,23 +80,55 @@ func newInput(value, placeholder string) textinput.Model {
 	return in
 }
 
-// enterRelease asks for the registry and tag of published images. Neither
-// has a default: no registry is published for the pin (see the note above
-// snapshot.Commit's declaration), so a team installs its own published
-// build, a staging registry or a private rebuild by typing them here.
+// enterRelease offers a registry and tag (see offeredImages): by default
+// upstream's release registry and, once the pin's release has images there,
+// its tag (see snapshot.ReleaseVersion). All three fields
+// are editable: a team publishing its own builds, a staging registry or a
+// private rebuild of a release installs them by typing them here rather than
+// by building from source.
 //
 // The commit the images were built from comes with them, because ate-setup
 // reads the manifests from the Substrate tree at that commit. It defaults to
 // the pin, which only fits images built from the pin.
 func (s *imagesScreen) enterRelease() tea.Cmd {
+	registry, tag := s.offeredImages()
 	s.mode, s.focus, s.errText, s.note = "release", 0, "", ""
 	s.labels = []string{"Image registry", "Image tag", "Commit the images were built from"}
 	s.fields = []textinput.Model{
-		newInput("", "registry.example.com/substrate"),
-		newInput("", "the tag your images were published under"),
+		newInput(registry, snapshot.ReleaseRepo),
+		newInput(tag, "the release tag the images were published under"),
 		newInput(snapshot.Commit, snapshot.Commit),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
+}
+
+// offeredImages is the registry and tag the pre-built track starts at. A
+// registry the run already holds wins, so coming back to the step keeps what
+// was typed. On the upgrade track the next registry is the one the cluster's
+// record installs from, since PrepareUpgrade writes the offered registry into
+// new.yaml and a cluster installed from a mirror upgrades from that mirror.
+// Otherwise it is upstream's release registry. The release tag is offered
+// only with the release registry; any other registry's tag is the user's to
+// give.
+func (s *imagesScreen) offeredImages() (registry, tag string) {
+	st := s.deps.Setup
+	if st.ImageRepo != "" {
+		return st.ImageRepo, st.ImageTag
+	}
+	if st.Upgrade {
+		if record, err := snapshot.RecordPath(st); err == nil {
+			if repo, _ := snapshot.RecordImageRepo(record); repo != "" {
+				registry = repo
+			}
+		}
+	}
+	if registry == "" {
+		registry = snapshot.ReleaseRepo
+	}
+	if registry == snapshot.ReleaseRepo {
+		tag = snapshot.ReleaseVersion
+	}
+	return registry, tag
 }
 
 // enterSource offers a revision of the Substrate repository, prefilled with
@@ -288,9 +320,14 @@ func (s *imagesScreen) View(w int) string {
 	b.WriteString(theme.Subtle.Render("Where the Substrate control-plane images come from.") + "\n\n")
 
 	if s.mode == "choose" {
+		prebuilt := struct{ name, desc string }{"[1] Install pre-built images",
+			"Pulls every image from " + snapshot.ReleaseRepo + "\nat a release tag you give, or from any registry and tag. Needs images\npublished for the commit you install. Nothing is built or pushed."}
+		if snapshot.ReleaseVersion != "" {
+			prebuilt = struct{ name, desc string }{"[1] Install pre-built images (recommended)",
+				"Defaults to the " + snapshot.ReleaseVersion + " release at\n" + snapshot.ReleaseRepo + ";\nany registry and tag can be given instead. Nothing is built or pushed."}
+		}
 		options := []struct{ name, desc string }{
-			{"[1] Install pre-built images",
-				"Pulls every image from a registry and tag you give. No registry is\npublished by default, so this needs images published for the commit\nyou install. Nothing is built or pushed."},
+			prebuilt,
 			{"[2] Build from source",
 				"Builds every image with ko from a commit of the Substrate repository,\n" + snapshot.ShortCommit() + " by default, and pushes them to your own registry. Pick\nthis when you have no published images."},
 		}
@@ -329,8 +366,19 @@ func (s *imagesScreen) View(w int) string {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
 	case s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
+	// The tag counts as much as the registry: the offered commit is the one
+	// the offered tag was built from, so another tag from the same registry
+	// runs behind manifests that do not match it.
+	case s.mode == "release" && snapshot.ReleaseVersion != "" &&
+		(s.value(0) != snapshot.ReleaseRepo || s.value(1) != snapshot.ReleaseVersion):
+		b.WriteString(theme.Warning.Render(
+			"Only " + snapshot.ReleaseRepo + ":" + snapshot.ReleaseVersion + "\n" +
+				"is published from the commit offered below. Give the commit these\n" +
+				"images were built from; the manifests are read from it."))
+	case s.mode == "release" && snapshot.ReleaseVersion != "":
+		b.WriteString(theme.Subtle.Render("Defaults to the published release; override any of these to install your\nown build. Every image is pulled at this tag and pinned to the digest it\nnames, and ate-setup reads the manifests from the commit above."))
 	case s.mode == "release":
-		b.WriteString(theme.Subtle.Render("No registry is published by default. Give the registry and tag of your\nimages, and the commit they were built from: ate-setup reads the manifests\nfrom it. Every image is pulled at this tag and pinned to the digest it names."))
+		b.WriteString(theme.Subtle.Render("The pinned commit's release has no published images yet. Give the release\ntag of images published to this registry, or another registry and tag, and\nthe commit those images were built from: ate-setup reads the manifests from\nit. Every image is pulled at this tag and pinned to the digest it names."))
 	default:
 		b.WriteString(theme.Subtle.Render("Defaults to " + snapshot.ShortCommit() + ", the revision this installer is pinned to.\nOverride it with a branch, a tag, or a full commit SHA."))
 	}

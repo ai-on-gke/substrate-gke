@@ -202,9 +202,17 @@ func comparePrerelease(a, b string) int {
 // runbook's own commands read the record. ok is false when there is no
 // record to read.
 func RecordPrebuilt(path string) (prebuilt, ok bool) {
+	repo, ok := RecordImageRepo(path)
+	return repo != "", ok
+}
+
+// RecordImageRepo returns the registry the record at path installs pre-built
+// images from: the repo under images, empty for a build from source. ok is
+// false when there is no record to read.
+func RecordImageRepo(path string) (repo string, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false, false
+		return "", false
 	}
 	inImages := false
 	for _, line := range strings.Split(string(data), "\n") {
@@ -214,10 +222,10 @@ func RecordPrebuilt(path string) (prebuilt, ok bool) {
 		case !strings.HasPrefix(line, " "):
 			inImages = false
 		case inImages && strings.HasPrefix(strings.TrimSpace(line), "repo:"):
-			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "repo:")) != "", true
+			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "repo:")), true
 		}
 	}
-	return false, true
+	return "", true
 }
 
 // CheckImageSource reports whether the new version comes from the kind of

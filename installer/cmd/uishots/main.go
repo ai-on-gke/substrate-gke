@@ -36,6 +36,10 @@ import (
 	"github.com/ai-on-gke/substrate-gke/installer/internal/ui"
 )
 
+// exampleImageTag is the image tag the walk types while snapshot.ReleaseVersion
+// is empty: the release tag of the pinned commit, snapshot.Commit.
+const exampleImageTag = "v0.6.0"
+
 func main() {
 	out := "docs/screenshots"
 	if len(os.Args) > 1 {
@@ -89,11 +93,18 @@ func main() {
 	press(app, "enter")      // welcome → doctor
 	press(app, "enter")      // doctor → images
 	press(app, "1", "enter") // pre-built images
-	// There is no default registry, so the images step needs one and a tag.
-	paste(app, "registry.example.com/substrate")
-	press(app, "enter")
-	paste(app, "v0.6.0")
-	press(app, "enter", "enter")
+	press(app, "enter")      // the default registry, upstream's release registry
+	if snapshot.ReleaseVersion == "" {
+		// The tag is required and has no default until the pin's release
+		// publishes images, so the walk gives one. Nothing is pulled in a
+		// dry run.
+		paste(app, exampleImageTag)
+	}
+	press(app, "enter", "enter") // tag → commit, then submit with the pinned commit
+	press(app, "enter")          // GKE plugin images: skip, the default
+	if !strings.Contains(app.View(), state.Project.Title()) {
+		fatal(fmt.Errorf("the walk did not reach the project step:\n%s", app.View()))
+	}
 	press(app, "enter", "enter", "enter") // project fields
 	shot(out, "clusters", app)            // list with install-state badges
 

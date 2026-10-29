@@ -859,8 +859,9 @@ func TestFetchedRequiresTheCompletionMarker(t *testing.T) {
 	}
 }
 
-// testImageRepo and testImageTag stand in for a published image set. No
-// registry is published by default, so a pre-built install always names one.
+// testImageRepo and testImageTag stand in for a published image set, so the
+// tests do not depend on ReleaseRepo and ReleaseVersion, which move with the
+// pin.
 const (
 	testImageRepo = "registry.example.com/substrate"
 	testImageTag  = "v0.6.0"
@@ -1621,6 +1622,32 @@ func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	}
 	if summary := b.UpgradeSummary(st); strings.Contains(summary, "export VERSION") {
 		t.Errorf("a pre-built hand-over should not export a version:\n%s", summary)
+	}
+}
+
+// RecordImageRepo reads the registry under images and nothing else: a repo
+// key under another section is not it, and a build from source has none.
+func TestRecordImageRepo(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		record string
+		want   string
+	}{
+		"pre-built":  {"cluster:\n  substrateVersion: v0.5.0\nimages:\n  repo: us-docker.pkg.dev/acme/mirror\n  tag: v0.5.0\n", "us-docker.pkg.dev/acme/mirror"},
+		"source":     {"ko:\n  dockerRepo: us-west1-docker.pkg.dev/acme/ate-images\n", ""},
+		"other repo": {"git:\n  repo: https://example.com/x.git\nimages:\n  tag: v0.5.0\n", ""},
+		"empty repo": {"images:\n  repo: \n", ""},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".yaml")
+		if err := os.WriteFile(path, []byte(tc.record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := RecordImageRepo(path); !ok || got != tc.want {
+			t.Errorf("%s: RecordImageRepo = %q/%v, want %q/true", name, got, ok, tc.want)
+		}
+	}
+	if _, ok := RecordImageRepo(filepath.Join(dir, "missing.yaml")); ok {
+		t.Error("a missing record should report ok = false")
 	}
 }
 
