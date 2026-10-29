@@ -30,8 +30,9 @@ const SetupGCPPath = "tools/setup-gcp"
 
 // MicroVMDepsScript, in SetupGCPPath, stages the micro-VM assets in the GCS
 // asset bucket setup-gcp creates and applies the `microvm` SandboxConfig.
-// Upstream's hack/install-microvm-deps.sh did this before the GCS path moved
-// here (ai-on-gke/substrate-gke#82).
+// It stands in for the GCS branch of upstream's hack/install-microvm-deps.sh,
+// so the installer does not depend on that dev script
+// (ai-on-gke/substrate-gke#82).
 const MicroVMDepsScript = "install-microvm-deps.sh"
 
 // FindSetupGCP returns the absolute path of this repository's setup-gcp

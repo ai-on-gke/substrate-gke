@@ -344,8 +344,7 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 // The micro-VM script uploads assets and applies a cluster-scoped resource, so
 // pointing it at the wrong cluster is not a no-op. It must target the cluster
 // the wizard chose, never whatever context happens to be ambient. It is this
-// repository's copy that stages to GCS, not upstream's hack script, whose GCS
-// path is moving here (#82).
+// repository's script that stages to GCS, not upstream's hack script (#82).
 func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 	st := testSetup(t)
 	st.ClusterName = "clu'ster $HOME"

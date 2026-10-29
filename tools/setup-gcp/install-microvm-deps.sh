@@ -19,10 +19,12 @@ set -o errexit -o nounset -o pipefail
 # Installs (or deletes) the cluster-wide micro-VM (kata + cloud-hypervisor)
 # SandboxConfig on GKE, after staging its assets into the GCS asset bucket
 # that `setup-gcp bootstrap` (or `create bucket`) creates, BUCKET_NAME-assets.
-# This is the GCS half of agent-substrate/substrate's hack/install-microvm-deps.sh
-# and hack/microvm-assets/stage-to-gcs.sh, moved here so that core can drop
-# its GKE-only staging path (#82). The provider-neutral parts stay upstream and
-# are read from a Substrate checkout:
+# It does what the GCS branch of agent-substrate/substrate's
+# hack/install-microvm-deps.sh and hack/microvm-assets/stage-to-gcs.sh does,
+# so that this repository's installer does not depend on a dev script in core
+# for a bucket setup-gcp names (#82). The assets themselves are not specific to
+# GKE: the parts that are not GCS-specific stay upstream and are read from a
+# Substrate checkout:
 #
 #   * hack/microvm-assets/assemble.sh downloads the asset set for one arch.
 #   * manifests/microvm/sandboxconfig-microvm.yaml.tmpl is the SandboxConfig.
