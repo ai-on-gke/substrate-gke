@@ -3724,6 +3724,55 @@ func TestProvisionChecklistNamesTheSelectedCommit(t *testing.T) {
 	}
 }
 
+// The pre-built track starts at a registry the run already holds, so coming
+// back keeps a typed mirror. On the upgrade track it starts at the registry
+// the cluster's record installs from, because PrepareUpgrade writes the
+// offered registry into new.yaml: offering upstream's there would move a
+// mirror-installed cluster onto it. Only the release registry comes with the
+// release tag.
+func TestImagesScreenKeepsTheRegistryTheRunHolds(t *testing.T) {
+	const mirror = "us-docker.pkg.dev/acme/mirror"
+	for name, tc := range map[string]struct {
+		heldRepo, heldTag string
+		upgrade           bool
+		record            string
+		wantRepo, wantTag string
+	}{
+		"fresh install":          {wantRepo: snapshot.ReleaseRepo, wantTag: snapshot.ReleaseVersion},
+		"coming back":            {heldRepo: mirror, heldTag: "v0.6.0", wantRepo: mirror, wantTag: "v0.6.0"},
+		"upgrade from a mirror":  {upgrade: true, record: "images:\n  repo: " + mirror + "\n  tag: v0.5.0\n", wantRepo: mirror},
+		"upgrade of a source":    {upgrade: true, record: "ko:\n  dockerRepo: us-west1-docker.pkg.dev/acme/ate-images\n", wantRepo: snapshot.ReleaseRepo, wantTag: snapshot.ReleaseVersion},
+		"upgrade with no record": {upgrade: true, wantRepo: snapshot.ReleaseRepo, wantTag: snapshot.ReleaseVersion},
+		"upgrade, coming back":   {heldRepo: "gcr.io/acme/other", heldTag: "v0.6.0", upgrade: true, record: "images:\n  repo: " + mirror + "\n", wantRepo: "gcr.io/acme/other", wantTag: "v0.6.0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ATE_RECORD_DIR", t.TempDir())
+			deps := testApp(t).deps
+			st := deps.Setup
+			st.ProjectID, st.Zone, st.ClusterName = "acme", "us-west1-c", "substrate"
+			st.Upgrade = tc.upgrade
+			st.ImageRepo, st.ImageTag = tc.heldRepo, tc.heldTag
+			if tc.record != "" {
+				record, err := snapshot.RecordPath(st)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(record, []byte(tc.record), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scr := newImagesScreen(deps)
+			scr.enterRelease()
+			if scr.value(0) != tc.wantRepo || scr.value(1) != tc.wantTag {
+				t.Errorf("offered %q:%q, want %q:%q", scr.value(0), scr.value(1), tc.wantRepo, tc.wantTag)
+			}
+		})
+	}
+}
+
 // The pre-built track offers upstream's release registry, and its tag once the
 // pin's release has images there; until then it refuses to go on without a
 // tag. With no registry it refuses as well. Its manifest commit, like the

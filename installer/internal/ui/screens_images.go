@@ -80,8 +80,9 @@ func newInput(value, placeholder string) textinput.Model {
 	return in
 }
 
-// enterRelease offers upstream's release registry and, once the pin's release
-// has images there, its tag (see snapshot.ReleaseVersion). All three fields
+// enterRelease offers a registry and tag (see offeredImages): by default
+// upstream's release registry and, once the pin's release has images there,
+// its tag (see snapshot.ReleaseVersion). All three fields
 // are editable: a team publishing its own builds, a staging registry or a
 // private rebuild of a release installs them by typing them here rather than
 // by building from source.
@@ -90,14 +91,44 @@ func newInput(value, placeholder string) textinput.Model {
 // reads the manifests from the Substrate tree at that commit. It defaults to
 // the pin, which only fits images built from the pin.
 func (s *imagesScreen) enterRelease() tea.Cmd {
+	registry, tag := s.offeredImages()
 	s.mode, s.focus, s.errText, s.note = "release", 0, "", ""
 	s.labels = []string{"Image registry", "Image tag", "Commit the images were built from"}
 	s.fields = []textinput.Model{
-		newInput(snapshot.ReleaseRepo, snapshot.ReleaseRepo),
-		newInput(snapshot.ReleaseVersion, "the release tag the images were published under"),
+		newInput(registry, snapshot.ReleaseRepo),
+		newInput(tag, "the release tag the images were published under"),
 		newInput(snapshot.Commit, snapshot.Commit),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
+}
+
+// offeredImages is the registry and tag the pre-built track starts at. A
+// registry the run already holds wins, so coming back to the step keeps what
+// was typed. On the upgrade track the next registry is the one the cluster's
+// record installs from, since PrepareUpgrade writes the offered registry into
+// new.yaml and a cluster installed from a mirror upgrades from that mirror.
+// Otherwise it is upstream's release registry. The release tag is offered
+// only with the release registry; any other registry's tag is the user's to
+// give.
+func (s *imagesScreen) offeredImages() (registry, tag string) {
+	st := s.deps.Setup
+	if st.ImageRepo != "" {
+		return st.ImageRepo, st.ImageTag
+	}
+	if st.Upgrade {
+		if record, err := snapshot.RecordPath(st); err == nil {
+			if repo, _ := snapshot.RecordImageRepo(record); repo != "" {
+				registry = repo
+			}
+		}
+	}
+	if registry == "" {
+		registry = snapshot.ReleaseRepo
+	}
+	if registry == snapshot.ReleaseRepo {
+		tag = snapshot.ReleaseVersion
+	}
+	return registry, tag
 }
 
 // enterSource offers a revision of the Substrate repository, prefilled with
