@@ -114,31 +114,20 @@ type bucketGrant struct {
 // to, so it gets objectAdmin, plus bucketViewer to resolve the bucket. The
 // transfer service account gets the same: the credential exchange downscopes
 // its token to each actor's prefixes for every snapshot transfer. atelet reads
-// micro-VM sandbox assets from the asset bucket with its own identity.
-//
-// With cfg.AteletSnapshotAccess, atelet also gets objectAdmin and
-// bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 move
-// snapshots with atelet's own identity and need these. Later revisions run
-// every snapshot transfer on a per-actor token from the credential exchange
-// and do not.
+// micro-VM sandbox assets from the asset bucket with its own identity, and
+// gets nothing on the snapshot bucket: every snapshot transfer runs on a
+// per-actor token from the credential exchange (agent-substrate/substrate
+// threat model T-08 and T-36).
 func bucketGrants(cfg *Config) []bucketGrant {
 	apiServer := workloadIdentityPrincipal(cfg, "ate-api-server")
 	transfer := transferServiceAccountMember(cfg)
-	atelet := workloadIdentityPrincipal(cfg, "atelet")
-	grants := []bucketGrant{
+	return []bucketGrant{
 		{bucket: cfg.BucketName, member: apiServer, role: "roles/storage.objectAdmin"},
 		{bucket: cfg.BucketName, member: apiServer, role: "roles/storage.bucketViewer"},
 		{bucket: cfg.BucketName, member: transfer, role: "roles/storage.objectAdmin"},
 		{bucket: cfg.BucketName, member: transfer, role: "roles/storage.bucketViewer"},
-		{bucket: cfg.assetBucketName(), member: atelet, role: "roles/storage.objectViewer"},
+		{bucket: cfg.assetBucketName(), member: workloadIdentityPrincipal(cfg, "atelet"), role: "roles/storage.objectViewer"},
 	}
-	if cfg.AteletSnapshotAccess {
-		grants = append(grants,
-			bucketGrant{bucket: cfg.BucketName, member: atelet, role: "roles/storage.objectAdmin"},
-			bucketGrant{bucket: cfg.BucketName, member: atelet, role: "roles/storage.bucketViewer"},
-		)
-	}
-	return grants
 }
 
 func createIamPolicyBindings(ctx context.Context, cfg *Config) error {

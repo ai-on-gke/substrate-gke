@@ -409,6 +409,13 @@ func TestTeardownClusterScopedKeepsProjectWideResources(t *testing.T) {
 			t.Errorf("--cluster-scoped ran a project-wide step (%q); calls:\n%s", unwanted, run.calls)
 		}
 	}
+	// Without --condition=None, gcloud refuses to remove a binding in
+	// non-interactive mode once the bucket policy has any conditional binding.
+	for _, call := range strings.Split(run.calls, "\n") {
+		if strings.Contains(call, "storage buckets remove-iam-policy-binding") && !strings.Contains(call, "--condition=None") {
+			t.Errorf("bucket binding removal lacks --condition=None: %s", call)
+		}
+	}
 }
 
 // Like --all, --cluster-scoped checks every variable it needs before the

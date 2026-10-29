@@ -57,8 +57,7 @@ type Config struct {
 	BootDiskProvisionedIOPS           int64
 	BootDiskProvisionedThroughputMBps int64
 
-	BucketName           string
-	AteletSnapshotAccess bool
+	BucketName string
 	// TransferGSAName is the name of the snapshot transfer service account
 	// (SNAPSHOT_TRANSFER_GSA_NAME), the variable ate-setup also reads.
 	TransferGSAName            string
@@ -144,10 +143,24 @@ func (c *Config) assetBucketName() string {
 	return c.BucketName + "-assets"
 }
 
-// addAteletSnapshotAccessFlag registers --atelet-snapshot-access on cmd.
-// See bucketGrants for what it grants and which Substrate revisions need it.
+// ateletSnapshotAccessRemoved explains why --atelet-snapshot-access and
+// ATELET_SNAPSHOT_ACCESS no longer do anything.
+const ateletSnapshotAccessRemoved = "atelet no longer gets storage roles on the project or the snapshot bucket; Substrate v0.6.0 and later move snapshots on per-actor credentials and do not need them"
+
+// addAteletSnapshotAccessFlag registers the removed --atelet-snapshot-access
+// flag, hidden and ignored, so scripts that still pass it keep working. Delete
+// it in a later release.
 func addAteletSnapshotAccessFlag(cmd *cobra.Command) {
-	cmd.Flags().BoolVar(&cfg.AteletSnapshotAccess, "atelet-snapshot-access", getEnv("ATELET_SNAPSHOT_ACCESS", true), "Grant atelet storage.objectAdmin on the project and objectAdmin and bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 need it; revisions with per-actor snapshot credentials do not. Turn off with --atelet-snapshot-access=false [env: ATELET_SNAPSHOT_ACCESS]")
+	cmd.Flags().Bool("atelet-snapshot-access", false, "Removed: "+ateletSnapshotAccessRemoved)
+	_ = cmd.Flags().MarkDeprecated("atelet-snapshot-access", ateletSnapshotAccessRemoved)
+}
+
+// warnRemovedAteletSnapshotAccessEnv warns when ATELET_SNAPSHOT_ACCESS is set,
+// since setup-gcp now ignores it.
+func warnRemovedAteletSnapshotAccessEnv() {
+	if _, ok := os.LookupEnv("ATELET_SNAPSHOT_ACCESS"); ok {
+		slog.Warn("Ignoring ATELET_SNAPSHOT_ACCESS: " + ateletSnapshotAccessRemoved)
+	}
 }
 
 // workloadIdentityPrincipal is the IAM member for the ate-system Kubernetes

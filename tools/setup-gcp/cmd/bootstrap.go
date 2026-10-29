@@ -29,6 +29,7 @@ var bootstrapCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		warnDeprecatedMachineTypeEnv(cmd)
+		warnRemovedAteletSnapshotAccessEnv()
 		if err := resolveProjectID(ctx, &cfg); err != nil {
 			return err
 		}

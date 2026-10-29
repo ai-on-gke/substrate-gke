@@ -38,6 +38,10 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Docker with buildx | Only to build Substrate 0.2 or later from source, which builds its envoy-dataplane image with `docker buildx`. Docker also needs credentials for your registry: `gcloud auth configure-docker <registry-host>` |
 | A GCP project with billing | Checked on the project step, which can also enable the GKE API for you |
 
+The installer and `tools/setup-gcp` support Substrate [v0.6.0](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) and later only,
+since [#92](https://github.com/ai-on-gke/substrate-gke/pull/92). Earlier releases fail every suspend and resume with `403` on the
+IAM setup-gcp creates.
+
 ```bash
 # One-line install and launch, ending with the counter demo (make run-demo):
 curl -sSL https://raw.githubusercontent.com/ai-on-gke/substrate-gke/main/install.sh | bash -s -- --demo
@@ -131,8 +135,7 @@ guest kernel, the guest rootfs and the base kata config — are fetched from GCS
 rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
 whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
 runs upstream's `hack/install-microvm-deps.sh --install` to assemble those five assets,
-upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0, in
-`<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
+upload them under `kata-assets/` in `<bucket>-assets`, and apply a cluster-wide `SandboxConfig` named `microvm` that
 points at them.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
@@ -280,6 +283,10 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag | The pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
+
+Whichever you choose, the commit must be v0.6.0 or later (or a branch or
+commit that includes it): `tools/setup-gcp` grants only what v0.6.0's
+per-actor snapshot credentials need.
 
 > [!NOTE]
 > No registry of pre-built images is published at the moment. The GKE release
