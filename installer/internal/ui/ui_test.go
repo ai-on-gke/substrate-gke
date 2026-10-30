@@ -96,8 +96,8 @@ func key(s string) tea.Msg {
 // step.
 const testClientID = "spiffe://cluster.local/ns/shop/sa/frontend"
 
-// testImageRepo and testImageTag stand in for a published image set. No
-// registry is published by default, so the pre-built track always types one.
+// testImageRepo and testImageTag stand in for a published image set other than
+// the release the pre-built track offers, so the walks replace its defaults.
 const (
 	testImageRepo = "registry.example.com/substrate"
 	testImageTag  = "v0.6.0"
@@ -110,11 +110,24 @@ const (
 // would otherwise push the package past go test's 10 minute default.
 func typeReleaseImages(t *testing.T, app *App) {
 	t.Helper()
+	clearField(t, app)
 	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter"))
+	clearField(t, app)
 	typeText(t, app, testImageTag)
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter"))
+}
+
+// clearField empties the images step's focused field, which the pre-built
+// track prefills with the release it offers, so text typed next replaces it.
+func clearField(t *testing.T, app *App) {
+	t.Helper()
+	scr, ok := app.cur.(*imagesScreen)
+	if !ok {
+		t.Fatalf("clearField on %T, want the images step", app.cur)
+	}
+	scr.fields[scr.focus].SetValue("")
 }
 
 func testApp(t *testing.T) *App {
@@ -1389,6 +1402,7 @@ func TestImagesScreenRejectsAMalformedTag(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
+	clearField(t, app)
 	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
 
@@ -1422,8 +1436,10 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
+	clearField(t, app)
 	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
+	clearField(t, app)
 	typeText(t, app, testImageTag)
 	pump(t, app, key("enter")) // tag → commit
 
@@ -3503,10 +3519,11 @@ func TestProvisionChecklistNamesTheSelectedCommit(t *testing.T) {
 	}
 }
 
-// No registry is published by default, so the pre-built track offers no
-// registry or tag and refuses to go on without them. Its manifest commit, like
-// the source track's revision, starts at the pin.
-func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
+// The pre-built track offers the pin's published release: upstream's release
+// registry at the release tag, with the pin as the manifest commit, like the
+// source track's revision. Cleared, the registry is refused rather than
+// guessed.
+func TestImagesScreenOffersTheReleaseAndThePin(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
@@ -3514,14 +3531,25 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 	pump(t, app, key("enter")) // pre-built images
 
 	scr := app.cur.(*imagesScreen)
-	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != snapshot.Commit {
-		t.Fatalf("pre-built fields = %q, %q, %q; want empty, empty, the pin", scr.value(0), scr.value(1), scr.value(2))
+	if scr.value(0) != snapshot.ReleaseRepo || scr.value(1) != snapshot.ReleaseVersion || scr.value(2) != snapshot.Commit {
+		t.Fatalf("pre-built fields = %q, %q, %q; want %s, %s, the pin", scr.value(0), scr.value(1), scr.value(2), snapshot.ReleaseRepo, snapshot.ReleaseVersion)
 	}
+	if v := scr.View(120); strings.Contains(v, "was built from. Give the commit") {
+		t.Errorf("the offered release warns about its own commit:\n%s", v)
+	}
+	scr.fields[0].SetValue("")
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter"))
-	pump(t, app, key("enter")) // submit with nothing typed
+	pump(t, app, key("enter")) // submit with the registry cleared
 	if app.mach.Current() != state.Images || !strings.Contains(scr.errText, "registry is required") || scr.focus != 0 {
 		t.Fatalf("an empty registry was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
+	}
+	// Another registry with the pin's commit is the mismatch the screen
+	// warns about.
+	scr.errText = ""
+	scr.fields[0].SetValue("registry.example.com/substrate")
+	if v := scr.View(120); !strings.Contains(v, "was built from. Give the commit") {
+		t.Errorf("another registry with the pin's commit gave no warning:\n%s", v)
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the choice

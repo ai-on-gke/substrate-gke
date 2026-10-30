@@ -949,6 +949,14 @@ func (s *demoScreen) View(w int) string {
 			b.WriteString(theme.Subtle.Render("  "+opt) + "\n")
 		}
 	}
+	// The demo pulls its workload image from the control plane's registry and
+	// tag, and releases do not publish demo images (see snapshot.ReleaseRepo).
+	if s.deps.Setup.ImageRepo == snapshot.ReleaseRepo {
+		b.WriteString("\n" + theme.Warning.Render(
+			"Releases don't publish the counter demo's image, so deploying it from\n"+
+				snapshot.ReleaseRepo+" fails. Skip it, or install with images built\n"+
+				"from source to run the demo."))
+	}
 	return b.String()
 }
 

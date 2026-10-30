@@ -89,11 +89,8 @@ func main() {
 	press(app, "enter")      // welcome → doctor
 	press(app, "enter")      // doctor → images
 	press(app, "1", "enter") // pre-built images
-	// There is no default registry, so the images step needs one and a tag.
-	paste(app, "registry.example.com/substrate")
-	press(app, "enter")
-	paste(app, "v0.6.0")
-	press(app, "enter", "enter")
+	// The pre-built track offers the pin's published release.
+	press(app, "enter", "enter", "enter")
 	press(app, "enter", "enter", "enter") // project fields
 	shot(out, "clusters", app)            // list with install-state badges
 
