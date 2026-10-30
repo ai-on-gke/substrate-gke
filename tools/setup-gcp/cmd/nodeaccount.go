@@ -27,6 +27,8 @@ import (
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/spf13/cobra"
 	iam "google.golang.org/api/iam/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // DefaultNodeGSAName is the default name of the Google service account the
@@ -130,7 +132,9 @@ func retryUntilPropagated(ctx context.Context, action, accounts string, grant fu
 		if err == nil {
 			return nil
 		}
-		if attempt >= 6 {
+		// Neither is a propagation delay, so a retry won't fix it. The
+		// project grant goes through gRPC, the repository grant through REST.
+		if attempt >= 6 || isPermissionDenied(err) || isNotFound(err) || status.Code(err) == codes.PermissionDenied {
 			return err
 		}
 		slog.Warn(action+" failed, retrying...", slog.String("gsa", accounts), slog.Int("attempt", attempt), slog.Any("err", err))
@@ -160,6 +164,19 @@ func clusterNodeServiceAccounts(cluster *containerpb.Cluster, cfg *Config) []str
 	}
 	slices.Sort(accounts)
 	return accounts
+}
+
+// poolsNotOnNodeServiceAccount returns the names of the node pools that don't
+// run as the node service account. A pool that names none runs as the Compute
+// Engine default service account.
+func poolsNotOnNodeServiceAccount(cluster *containerpb.Cluster, cfg *Config) []string {
+	var pools []string
+	for _, pool := range cluster.GetNodePools() {
+		if pool.GetConfig().GetServiceAccount() != nodeGSAEmail(cfg) {
+			pools = append(pools, pool.GetName())
+		}
+	}
+	return pools
 }
 
 // readClusterNodeServiceAccounts reads the cluster and returns

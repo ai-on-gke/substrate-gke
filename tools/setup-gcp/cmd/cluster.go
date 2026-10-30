@@ -451,6 +451,17 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 			slog.String("remedy", "recreate the cluster, or add a node pool with nested virtualization"))
 	}
 
+	// A pool's service account is also fixed at creation. Bootstrap still
+	// creates the node service account and its grant for an existing cluster,
+	// but its pools keep running as whatever they ran as before.
+	if pools := poolsNotOnNodeServiceAccount(cluster, cfg); len(pools) > 0 {
+		slog.Warn("Node pools don't run as the node service account; it only applies to node pools this tool creates",
+			slog.String("cluster", cfg.ClusterName),
+			slog.String("node_pools", strings.Join(pools, ",")),
+			slog.String("node_service_account", nodeGSAEmail(cfg)),
+			slog.String("remedy", "add a node pool with --service-account="+nodeGSAEmail(cfg)+" --shielded-secure-boot --shielded-integrity-monitoring, move workloads to it, and delete the old pool"))
+	}
+
 	if !nodeSysctlsConfigured(cluster) {
 		slog.Warn("Cluster has no node pool with high-density node sysctls; create cluster only sets them on a cluster it creates",
 			slog.String("cluster", cfg.ClusterName),

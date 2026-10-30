@@ -16,12 +16,16 @@ package cmd
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
 
 	"cloud.google.com/go/container/apiv1/containerpb"
 	"cloud.google.com/go/iam/apiv1/iampb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func nodeConfig() *Config {
@@ -133,17 +137,19 @@ func TestGrantNodeImagePullOnCreatedRepository(t *testing.T) {
 	}
 }
 
-// For a registry bootstrap didn't create, nothing is granted: the command is
-// printed for Artifact Registry, and nothing at all for other registries.
+// For an Artifact Registry repository bootstrap didn't create, the node
+// service account is granted read access on that repository. Nothing is
+// granted for other registries, and only the command is printed when the
+// repository can't be named.
 func TestGrantNodeImagePullOnUserRegistry(t *testing.T) {
 	for _, tc := range []struct {
-		name, ateImageRepo, koDockerRepo, want string
+		name, ateImageRepo, koDockerRepo, resource, printed string
 	}{
-		{"pre-built on Artifact Registry", "us-docker.pkg.dev/other/images", "", "add-iam-policy-binding images --project=other --location=us --member=serviceAccount:" + nodeSA},
-		{"source build on gcr.io", "", "gcr.io/acme/ate", "add-iam-policy-binding gcr.io --project=acme --location=us --member=serviceAccount:" + nodeSA},
-		{"pre-built wins over KO_DOCKER_REPO", "eu.gcr.io/other", "gcr.io/acme", "--location=europe"},
-		{"unknown registry", "", "", "add-iam-policy-binding <repository> --project=<project> --location=<location>"},
-		{"not Artifact Registry", "ghcr.io/agent-substrate", "", ""},
+		{"pre-built on Artifact Registry", "us-docker.pkg.dev/other/images", "", "projects/other/locations/us/repositories/images", ""},
+		{"source build on gcr.io", "", "gcr.io/acme/ate", "projects/acme/locations/us/repositories/gcr.io", ""},
+		{"pre-built wins over KO_DOCKER_REPO", "eu.gcr.io/other", "gcr.io/acme", "projects/other/locations/europe/repositories/eu.gcr.io", ""},
+		{"unknown registry", "", "", "", "add-iam-policy-binding <repository> --project=<project> --location=<location>"},
+		{"not Artifact Registry", "ghcr.io/agent-substrate", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeREST(t)
@@ -154,18 +160,61 @@ func TestGrantNodeImagePullOnUserRegistry(t *testing.T) {
 			if err := grantNodeImagePull(context.Background(), nodeConfig(), []string{nodeSA}); err != nil {
 				t.Fatal(err)
 			}
-			if len(f.written) != 0 {
-				t.Errorf("granted on a registry bootstrap didn't create: %v", f.written)
+			if tc.resource == "" {
+				if len(f.written) != 0 {
+					t.Errorf("granted on %v, want no grant", f.written)
+				}
+			} else if w := f.written[tc.resource]; len(w) != 1 || !hasPlainGrant(w[0], imagePullRole, "serviceAccount:"+nodeSA) {
+				t.Errorf("%s lacks %s on %s; written: %v", nodeSA, imagePullRole, tc.resource, f.written)
 			}
 			out := logs.String()
-			if tc.want == "" {
+			if tc.printed == "" {
 				if strings.Contains(out, "add-iam-policy-binding") {
-					t.Errorf("printed a grant for a registry outside Artifact Registry:\n%s", out)
+					t.Errorf("printed a grant command:\n%s", out)
 				}
+			} else if !strings.Contains(out, tc.printed) {
+				t.Errorf("logs do not contain %q:\n%s", tc.printed, out)
+			}
+		})
+	}
+}
+
+// When the grant on the user's repository is denied or the repository is not
+// found, bootstrap prints the command and carries on, without retrying. Any
+// other error fails it.
+func TestGrantNodeImagePullOnUserRegistryFailure(t *testing.T) {
+	orig := nodeAccountRetryDelay
+	nodeAccountRetryDelay = 0
+	t.Cleanup(func() { nodeAccountRetryDelay = orig })
+	const resource = "projects/other/locations/us/repositories/images"
+	for _, tc := range []struct {
+		name    string
+		code    int
+		wantErr bool
+	}{
+		{"permission denied", http.StatusForbidden, false},
+		{"repository not found", http.StatusNotFound, false},
+		{"server error", http.StatusInternalServerError, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeREST(t)
+			f.fail[resource] = tc.code
+			t.Setenv("ATE_IMAGE_REPO", "us-docker.pkg.dev/other/images")
+			logs := captureLogs(t)
+
+			err := grantNodeImagePull(context.Background(), nodeConfig(), []string{nodeSA})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
 				return
 			}
-			if !strings.Contains(out, tc.want) {
-				t.Errorf("logs do not contain %q:\n%s", tc.want, out)
+			if f.calls[resource] != 1 {
+				t.Errorf("repository IAM called %d times, want 1 (no retry)", f.calls[resource])
+			}
+			want := "add-iam-policy-binding images --project=other --location=us --member=serviceAccount:" + nodeSA
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("logs do not contain %q:\n%s", want, logs.String())
 			}
 		})
 	}
@@ -192,6 +241,45 @@ func TestParseArtifactRegistryRepo(t *testing.T) {
 			if p != tc.project || l != tc.location || r != tc.repository || ok != tc.ok {
 				t.Errorf("parseArtifactRegistryRepo(%q) = (%q, %q, %q, %v), want (%q, %q, %q, %v)",
 					tc.repo, p, l, r, ok, tc.project, tc.location, tc.repository, tc.ok)
+			}
+		})
+	}
+}
+
+// Pools a cluster brought along keep their service account, so an existing
+// cluster reports each pool not on the node service account.
+func TestPoolsNotOnNodeServiceAccount(t *testing.T) {
+	pool := func(name, sa string) *containerpb.NodePool {
+		return &containerpb.NodePool{Name: name, Config: &containerpb.NodeConfig{ServiceAccount: sa}}
+	}
+	cluster := &containerpb.Cluster{NodePools: []*containerpb.NodePool{
+		pool("hardened", nodeSA), pool("default-sa", "default"), pool("unset", ""), pool("other", "x@acme.iam.gserviceaccount.com"),
+	}}
+	got := poolsNotOnNodeServiceAccount(cluster, nodeConfig())
+	if want := []string{"default-sa", "unset", "other"}; !slices.Equal(got, want) {
+		t.Errorf("poolsNotOnNodeServiceAccount() = %v, want %v", got, want)
+	}
+}
+
+// A permission error from the gRPC project grant is not a propagation delay,
+// so it is returned at once rather than retried.
+func TestRetryUntilPropagatedStopsOnPermissionDenied(t *testing.T) {
+	orig := nodeAccountRetryDelay
+	nodeAccountRetryDelay = 0
+	t.Cleanup(func() { nodeAccountRetryDelay = orig })
+	for _, tc := range []struct {
+		name  string
+		err   error
+		calls int
+	}{
+		{"gRPC permission denied", fmt.Errorf("set project iam policy: %w", status.Error(codes.PermissionDenied, "denied")), 1},
+		{"gRPC invalid argument", status.Error(codes.InvalidArgument, "does not exist"), 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			err := retryUntilPropagated(context.Background(), "grant", nodeSA, func() error { calls++; return tc.err })
+			if err == nil || calls != tc.calls {
+				t.Errorf("err = %v after %d calls, want an error after %d", err, calls, tc.calls)
 			}
 		})
 	}

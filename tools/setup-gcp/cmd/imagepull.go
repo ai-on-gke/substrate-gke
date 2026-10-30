@@ -16,13 +16,16 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
 
 	artifactregistry "google.golang.org/api/artifactregistry/v1"
+	"google.golang.org/api/googleapi"
 )
 
 // imagePullRole lets a member pull from one Artifact Registry repository.
@@ -63,20 +66,32 @@ func grantAteletImagePull(ctx context.Context, cfg *Config) error {
 }
 
 // grantImagePull grants members imagePullRole on the Substrate image
-// repository.
+// repository: the one bootstrap created, or else the Artifact Registry
+// repository imageRepo() names. A registry outside Artifact Registry
+// (ghcr.io, for example) needs no grant.
 //
-// When bootstrap created the repository it grants the role itself. Otherwise
-// the registry is the user's, so it prints the command that grants it, filled
-// in from imageRepo() where it can parse it. A registry outside Artifact
-// Registry (ghcr.io, for example) needs no grant, so nothing is printed.
+// When the grant on the user's repository is denied or the repository is not
+// found, for example a registry in another project, it prints the command
+// that grants it and carries on; the user owns that registry.
 func grantImagePull(ctx context.Context, cfg *Config, who string, members []string) error {
 	if cfg.CreateArtifactRepository {
-		return grantRepositoryReader(ctx, cfg, who, members)
+		return grantRepositoryReader(ctx, who, members, repositoryResource(cfg.ProjectID, cfg.Region, cfg.ArtifactRegistryRepository))
 	}
 	repo := imageRepo()
 	if repo != "" && !isArtifactRegistryHost(repo) {
 		slog.Info("Image registry is not Artifact Registry; no image pull grant needed", slog.String("who", who), slog.String("registry", repo))
 		return nil
+	}
+	if project, location, repository, ok := parseArtifactRegistryRepo(repo); ok {
+		resource := repositoryResource(project, location, repository)
+		err := grantRepositoryReader(ctx, who, members, resource)
+		if err == nil {
+			return nil
+		}
+		if !isPermissionDenied(err) && !isNotFound(err) {
+			return err
+		}
+		slog.Warn("Could not grant "+who+" read access to the Substrate image repository", slog.String("repository", resource), slog.Any("err", err))
 	}
 	for _, member := range members {
 		slog.Warn("Grant "+who+" read access to the Substrate image repository",
@@ -84,6 +99,18 @@ func grantImagePull(ctx context.Context, cfg *Config, who string, members []stri
 			slog.String("command", imagePullGrantCommand(repo, member)))
 	}
 	return nil
+}
+
+// repositoryResource is the IAM resource name of an Artifact Registry
+// repository.
+func repositoryResource(project, location, repository string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/repositories/%s", project, location, repository)
+}
+
+// isPermissionDenied reports whether err is an HTTP 403 from a Google API.
+func isPermissionDenied(err error) bool {
+	var gerr *googleapi.Error
+	return errors.As(err, &gerr) && gerr.Code == http.StatusForbidden
 }
 
 // imageRepo is the registry the cluster pulls Substrate images from:
@@ -96,14 +123,13 @@ func imageRepo() string {
 	return strings.TrimSpace(os.Getenv("KO_DOCKER_REPO"))
 }
 
-// grantRepositoryReader grants members imagePullRole on the repository
-// bootstrap created.
-func grantRepositoryReader(ctx context.Context, cfg *Config, who string, members []string) error {
+// grantRepositoryReader grants members imagePullRole on the Artifact
+// Registry repository resource.
+func grantRepositoryReader(ctx context.Context, who string, members []string, resource string) error {
 	svc, err := artifactregistry.NewService(ctx, restClientOptions...)
 	if err != nil {
 		return fmt.Errorf("create artifact registry client: %w", err)
 	}
-	resource := fmt.Sprintf("projects/%s/locations/%s/repositories/%s", cfg.ProjectID, cfg.Region, cfg.ArtifactRegistryRepository)
 	repos := svc.Projects.Locations.Repositories
 	return retryUntilPropagated(ctx, "Granting "+who+" read access to the artifact repository", strings.Join(members, ","), func() error {
 		policy, err := repos.GetIamPolicy(resource).OptionsRequestedPolicyVersion(conditionalPolicyVersion).Context(ctx).Do()
