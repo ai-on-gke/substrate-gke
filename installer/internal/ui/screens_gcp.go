@@ -201,6 +201,7 @@ func newProjectScreen(deps *Deps) *projectScreen {
 			// form into two.
 			clusterVersionField(st.ClusterVersion),
 			releaseChannelField(st.ReleaseChannel),
+			separateSystemNodesField(st.SharedSystemNodes),
 		)
 		// Only a build from source pushes images anywhere, so only it needs a
 		// registry to push them to.
@@ -220,6 +221,27 @@ func newProjectScreen(deps *Deps) *projectScreen {
 		billingCheck: deps.GCP.BillingEnabled, projectNumber: deps.GCP.ProjectNumber}
 	scr.fields[0].input.Focus()
 	return scr
+}
+
+// separateSystemNodesField is the advanced track's switch for the system
+// node pools a new cluster gets (see Setup.SharedSystemNodes). On by default,
+// so empty means yes.
+func separateSystemNodesField(shared bool) field {
+	current := ""
+	if shared {
+		current = "no"
+	}
+	f := newField("Separate system nodes (new clusters; yes/no)", current, "yes", func(s *state.Setup, v string) {
+		s.SharedSystemNodes = strings.EqualFold(strings.TrimSpace(v), "no")
+	})
+	f.check = func(v string) string {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "yes", "no":
+			return ""
+		}
+		return "enter yes or no"
+	}
+	return f
 }
 
 // clusterVersionField is the advanced track's version for a cluster the run

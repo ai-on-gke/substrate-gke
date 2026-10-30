@@ -17,12 +17,9 @@ package cmd
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log/slog"
 	"slices"
 
 	"cloud.google.com/go/iam/apiv1/iampb"
-	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/spf13/cobra"
 )
 
@@ -68,88 +65,24 @@ func addBinding(bindings *[]*iampb.Binding, role, member string) bool {
 	return true
 }
 
+// grantGkeNodePermissions creates the node service account, grants it its
+// project role, and lets it pull images from the image repository. Nodes get
+// no project-wide image pull role.
 func grantGkeNodePermissions(ctx context.Context, cfg *Config) error {
-	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
-	if err != nil {
+	if err := ensureNodeServiceAccount(ctx, cfg); err != nil {
 		return err
 	}
-	defer client.Close()
-
-	resource := fmt.Sprintf("projects/%s", cfg.ProjectID)
-	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest(resource))
-	if err != nil {
-		return fmt.Errorf("get project iam policy: %w", err)
-	}
-
-	// TODO(#76): Use a least-privileged node service account instead.
-	member := fmt.Sprintf("serviceAccount:%s-compute@developer.gserviceaccount.com", cfg.ProjectNumber)
-
-	// TODO: Don't grant these permissions at project level.
-	changed := addBinding(&policy.Bindings, "roles/artifactregistry.reader", member)
-
-	if !changed {
-		slog.Info("IAM policy already has required GKE node permissions. Skipping update.", slog.String("project", cfg.ProjectID))
-		return nil
-	}
-
-	slog.Info("Setting IAM policy (grant gke node permissions)...", slog.String("project", cfg.ProjectID))
-	// Version 3 keeps conditional bindings intact; the etag read with the
-	// policy makes IAM reject the write if the policy changed in between.
-	policy.Version = conditionalPolicyVersion
-	setReq := &iampb.SetIamPolicyRequest{
-		Resource: resource,
-		Policy:   policy,
-	}
-	_, err = client.SetIamPolicy(ctx, setReq)
-	if err != nil {
-		return fmt.Errorf("set project iam policy: %w", err)
-	}
-
-	return nil
+	return grantNodeImagePull(ctx, cfg, []string{nodeGSAEmail(cfg)})
 }
+
+// grantAteletPermissions lets atelet pull actor images. Its storage roles are
+// on the buckets (see bucketGrants); atelet gets nothing on the project.
 func grantAteletPermissions(ctx context.Context, cfg *Config) error {
-	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
-	if err != nil {
+	// atelet's principal is keyed to the project number.
+	if err := resolveProject(ctx, cfg); err != nil {
 		return err
 	}
-	defer client.Close()
-
-	resource := fmt.Sprintf("projects/%s", cfg.ProjectID)
-	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest(resource))
-	if err != nil {
-		return fmt.Errorf("get project iam policy: %w", err)
-	}
-
-	member := fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/ate-system/sa/atelet", cfg.ProjectNumber, cfg.ProjectID)
-
-	// TODO: grant artifactregistry.reader on the repository in use only.
-	changed := addBinding(&policy.Bindings, "roles/artifactregistry.reader", member)
-	// Storage access for revisions that move snapshots with atelet's own
-	// identity; see bucketGrants.
-	// TODO: This shouldn't be a project-level binding.
-	if cfg.AteletSnapshotAccess && addBinding(&policy.Bindings, "roles/storage.objectAdmin", member) {
-		changed = true
-	}
-
-	if !changed {
-		slog.Info("IAM policy already has required atelet permissions. Skipping update.", slog.String("project", cfg.ProjectID))
-		return nil
-	}
-
-	slog.Info("Setting IAM policy (grant atelet permissions)...", slog.String("project", cfg.ProjectID))
-	// Version 3 keeps conditional bindings intact; the etag read with the
-	// policy makes IAM reject the write if the policy changed in between.
-	policy.Version = conditionalPolicyVersion
-	setReq := &iampb.SetIamPolicyRequest{
-		Resource: resource,
-		Policy:   policy,
-	}
-	_, err = client.SetIamPolicy(ctx, setReq)
-	if err != nil {
-		return fmt.Errorf("set project iam policy: %w", err)
-	}
-
-	return nil
+	return grantAteletImagePull(ctx, cfg)
 }
 
 // validateIamFlags checks every flag the command needs before any of the
@@ -211,8 +144,9 @@ var iamCmd = &cobra.Command{
 func init() {
 	createCmd.AddCommand(iamCmd)
 	iamCmd.Flags().StringVar(&cfg.BucketName, "bucket", getEnv("BUCKET_NAME", ""), "GCS bucket name (required for bucket bindings) [env: BUCKET_NAME]")
-	iamCmd.Flags().Bool("gke-nodes", true, "Grant GKE nodes permission to pull images")
-	iamCmd.Flags().Bool("atelet", true, "Grant atelet project-level permissions")
+	iamCmd.Flags().Bool("gke-nodes", true, "Create the node service account, grant it its project role, and grant or print its image repository read access")
+	addNodeGSANameFlag(iamCmd)
+	iamCmd.Flags().Bool("atelet", true, "Grant or print atelet's read access to the image repositories")
 	addTransferGSANameFlag(iamCmd)
 	iamCmd.Flags().Bool("transfer-service-account", true, "Create the snapshot transfer service account and let ate-api-server create tokens for it")
 	iamCmd.Flags().Bool("bucket-bindings", true, "Grant ate-api-server and the snapshot transfer service account access to the snapshot bucket, and atelet read access to the asset bucket")

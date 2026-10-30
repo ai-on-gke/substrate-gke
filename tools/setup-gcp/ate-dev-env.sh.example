@@ -61,6 +61,11 @@ export SNAPSHOT_LOCATION="gs://${BUCKET_NAME}/"
 # ate-setup refuses to deploy ate-api-server on GKE without it.
 export SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer
 
+# The service account the nodes of a cluster setup-gcp creates run as. setup-gcp
+# creates it with only roles/container.defaultNodeServiceAccount, and
+# teardown.sh deletes it.
+export NODE_GSA_NAME=ate-gke-node
+
 # Where a build from source pushes its images. `setup-gcp bootstrap
 # --create-repository` creates an Artifact Registry repository
 # (ARTIFACT_REGISTRY_REPOSITORY, default ate-images) in GCE_REGION.

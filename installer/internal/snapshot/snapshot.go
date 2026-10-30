@@ -640,6 +640,9 @@ func (b *Builder) env(st *state.Setup) []string {
 		// here. Trees that predate the account ignore it.
 		"SNAPSHOT_TRANSFER_GSA_NAME=" + TransferGSAName,
 		"SNAPSHOT_LOCATION=" + SnapshotLocation(st),
+		// Read only when bootstrap creates the cluster; see
+		// SeparateSystemNodesLine for how deploy uses the pools.
+		"SEPARATE_SYSTEM_NODES=" + strconv.FormatBool(!st.SharedSystemNodes),
 		"KUBECTL_CONTEXT=",
 		"NO_DEV_ENV=1",
 	}
@@ -711,6 +714,91 @@ func imageArgs(st *state.Setup) (display, argv string) {
 	return fmt.Sprintf(" --image-repo %s --image-tag %s", st.ImageRepo, st.ImageTag),
 		fmt.Sprintf(" --image-repo %s --image-tag %s", ShellQuote(st.ImageRepo), ShellQuote(st.ImageTag))
 }
+
+// Lines cordonLines prints, one for each outcome it deploys with.
+const (
+	SeparateSystemNodesLine = "Keeping Substrate's system components on the system node pools"
+	SharedSystemNodesLine   = "No system node pools; Substrate's system components share the worker nodes"
+)
+
+// externalPostgresCheck is true in the shell when ate-setup will use an
+// external database rather than the bundled PostgreSQL: the variables its
+// planPostgres reads. The installer's environment reaches ate-setup, so the
+// check sees what ate-setup will.
+const externalPostgresCheck = `[ -n "${ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING:-}${ATE_API_POSTGRES_CLOUDSQL_INSTANCE:-}" ]`
+
+// cordonLines sets ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS for the deploy:
+// true when the cluster has nodes labeled for the system pools (see
+// setup-gcp's systempools.go), so ate-setup pins the system components, and
+// the bundled PostgreSQL, to them; false otherwise, including for a caller
+// who exported it. ate-setup leaves the system components Pending without
+// system nodes, and refuses to deploy the bundled PostgreSQL without an
+// ate-postgres node, so the ate-postgres pool is required unless the
+// database is external. A cluster the user brought has neither, unless they
+// added them with the commands bootstrap printed.
+//
+// The check runs in a child shell, so its throwaway KUBECONFIG goes with it
+// and ate-setup fetches its own credentials as before. It exits
+// systemPoolsAbsent when a pool is missing; any other failure (gcloud,
+// kubectl, the API server) stops the deploy rather than read as "no pools"
+// and quietly install the system components onto the worker nodes.
+func cordonLines(st *state.Setup) string {
+	lines := []string{"export ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=false"}
+	if st.SharedSystemNodes {
+		return strings.Join(append(lines, "echo "+ShellQuote(SharedSystemNodesLine)), "\n") + "\n"
+	}
+	check := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone),
+		`system=$(kubectl get nodes -l ate.dev/workloadType=ate-system-infra -o name)`,
+		fmt.Sprintf(`[ -n "$system" ] || exit %d`, systemPoolsAbsent),
+		externalPostgresCheck+` && exit 0`,
+		`postgres=$(kubectl get nodes -l ate.dev/workloadType=ate-postgres -o name)`,
+		fmt.Sprintf(`[ -n "$postgres" ] || exit %d`, systemPoolsAbsent))
+	return strings.Join(append(lines,
+		"pools=0",
+		"bash -euo pipefail -c "+ShellQuote(strings.Join(check, "\n"))+" || pools=$?",
+		`case "$pools" in`,
+		"  0) export ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=true; echo "+ShellQuote(SeparateSystemNodesLine)+" ;;",
+		fmt.Sprintf("  %d) echo %s ;;", systemPoolsAbsent, ShellQuote(SharedSystemNodesLine)),
+		`  *) echo "Could not check the cluster for the system node pools" >&2; exit "$pools" ;;`,
+		"esac"), "\n") + "\n"
+}
+
+// PlacementLine is what placementLines prints when the API server is where
+// cordoning put it.
+const PlacementLine = "ate-api-server is running on the ate-system-infra nodes"
+
+// placementLines checks, after a deploy with
+// ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=true, that every ate-api-server
+// pod runs on a node labeled ate.dev/workloadType=ate-system-infra, and fails
+// the step naming the node when one does not, rather than report a
+// separation that did not happen. Terminating pods from an earlier,
+// uncordoned rollout are skipped. Like cordonLines' check, it runs in a child
+// shell with its own throwaway KUBECONFIG.
+func placementLines(st *state.Setup) string {
+	if st.SharedSystemNodes {
+		return ""
+	}
+	check := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone),
+		`nodes=$(kubectl get pods -n ate-system -l app=ate-api-server -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.spec.nodeName}}{{"\n"}}{{end}}{{end}}')`,
+		`[ -n "$nodes" ] || { echo "No scheduled ate-api-server pod to check the placement of" >&2; exit 1; }`,
+		`for node in $nodes; do`,
+		`  type=$(kubectl get node "$node" -o go-template='{{index .metadata.labels "ate.dev/workloadType"}}')`,
+		`  if [ "$type" != ate-system-infra ]; then`,
+		`    echo "ate-api-server is running on node $node, which is not labeled ate.dev/workloadType=ate-system-infra" >&2`,
+		`    exit 1`,
+		`  fi`,
+		`done`,
+		"echo "+ShellQuote(PlacementLine))
+	return "\n" + strings.Join([]string{
+		`if [ "$ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS" = true ]; then`,
+		"  bash -euo pipefail -c " + ShellQuote(strings.Join(check, "\n")),
+		"fi",
+	}, "\n")
+}
+
+// systemPoolsAbsent is the exit status of cordonLines' check when a system
+// pool is missing, kept apart from the 1 that set -e gives any failure.
+const systemPoolsAbsent = 3
 
 // FetchLine and CachedLine are the two outcomes the fetch preamble reports.
 // The install checklists key their "fetch" phase off both, so they are
@@ -806,6 +894,7 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 		phases = append(phases, "Creating Artifact Registry repository...")
 	}
 	phases = append(phases,
+		"Creating the GKE node service account...",
 		"Creating GKE Cluster...",
 		"Creating GCS buckets for snapshots and micro-VM assets...",
 		"Granting GKE Node permissions...",
@@ -819,11 +908,19 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 		lines = append(lines, fmt.Sprintf("Step %d/%d: %s", i+1, len(phases), phase))
 	}
 	run := "go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"
+	env := b.env(st)
+	if st.Prebuilt() {
+		// Bootstrap grants or prints the nodes' image pull access for the
+		// registry the images come from: KO_DOCKER_REPO for a source build
+		// (see env), and this for pre-built images. Only bootstrap gets it;
+		// ate-setup takes the registry from --image-repo (see imageArgs).
+		env = append(env, "ATE_IMAGE_REPO="+st.ImageRepo)
+	}
 	return execx.Spec{
 		Label:    "setup-gcp bootstrap",
 		Display:  run,
 		Argv:     b.inTree(run),
-		Env:      b.env(st),
+		Env:      env,
 		SimLines: append(lines, "Bootstrap completed successfully."),
 	}
 }
@@ -888,7 +985,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
-		Argv:    b.inTree(b.withOverlay("go run ./cmd/ate-setup deploy ate-system" + argv)),
+		Argv:    b.inTree(b.withOverlay(cordonLines(st) + "go run ./cmd/ate-setup deploy ate-system" + argv + placementLines(st))),
 		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",

@@ -323,6 +323,12 @@ type Setup struct {
 	ClusterVersion string
 	ReleaseChannel string
 
+	// SharedSystemNodes turns off system node separation: a cluster the
+	// install creates gets no ate-system-infra and ate-postgres node pools,
+	// and Substrate's system components run on the worker nodes. Separation
+	// is the default, so it is the zero value.
+	SharedSystemNodes bool
+
 	BucketName                 string
 	KoDockerRepo               string
 	ArtifactRegistryRepository string

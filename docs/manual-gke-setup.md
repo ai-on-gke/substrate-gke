@@ -33,7 +33,7 @@ You need two checkouts:
    ```
 
 3. From the root of this repository, provision the GKE cluster, the GCS
-   buckets, the snapshot transfer service account, the IAM bindings and the
+   buckets, the snapshot transfer and node service accounts, the IAM bindings and the
    monitoring dashboards:
 
    ```bash
@@ -104,9 +104,9 @@ export the same variables first:
 <substrate-gke checkout>/tools/setup-gcp/teardown.sh [--all|--cluster-scoped]
 ```
 
-* `--all` deletes everything, including the dashboards, the snapshot transfer
-  service account and the project-level IAM bindings, which every Substrate
-  cluster in the project shares.
+* `--all` deletes everything, including the dashboards and the snapshot
+  transfer and node service accounts, which every Substrate cluster in the
+  project shares.
 * `--cluster-scoped` deletes only this cluster, its buckets and the bindings on
   them. Use it while other Substrate clusters still use the project.
 

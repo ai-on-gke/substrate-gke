@@ -70,11 +70,14 @@ const (
 // throwaway kubeconfig. Probing must not rewrite the user's ambient
 // current-context just for browsing clusters — and with each probe writing
 // its own file, a probe cancelled mid-gcloud cannot retarget the kubectl of
-// a later probe against a different cluster.
+// a later probe against a different cluster. The file lives in its own
+// directory, which is removed whole: gcloud warns about an empty kubeconfig
+// and leaves a .backup of it next to the file.
 func credentialLines(projectID, cluster, location string) []string {
 	return []string{
-		`export KUBECONFIG=$(mktemp)`,
-		`trap 'rm -f "$KUBECONFIG"' EXIT`,
+		`kubeconfig_dir=$(mktemp -d)`,
+		`trap 'rm -rf "$kubeconfig_dir"' EXIT`,
+		`export KUBECONFIG="$kubeconfig_dir/config"`,
 		fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s >/dev/null",
 			ShellQuote(cluster), ShellQuote(location), ShellQuote(projectID)),
 	}

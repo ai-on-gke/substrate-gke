@@ -56,6 +56,14 @@ type Config struct {
 	BootDiskType                      string
 	BootDiskProvisionedIOPS           int64
 	BootDiskProvisionedThroughputMBps int64
+	// NodeGSAName is the name of the service account the nodes of a new
+	// cluster run as (NODE_GSA_NAME).
+	NodeGSAName string
+	// SeparateSystemNodes adds the system node pools to a new cluster (see
+	// systemNodePools).
+	SeparateSystemNodes    bool
+	SystemInfraMachineType string
+	PostgresMachineType    string
 
 	BucketName           string
 	AteletSnapshotAccess bool
@@ -147,7 +155,7 @@ func (c *Config) assetBucketName() string {
 // addAteletSnapshotAccessFlag registers --atelet-snapshot-access on cmd.
 // See bucketGrants for what it grants and which Substrate revisions need it.
 func addAteletSnapshotAccessFlag(cmd *cobra.Command) {
-	cmd.Flags().BoolVar(&cfg.AteletSnapshotAccess, "atelet-snapshot-access", getEnv("ATELET_SNAPSHOT_ACCESS", true), "Grant atelet storage.objectAdmin on the project and objectAdmin and bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 need it; revisions with per-actor snapshot credentials do not. Turn off with --atelet-snapshot-access=false [env: ATELET_SNAPSHOT_ACCESS]")
+	cmd.Flags().BoolVar(&cfg.AteletSnapshotAccess, "atelet-snapshot-access", getEnv("ATELET_SNAPSHOT_ACCESS", true), "Grant atelet objectAdmin and bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 need it; revisions with per-actor snapshot credentials do not. Turn off with --atelet-snapshot-access=false [env: ATELET_SNAPSHOT_ACCESS]")
 }
 
 // workloadIdentityPrincipal is the IAM member for the ate-system Kubernetes

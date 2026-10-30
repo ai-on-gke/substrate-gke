@@ -407,12 +407,13 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("enter")
 	// Project screen in Advanced track:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
-	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel, 8:Repo, 9:RepositoryName
+	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel, 8:SeparateSystemNodes,
+	// 9:Repo, 10:RepositoryName
 	press("enter", "enter")
 	for _, r := range "my-custom-bucket" {
 		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	press("enter", "enter", "enter", "enter", "enter", "enter", "enter", "enter") // submit from field 9
+	press("enter", "enter", "enter", "enter", "enter", "enter", "enter", "enter", "enter") // submit from field 10
 
 	// Cluster screen: pick row 2 (legacy-prod)
 	press("2", "enter")
@@ -2246,14 +2247,14 @@ func TestAdvancedTrackOffersTheClusterVersionAndChannel(t *testing.T) {
 	}
 
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
-	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel
+	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel, 8:SeparateSystemNodes
 	press("enter", "enter", "enter", "enter", "enter", "enter")
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("1.37.0")
 	press("enter") // to the channel field
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("regular")
-	press("enter") // submit from the last field
+	press("enter", "enter") // past the system nodes field, then submit
 
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("after project: %v", app.mach.Current())
@@ -2294,7 +2295,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("1.36")
-	press("enter", "enter") // past the channel field, then submit
+	press("enter", "enter", "enter") // past the channel and system nodes fields, then submit
 	if app.mach.Current() != state.Project {
 		t.Fatalf("1.36 was accepted: step=%v, want to stay on the project screen", app.mach.Current())
 	}
@@ -2303,7 +2304,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	press("enter", "enter")
+	press("enter", "enter", "enter")
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("an empty version was refused: step=%v, want Cluster", app.mach.Current())
 	}
@@ -3660,5 +3661,27 @@ func TestIngressStepOnADemoRun(t *testing.T) {
 	}
 	if !slices.Equal(deps.Setup.IngressAllowedSPIFFEIDs, snapshot.DemoClientSPIFFEIDs) {
 		t.Errorf("allowlist = %v, want only the demo drivers", deps.Setup.IngressAllowedSPIFFEIDs)
+	}
+}
+
+// The advanced track's system node switch is on by default, and anything but
+// yes or no is refused rather than read as one of them.
+func TestSeparateSystemNodesField(t *testing.T) {
+	for v, shared := range map[string]bool{"": false, "yes": false, "NO": true, " no ": true} {
+		f := separateSystemNodesField(false)
+		if p := f.check(v); p != "" {
+			t.Errorf("check(%q) = %q, want accepted", v, p)
+		}
+		st := state.NewSetup()
+		f.set(st, v)
+		if st.SharedSystemNodes != shared {
+			t.Errorf("set(%q): SharedSystemNodes = %v, want %v", v, st.SharedSystemNodes, shared)
+		}
+	}
+	if f := separateSystemNodesField(false); f.check("maybe") == "" {
+		t.Error(`check("maybe") accepted`)
+	}
+	if got := separateSystemNodesField(true).input.Value(); got != "no" {
+		t.Errorf("field for shared nodes shows %q, want no", got)
 	}
 }
