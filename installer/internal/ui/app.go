@@ -120,6 +120,27 @@ type App struct {
 	Completed bool
 }
 
+// An ExitNote is something a screen wants left in the terminal when the
+// wizard exits on it: a lead line, a command to copy, and a trailing remark.
+// Any of the three may be empty.
+type ExitNote struct{ Lead, Command, Trail string }
+
+// exitNoter is a screen with exit notes.
+type exitNoter interface{ exitNotes() []ExitNote }
+
+// ExitNotes is what the screen the wizard exited on wants printed after the
+// alt screen and its panels are gone. Nothing after a completed run, whose
+// summary is printed instead.
+func (a *App) ExitNotes() []ExitNote {
+	if a.Completed {
+		return nil
+	}
+	if n, ok := a.cur.(exitNoter); ok {
+		return n.exitNotes()
+	}
+	return nil
+}
+
 // NewApp builds the root model at the Welcome step.
 func NewApp(deps *Deps) *App {
 	slash := textinput.New()

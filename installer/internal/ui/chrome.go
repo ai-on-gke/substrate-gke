@@ -124,50 +124,66 @@ func hangingIndent(first, text string, width int) string {
 
 // bottomView is the persistent keymap bar (k9s-style, from the prototype).
 func (a *App) bottomView() string {
+	var line string
 	if a.over == overlayLog {
-		hints := []Hint{
+		line = hintBar(a.width, []Hint{
 			{"esc/q/v", "close log"},
 			{"↑/↓, j/k", "scroll"},
 			{"g/G", "top/bottom"},
-			{"ctrl+c", "exit"},
+		}, []Hint{{"ctrl+c", "exit"}})
+	} else {
+		hints := a.cur.Hints()
+		if p, ok := a.cur.(execCompProvider); ok && p.logComp() != nil && len(p.logComp().lines) > 0 {
+			hints = append(hints, Hint{"v", "view log"})
 		}
-		parts := make([]string, 0, len(hints))
-		for _, hint := range hints {
-			parts = append(parts, theme.Key.Render("["+hint.Key+"]")+" "+theme.Subtle.Render(hint.Label))
-		}
-		line := " " + strings.Join(parts, theme.Fainted.Render("  ·  "))
-		return theme.Fainted.Render(strings.Repeat("─", max(a.width, 1))) + "\n" + line
+		line = hintBar(a.width, hints, []Hint{{"?", "help"}, {"/", "commands"}, {"ctrl+c", "exit"}})
 	}
+	return theme.Fainted.Render(strings.Repeat("─", max(a.width, 1))) + "\n" + line
+}
 
-	hints := a.cur.Hints()
-	if p, ok := a.cur.(execCompProvider); ok && p.logComp() != nil && len(p.logComp().lines) > 0 {
-		hints = append(hints, Hint{"v", "view log"})
-	}
-	render := func(hints []Hint, sep string) string {
-		parts := make([]string, 0, len(hints))
-		for _, hint := range hints {
-			parts = append(parts, theme.Key.Render("["+hint.Key+"]")+" "+theme.Subtle.Render(hint.Label))
+// hintBar lays out one key bar in width columns: the screen's own keys, then
+// the global ones. Nothing is left to be cut at the terminal's edge; when
+// the bar does not fit, it gives things up in a fixed order instead:
+//
+//  1. the global keys other than the last, front to back — [/] commands,
+//     then [?] help, which every other screen's bar shows;
+//  2. the dots between keys;
+//  3. the screen's own keys, from the right, with an ellipsis in their place
+//     so a hidden key is known to exist. These are shown nowhere else, which
+//     is why they outlast help.
+//
+// The last global key — [ctrl+c] exit, the way out — is never dropped.
+func hintBar(width int, hints, global []Hint) string {
+	render := func(hints []Hint, elided bool, global []Hint, sep string) string {
+		parts := make([]string, 0, len(hints)+len(global)+1)
+		for _, h := range hints {
+			parts = append(parts, theme.Key.Render("["+h.Key+"]")+" "+theme.Subtle.Render(h.Label))
+		}
+		if elided {
+			parts = append(parts, theme.Fainted.Render("…"))
+		}
+		for _, h := range global {
+			parts = append(parts, theme.Key.Render("["+h.Key+"]")+" "+theme.Subtle.Render(h.Label))
 		}
 		return " " + strings.Join(parts, theme.Fainted.Render(sep))
 	}
-	help, commands, exit := Hint{"?", "help"}, Hint{"/", "commands"}, Hint{"ctrl+c", "exit"}
-	line := render(append(slices.Clone(hints), help, commands, exit), "  ·  ")
-	// A screen with many keys overflows the terminal and loses the last ones
-	// at the edge. A tighter separator usually brings them back; where it
-	// does not, as on the reinstall guard at 80 columns, [?] and [/] go
-	// first: they work on every screen, and every other screen's bar shows
-	// them, while the screen's own keys are shown nowhere else. Last, the
-	// separator dots go.
-	if lipgloss.Width(line) > a.width {
-		line = render(append(slices.Clone(hints), help, commands, exit), " · ")
+	fits := func(line string) bool { return lipgloss.Width(line) <= width }
+
+	line := render(hints, false, global, " · ")
+	// The global keys go from the one before exit backwards: [/] commands,
+	// then [?] help.
+	for !fits(line) && len(global) > 1 {
+		global = slices.Concat(global[:len(global)-2], global[len(global)-1:])
+		line = render(hints, false, global, " · ")
 	}
-	if lipgloss.Width(line) > a.width {
-		line = render(append(slices.Clone(hints), exit), " · ")
+	if !fits(line) {
+		line = render(hints, false, global, "  ")
 	}
-	if lipgloss.Width(line) > a.width {
-		line = render(append(slices.Clone(hints), exit), "  ")
+	for elided := false; !fits(line) && len(hints) > 0; {
+		hints, elided = hints[:len(hints)-1], true
+		line = render(hints, elided, global, "  ")
 	}
-	return theme.Fainted.Render(strings.Repeat("─", max(a.width, 1))) + "\n" + line
+	return line
 }
 
 // helpView is the [?] modal.
