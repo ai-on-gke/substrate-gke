@@ -1070,8 +1070,10 @@ type clusterScreen struct {
 	// Substrate), "partial" (ate-system namespace without atelet),
 	// "teardown-confirm"/"teardown" (deleting the control plane so the
 	// install can continue here), "confirm" (incompatible cluster chosen).
-	mode             string
-	nameInput        textinput.Model
+	mode      string
+	nameInput textinput.Model
+	// confirmInput takes the cluster name that confirms a teardown.
+	confirmInput     textinput.Model
 	comp             *execComp
 	parsed           bool
 	installedVersion string
@@ -1145,7 +1147,10 @@ func (s *clusterScreen) Init() tea.Cmd {
 	}
 }
 
-func (s *clusterScreen) CapturesText() bool { return s.mode == "name" }
+func (s *clusterScreen) CapturesText() bool {
+	return s.mode == "name" || s.mode == "teardown-confirm"
+}
+
 func (s *clusterScreen) logComp() *execComp { return s.comp }
 
 func (s *clusterScreen) Hints() []Hint {
@@ -1164,7 +1169,7 @@ func (s *clusterScreen) Hints() []Hint {
 	case "partial":
 		return []Hint{{"y", "continue"}, {"r", "re-probe"}, {"esc", "choose another"}}
 	case "teardown-confirm":
-		return []Hint{{"y", "tear it down"}, {"esc", "back"}}
+		return []Hint{{"enter", "tear it down"}, {"esc", "back"}}
 	case "teardown":
 		if s.comp != nil && s.comp.failed != nil {
 			return []Hint{{"r", "retry"}, {"esc", "back to list"}}
@@ -1404,7 +1409,8 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			case "t":
 				if s.mode == "installed" {
 					s.mode = "teardown-confirm"
-					return nil
+					s.confirmInput = newInput("", "")
+					return s.confirmInput.Focus()
 				}
 			case "b", "esc":
 				s.mode = "list"
@@ -1414,17 +1420,22 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 
 		case "teardown-confirm":
 			switch key {
-			case "y":
+			case "enter":
 				c := s.clusters[s.cursor]
+				if strings.TrimSpace(s.confirmInput.Value()) != c.Name {
+					return nil
+				}
 				s.mode, s.parsed = "teardown", false
 				s.comp = newExecComp(s.deps.Runner,
 					s.deps.Builder.DeleteAteSystem(s.deps.Setup.ProjectID, c.Name, c.Location), nil, s.deps.LogPath)
 				return s.comp.start()
-			case "b", "esc":
+			case "esc":
 				s.mode = "installed"
 				return nil
 			}
-			return nil
+			var cmd tea.Cmd
+			s.confirmInput, cmd = s.confirmInput.Update(msg)
+			return cmd
 
 		case "teardown":
 			switch key {
@@ -1705,7 +1716,7 @@ func (s *clusterScreen) View(w int) string {
 			theme.Title.Render("Supported paths forward:"),
 			hangingIndent("  1. ", "Upgrade this cluster: exit or restart the installer and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
 			"",
-			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete the Substrate control plane on this cluster now (the cluster and its snapshots are kept) and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
+			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
 			"     " + strings.Join(shellLines(snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW-5), "\n     "),
 			hangingIndent("     ", "(--bucket: the snapshot bucket that install used)", textW),
 			"",
@@ -1713,12 +1724,24 @@ func (s *clusterScreen) View(w int) string {
 		}, "\n")))
 	case "teardown-confirm":
 		sel := s.clusters[s.cursor]
-		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 76)).Render(
-			theme.Warning.Render(fmt.Sprintf("Tear down Substrate on %q?", sel.Name))+"\n\n"+
-				"Runs `ate-setup delete ate-system` against the cluster: the control\n"+
-				"plane and every running actor are deleted. The cluster, its nodes,\n"+
-				"and the snapshot bucket are kept. The install then continues here.\n\n"+
-				theme.Key.Render("[y]")+" tear it down   "+theme.Key.Render("[esc]")+" back"))
+		panelW := min(w-4, 76)
+		textW := panelW - 2
+		para := lipgloss.NewStyle().Width(textW)
+		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(strings.Join([]string{
+			theme.Warning.Render(fmt.Sprintf("Tear down Substrate on %q?", sel.Name)),
+			"",
+			para.Render("Runs `ate-setup delete ate-system` against the cluster. It deletes:"),
+			hangingIndent("  • ", "every actor, whether running, suspended, or crashed", textW),
+			hangingIndent("  • ", "every ActorTemplate, atespace, and WorkerPool", textW),
+			hangingIndent("  • ", "the control plane, the ate.dev CRDs, and the database volume", textW),
+			"",
+			para.Render("The cluster, its nodes, and the snapshot bucket are kept. The snapshots in the bucket then belong to no actor. The install then continues here."),
+			"",
+			"Type " + theme.Key.Render(sel.Name) + " to confirm:",
+			s.confirmInput.View(),
+			"",
+			theme.Key.Render("[enter]") + " tear it down   " + theme.Key.Render("[esc]") + " back",
+		}, "\n")))
 	case "teardown":
 		sel := s.clusters[s.cursor]
 		b.WriteString("\n" + theme.Subtle.Render(fmt.Sprintf("Tearing down Substrate on %s…", sel.Name)) + "\n\n")
