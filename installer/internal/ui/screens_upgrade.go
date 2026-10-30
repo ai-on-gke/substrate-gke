@@ -412,7 +412,7 @@ func handOver(deps *Deps, w int) string {
 	st, builder := deps.Setup, deps.Builder
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Next: run this in the shell you upgrade from, then follow the upgrade runbook from step 1") + "\n")
-	b.WriteString(theme.Accent.Render("  "+snapshot.RunbookURL) + "\n\n")
+	b.WriteString(theme.Accent.Render("  "+builder.RunbookURL()) + "\n\n")
 	b.WriteString(theme.AccentPanel.Width(w-4).Render(builder.UpgradeShellLine(st)) + "\n")
 	for _, note := range builder.UpgradeNotes(st) {
 		b.WriteString("\n" + theme.Warning.Width(w-4).Render(note) + "\n")

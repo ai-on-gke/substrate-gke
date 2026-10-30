@@ -1562,8 +1562,17 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if notes := strings.Join(b.UpgradeNotes(st), "\n"); !strings.Contains(notes, "export VERSION="+st.InstalledVersion+" there") {
 		t.Errorf("a build from source needs the rollback version:\n%s", notes)
 	}
-	if summary := b.UpgradeSummary(st); !strings.Contains(summary, RunbookURL) || !strings.Contains(summary, line) {
+	if summary := b.UpgradeSummary(st); !strings.Contains(summary, b.RunbookURL()) || !strings.Contains(summary, line) {
 		t.Errorf("UpgradeSummary lacks the runbook or the line:\n%s", summary)
+	}
+}
+
+// The runbook link names the new commit, not main: the runbook runs from that
+// tree, and main's can describe steps the new release does not have.
+func TestRunbookURLNamesTheNewCommit(t *testing.T) {
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if got, want := b.RunbookURL(), "https://github.com/agent-substrate/substrate/blob/"+Commit+"/docs/guides/upgrade.md"; got != want {
+		t.Errorf("RunbookURL() = %s, want %s", got, want)
 	}
 }
 

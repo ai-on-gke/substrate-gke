@@ -324,7 +324,7 @@ func TestSummaryForAnUpgrade(t *testing.T) {
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, deps, false)
 	})
-	for _, want := range []string{"Upgrade prepared", snapshot.RunbookURL, "cd ~/ate-upgrade/new && export VERSION=", "export VERSION=substrate-0123456789ab there"} {
+	for _, want := range []string{"Upgrade prepared", "github.com/agent-substrate/substrate/blob/" + snapshot.Commit + "/docs/guides/upgrade.md", "cd ~/ate-upgrade/new && export VERSION=", "export VERSION=substrate-0123456789ab there"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("upgrade summary is missing %q:\n%s", want, out)
 		}

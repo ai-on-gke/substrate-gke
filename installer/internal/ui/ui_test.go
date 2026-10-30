@@ -1496,17 +1496,18 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 		t.Fatalf("images step did not record the release: %+v", st)
 	}
 	plan := app.cur.(*upgradePlanScreen)
+	runbook := app.deps.Builder.RunbookURL()
 	if !plan.fetch.ok() {
 		t.Fatalf("dry-run fetch did not finish: failed=%v blocked=%q", plan.fetch.failed, plan.blocked)
 	}
-	if view := app.View(); !strings.Contains(view, "Press [enter] to set up ~/ate-upgrade") || strings.Contains(view, snapshot.RunbookURL) {
+	if view := app.View(); !strings.Contains(view, "Press [enter] to set up ~/ate-upgrade") || strings.Contains(view, runbook) {
 		t.Errorf("after the fetch, the plan should offer the set-up and no hand-over yet:\n%s", view)
 	}
 	press("enter") // set up ~/ate-upgrade
 	if plan.prepare == nil || !plan.prepare.ok() {
 		t.Fatalf("dry-run set-up did not finish: %+v", plan.prepare)
 	}
-	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "export NEW_RELEASE="+testImageTag) {
+	if view := app.View(); !strings.Contains(view, runbook) || !strings.Contains(view, "export NEW_RELEASE="+testImageTag) {
 		t.Errorf("plan view lacks the hand-over:\n%s", view)
 	}
 	press("enter")
