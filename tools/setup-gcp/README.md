@@ -75,8 +75,12 @@ go -C tools/setup-gcp run . enable apis [flags]
 
 Creates a GKE cluster configured for Agent Substrate (with Workload Identity,
 required Kubernetes beta APIs, and Managed OpenTelemetry enabled, and the
-Filestore CSI driver disabled). An existing cluster keeps its Filestore
-add-on setting.
+Filestore CSI driver disabled). The control plane has no IP endpoint: it is
+reachable only through its DNS endpoint, where IAM authorizes every request
+(`container.clusters.connect`) before it reaches the API server.
+`gcloud container clusters get-credentials` uses the DNS endpoint
+automatically. An existing cluster keeps its Filestore add-on setting and its
+control plane endpoints.
 
 If the cluster already exists, settings that can be changed in place
 (Workload Identity, beta APIs, Managed OpenTelemetry) are updated. Settings fixed at creation (network, subnetwork, Dataplane V2, nested

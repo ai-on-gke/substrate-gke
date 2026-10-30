@@ -53,6 +53,24 @@ func TestBuildCreateClusterRequest_FilestoreDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildCreateClusterRequest_DNSEndpointOnly(t *testing.T) {
+	cfg := &Config{
+		ProjectID:       "test-project",
+		ClusterName:     "test-cluster",
+		ClusterLocation: "us-west1-c",
+		MachineType:     "c3-standard-4",
+	}
+	req := buildCreateClusterRequest("projects/test-project/locations/us-west1-c", cfg)
+
+	ep := req.GetCluster().GetControlPlaneEndpointsConfig()
+	if !ep.GetDnsEndpointConfig().GetAllowExternalTraffic() {
+		t.Errorf("DNS endpoint does not allow external traffic: %v", ep.GetDnsEndpointConfig())
+	}
+	if ip := ep.GetIpEndpointsConfig(); ip == nil || ip.Enabled == nil || ip.GetEnabled() {
+		t.Errorf("IP endpoints are not explicitly disabled: %v", ip)
+	}
+}
+
 func TestBuildCreateClusterRequest_NodeConfig(t *testing.T) {
 	tests := []struct {
 		name         string
