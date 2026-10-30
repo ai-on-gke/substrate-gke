@@ -127,13 +127,13 @@ Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
 cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
-guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
-rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
-whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
-runs upstream's `hack/install-microvm-deps.sh --install` to assemble those five assets,
-upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0, in
-`<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
-points at them.
+guest kernel and the guest rootfs — are fetched from GCS at boot rather than baked into
+the worker image. Step 9 (`Choose your sandbox runtime`) reports whether the cluster you
+selected has a KVM-capable node pool, and on choosing Micro-VM it runs
+[`tools/setup-gcp/install-microvm-deps.sh`](tools/setup-gcp/install-microvm-deps.sh)
+`--install` in the Substrate checkout. That assembles those four assets with upstream's
+`hack/microvm-assets/assemble.sh`, uploads them under `kata-assets/` in `<bucket>-assets`,
+and applies a cluster-wide `SandboxConfig` named `microvm` that points at them.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
 
@@ -199,11 +199,12 @@ upstream's `demos/counter/counter-microvm.yaml.tmpl` and
 **Upgrading and teardown:** The upgrade flow (`--upgrade`) updates the control plane and
 gVisor `SandboxConfig`, but does not re-stage `kata-assets/`; after upgrading a cluster
 that uses micro-VM across a Substrate revision bump, target the cluster's kube context and
-re-run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket> hack/install-microvm-deps.sh --install`
-so the bucket assets and `microvm` `SandboxConfig` digests stay in sync. Full teardown
+re-run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket> SUBSTRATE_ROOT=<substrate checkout>
+tools/setup-gcp/install-microvm-deps.sh --install` from this repository so the bucket
+assets and `microvm` `SandboxConfig` digests stay in sync. Full teardown
 (`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all `SandboxConfig`
 resources automatically; if you want to drop micro-VM without tearing anything else down,
-run `NO_DEV_ENV=1 hack/install-microvm-deps.sh --delete` against the cluster's kube
+run `NO_DEV_ENV=1 BUCKET_NAME=<bucket> tools/setup-gcp/install-microvm-deps.sh --delete` against the cluster's kube
 context (the staged assets in `kata-assets/` remain inert in the bucket).
 
 ## Reaching actors through the ingress router

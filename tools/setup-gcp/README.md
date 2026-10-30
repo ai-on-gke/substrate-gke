@@ -383,7 +383,8 @@ a revision whose node plugin gets snapshot credentials from ate-api-server's
 credential exchange first. On an older release, removing these grants makes
 every suspend and resume fail with `403`. Remove those grants after running
 `create bucket` and `create iam`, and after rerunning
-`hack/install-microvm-deps.sh --install` if you use microVM workers, so the
+`install-microvm-deps.sh --install` (see [Stage micro-VM assets](#stage-micro-vm-assets))
+if you use microVM workers, so the
 assets are in the asset bucket. `ATELET` is set as in the manual equivalent
 above:
 
@@ -451,6 +452,39 @@ To create only the image repository, after enabling the Artifact Registry API:
 ```bash
 go -C tools/setup-gcp run . create repository --project-id <project> --region <region> --name ate-images
 ```
+
+## Stage micro-VM assets
+
+Micro-VM workers fetch their sandbox binaries (cloud-hypervisor, virtiofsd,
+the guest kernel and the guest rootfs) from the asset bucket, `BUCKET_NAME-assets`,
+at boot. [`install-microvm-deps.sh`](install-microvm-deps.sh) puts them there
+and applies the cluster-wide `microvm` SandboxConfig that points at them. The
+installer runs it on the Micro-VM runtime step. It does what the GCS branch of
+agent-substrate/substrate's `hack/install-microvm-deps.sh` and
+`hack/microvm-assets/stage-to-gcs.sh` does, so the installer does not depend on
+that dev script ([#82](https://github.com/ai-on-gke/substrate-gke/issues/82)).
+The assets themselves are not specific to GKE; only the upload to GCS and the
+`BUCKET_NAME-assets` bucket are.
+
+It runs against a Substrate checkout, from which it takes the
+provider-neutral pieces: `hack/microvm-assets/assemble.sh`, which downloads the
+asset set, and `manifests/microvm/sandboxconfig-microvm.yaml.tmpl`. Run it from
+that checkout or name it with `SUBSTRATE_ROOT`:
+
+```bash
+NO_DEV_ENV=1 BUCKET_NAME=<bucket> ARCH=amd64 SUBSTRATE_ROOT=<substrate checkout> \
+  tools/setup-gcp/install-microvm-deps.sh --install
+```
+
+* `ARCH` is the nodes' arch, not the workstation's.
+* It targets `KUBECTL_CONTEXT`, or the kubeconfig's current context, and
+  passes `PROJECT_ID` to `gcloud` when set.
+* It stops before downloading anything if `gs://BUCKET_NAME-assets` cannot be
+  read; `create bucket` (or `bootstrap`) creates it.
+* The asset set is cached in `SUBSTRATE_ROOT/bin/microvm-assets/ARCH` (or
+  `OUT`) and assembled again only when upstream's pinned versions change.
+* `--delete` removes the SandboxConfig, unless a WorkerPool still uses it, and
+  leaves the bucket alone.
 
 ## Teardown
 

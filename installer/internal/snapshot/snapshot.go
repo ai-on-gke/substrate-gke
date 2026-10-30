@@ -1119,8 +1119,8 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	}
 }
 
-// microVMEnv is env plus the two settings upstream's micro-VM script reads
-// that no other step needs.
+// microVMEnv is env plus the two settings the micro-VM steps read that no
+// other step needs.
 //
 // ARCH is pinned rather than left to the script's own resolution, which reads
 // KO_DEFAULTPLATFORMS and falls back to the workstation's `go env GOARCH`.
@@ -1130,10 +1130,9 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // laptop that stages arm64 binaries into the bucket, and the failure surfaces
 // much later, as a cold boot that cannot exec them.
 //
-// ATE_INSTALL_KIND=false selects the GCS staging path over the in-cluster
-// rustfs one. It is already the script's default; naming it here keeps a
-// developer's exported value from redirecting a GKE install's assets into a
-// kind bucket that does not exist.
+// ATE_INSTALL_KIND=false keeps a developer's exported value from turning the
+// counter-microvm demo deploy into a kind one. The staging script itself
+// (tools/setup-gcp/install-microvm-deps.sh) only stages to GCS.
 //
 // The KUBECTL_CONTEXT that env blanks matters most here: with one set,
 // install-microvm-deps.sh skips its up-front context check and install-ate.sh
@@ -1146,21 +1145,18 @@ func (b *Builder) microVMEnv(st *state.Setup) []string {
 	return append(b.env(st), "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
 }
 
-// InstallMicroVMDeps stages the micro-VM sandbox assets and applies the
-// cluster-wide `microvm` SandboxConfig, using upstream's
-// hack/install-microvm-deps.sh from the pinned checkout.
+// InstallMicroVMDeps stages the micro-VM sandbox assets in the GCS asset
+// bucket and applies the cluster-wide `microvm` SandboxConfig, using this
+// repository's tools/setup-gcp/install-microvm-deps.sh. It runs in the
+// Substrate checkout, from which the script takes upstream's provider-neutral
+// assemble.sh and SandboxConfig template.
 //
 // This is a separate step because upstream makes it one: ate-setup applies the
 // gVisor SandboxConfig unconditionally, but the micro-VM one is opt-in and
-// needs its five sandbox binaries — cloud-hypervisor, virtiofsd, the guest
-// kernel, the guest rootfs and the base kata config — assembled and uploaded
-// under kata-assets/ first, because the runtime fetches them from the bucket
-// at boot rather than carrying them in the worker image.
-//
-// The script is driven rather than reimplemented in Go: it computes the staged
-// virtiofsd's sha256 and injects it into the manifest at apply time, which
-// cannot be pinned ahead of time because the arm64 binary is built from source
-// and its bytes vary by toolchain.
+// needs its four sandbox binaries — cloud-hypervisor, virtiofsd, the guest
+// kernel and the guest rootfs — assembled and uploaded under kata-assets/
+// first, because the runtime fetches them from the bucket at boot rather than
+// carrying them in the worker image.
 //
 // Credentials are fetched into a throwaway KUBECONFIG the same way the probes
 // do. The script refuses to run without a resolvable context — deliberately,
@@ -1169,15 +1165,15 @@ func (b *Builder) microVMEnv(st *state.Setup) []string {
 // chose, never whatever context happens to be ambient.
 func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 	lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
-	lines = append(lines, "hack/install-microvm-deps.sh --install")
+	lines = append(lines, ShellQuote(filepath.Join(b.SetupGCP, MicroVMDepsScript))+" --install")
 	return execx.Spec{
 		Label:   "install-microvm-deps --install",
-		Display: "./hack/install-microvm-deps.sh --install",
+		Display: SetupGCPPath + "/" + MicroVMDepsScript + " --install",
 		Argv:    b.inTree(strings.Join(lines, "\n")),
 		Env:     b.microVMEnv(st),
 		SimLines: append(b.fetchSimLines(),
 			"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
-			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"/kata-assets/ ...",
+			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"-assets/kata-assets/ ...",
 			"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
 			"sandboxconfig.ate.dev/microvm created",
 			"[install-microvm-deps]: Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm).",

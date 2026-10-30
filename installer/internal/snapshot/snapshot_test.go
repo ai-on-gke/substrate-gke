@@ -343,22 +343,28 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 
 // The micro-VM script uploads assets and applies a cluster-scoped resource, so
 // pointing it at the wrong cluster is not a no-op. It must target the cluster
-// the wizard chose, never whatever context happens to be ambient.
+// the wizard chose, never whatever context happens to be ambient. It is this
+// repository's script that stages to GCS, not upstream's hack script (#82).
 func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 	st := testSetup(t)
 	st.ClusterName = "clu'ster $HOME"
 	st.Zone = "us-central1-a; id -u"
+	b := NewBuilder(fakeCheckout(t), false)
+	b.SetupGCP = "/home/o'brien/substrate gke/tools/setup-gcp"
 
-	script := NewBuilder(fakeCheckout(t), false).InstallMicroVMDeps(st).Argv[2]
+	script := b.InstallMicroVMDeps(st).Argv[2]
 	for _, want := range []string{
 		"gcloud container clusters get-credentials " + ShellQuote(st.ClusterName),
 		"--location " + ShellQuote(st.Zone),
 		"--project " + ShellQuote(st.ProjectID),
-		"hack/install-microvm-deps.sh --install",
+		ShellQuote(b.SetupGCP+"/install-microvm-deps.sh") + " --install",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, "hack/install-microvm-deps.sh") {
+		t.Errorf("script runs upstream's hack/install-microvm-deps.sh:\n%s", script)
 	}
 }
 
