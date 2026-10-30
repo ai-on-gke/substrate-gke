@@ -130,7 +130,8 @@ func retryUntilPropagated(ctx context.Context, action, accounts string, grant fu
 		if err == nil {
 			return nil
 		}
-		if attempt >= 6 {
+		// Neither is a propagation delay, so a retry won't fix it.
+		if attempt >= 6 || isPermissionDenied(err) || isNotFound(err) {
 			return err
 		}
 		slog.Warn(action+" failed, retrying...", slog.String("gsa", accounts), slog.Int("attempt", attempt), slog.Any("err", err))

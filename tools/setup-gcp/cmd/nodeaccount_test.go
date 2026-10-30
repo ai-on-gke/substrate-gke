@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -133,17 +134,19 @@ func TestGrantNodeImagePullOnCreatedRepository(t *testing.T) {
 	}
 }
 
-// For a registry bootstrap didn't create, nothing is granted: the command is
-// printed for Artifact Registry, and nothing at all for other registries.
+// For an Artifact Registry repository bootstrap didn't create, the node
+// service account is granted read access on that repository. Nothing is
+// granted for other registries, and only the command is printed when the
+// repository can't be named.
 func TestGrantNodeImagePullOnUserRegistry(t *testing.T) {
 	for _, tc := range []struct {
-		name, ateImageRepo, koDockerRepo, want string
+		name, ateImageRepo, koDockerRepo, resource, printed string
 	}{
-		{"pre-built on Artifact Registry", "us-docker.pkg.dev/other/images", "", "add-iam-policy-binding images --project=other --location=us --member=serviceAccount:" + nodeSA},
-		{"source build on gcr.io", "", "gcr.io/acme/ate", "add-iam-policy-binding gcr.io --project=acme --location=us --member=serviceAccount:" + nodeSA},
-		{"pre-built wins over KO_DOCKER_REPO", "eu.gcr.io/other", "gcr.io/acme", "--location=europe"},
-		{"unknown registry", "", "", "add-iam-policy-binding <repository> --project=<project> --location=<location>"},
-		{"not Artifact Registry", "ghcr.io/agent-substrate", "", ""},
+		{"pre-built on Artifact Registry", "us-docker.pkg.dev/other/images", "", "projects/other/locations/us/repositories/images", ""},
+		{"source build on gcr.io", "", "gcr.io/acme/ate", "projects/acme/locations/us/repositories/gcr.io", ""},
+		{"pre-built wins over KO_DOCKER_REPO", "eu.gcr.io/other", "gcr.io/acme", "projects/other/locations/europe/repositories/eu.gcr.io", ""},
+		{"unknown registry", "", "", "", "add-iam-policy-binding <repository> --project=<project> --location=<location>"},
+		{"not Artifact Registry", "ghcr.io/agent-substrate", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeREST(t)
@@ -154,18 +157,61 @@ func TestGrantNodeImagePullOnUserRegistry(t *testing.T) {
 			if err := grantNodeImagePull(context.Background(), nodeConfig(), []string{nodeSA}); err != nil {
 				t.Fatal(err)
 			}
-			if len(f.written) != 0 {
-				t.Errorf("granted on a registry bootstrap didn't create: %v", f.written)
+			if tc.resource == "" {
+				if len(f.written) != 0 {
+					t.Errorf("granted on %v, want no grant", f.written)
+				}
+			} else if w := f.written[tc.resource]; len(w) != 1 || !hasPlainGrant(w[0], imagePullRole, "serviceAccount:"+nodeSA) {
+				t.Errorf("%s lacks %s on %s; written: %v", nodeSA, imagePullRole, tc.resource, f.written)
 			}
 			out := logs.String()
-			if tc.want == "" {
+			if tc.printed == "" {
 				if strings.Contains(out, "add-iam-policy-binding") {
-					t.Errorf("printed a grant for a registry outside Artifact Registry:\n%s", out)
+					t.Errorf("printed a grant command:\n%s", out)
 				}
+			} else if !strings.Contains(out, tc.printed) {
+				t.Errorf("logs do not contain %q:\n%s", tc.printed, out)
+			}
+		})
+	}
+}
+
+// When the grant on the user's repository is denied or the repository is not
+// found, bootstrap prints the command and carries on, without retrying. Any
+// other error fails it.
+func TestGrantNodeImagePullOnUserRegistryFailure(t *testing.T) {
+	orig := nodeAccountRetryDelay
+	nodeAccountRetryDelay = 0
+	t.Cleanup(func() { nodeAccountRetryDelay = orig })
+	const resource = "projects/other/locations/us/repositories/images"
+	for _, tc := range []struct {
+		name    string
+		code    int
+		wantErr bool
+	}{
+		{"permission denied", http.StatusForbidden, false},
+		{"repository not found", http.StatusNotFound, false},
+		{"server error", http.StatusInternalServerError, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeREST(t)
+			f.fail[resource] = tc.code
+			t.Setenv("ATE_IMAGE_REPO", "us-docker.pkg.dev/other/images")
+			logs := captureLogs(t)
+
+			err := grantNodeImagePull(context.Background(), nodeConfig(), []string{nodeSA})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
 				return
 			}
-			if !strings.Contains(out, tc.want) {
-				t.Errorf("logs do not contain %q:\n%s", tc.want, out)
+			if f.calls[resource] != 1 {
+				t.Errorf("repository IAM called %d times, want 1 (no retry)", f.calls[resource])
+			}
+			want := "add-iam-policy-binding images --project=other --location=us --member=serviceAccount:" + nodeSA
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("logs do not contain %q:\n%s", want, logs.String())
 			}
 		})
 	}

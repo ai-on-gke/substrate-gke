@@ -277,9 +277,9 @@ go -C tools/setup-gcp run . create iam [flags]
 | Flag | Description | Default Env Var | Fallback Default |
 | :--- | :--- | :--- | :--- |
 | `--bucket` | GCS bucket name. | `BUCKET_NAME` | None (Required for bucket bindings*) |
-| `--gke-nodes` | Create the node service account, grant it its project role, and print the command that grants it read access to the image repository. | - | `true` |
+| `--gke-nodes` | Create the node service account, grant it its project role, and grant it read access to the image repository (or print the command when the grant is denied). | - | `true` |
 | `--node-service-account-name` | Name of the node service account. `teardown.sh` reads the same variable. | `NODE_GSA_NAME` | `ate-gke-node` |
-| `--atelet` | Print the commands that grant atelet read access to the Substrate and actor image repositories. | - | `true` |
+| `--atelet` | Grant atelet read access to the Substrate image repository, like the nodes, and print the command for actor image repositories. | - | `true` |
 | `--transfer-service-account` | Create the snapshot transfer service account and let ate-api-server create tokens for it. | - | `true` |
 | `--transfer-gsa-name` | Name of the snapshot transfer service account to create. ate-setup and `teardown.sh` read the same variable. | `SNAPSHOT_TRANSFER_GSA_NAME` | `ate-snapshot-transfer` |
 | `--bucket-bindings` | Grant ate-api-server and the snapshot transfer service account access to the snapshot bucket, and atelet read access to the asset bucket. | - | `true` |
@@ -323,7 +323,7 @@ have it enabled too, or their GCS calls fail with `401`.
 | atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | snapshot bucket | Read/write snapshot objects |
 | atelet WI principal¹ ⁴ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
 | node SA³ | `roles/container.defaultNodeServiceAccount` | project | Node logging, monitoring and operation, and nothing else |
-| each node pool's SA⁷ | `roles/artifactregistry.reader` | the image repository | Nodes pull images from Artifact Registry, which also serves gcr.io. `bootstrap --create-repository` grants it on the repository it creates; otherwise setup-gcp prints the `gcloud artifacts repositories add-iam-policy-binding` command, filled in from `ATE_IMAGE_REPO` or `KO_DOCKER_REPO` |
+| each node pool's SA⁷ | `roles/artifactregistry.reader` | the image repository | Nodes pull images from Artifact Registry, which also serves gcr.io. `bootstrap --create-repository` grants it on the repository it creates; otherwise setup-gcp grants it on the Artifact Registry repository named by `ATE_IMAGE_REPO` or `KO_DOCKER_REPO`. If that grant is denied or the repository isn't found (a registry in another project, say), it prints the `gcloud artifacts repositories add-iam-policy-binding` command instead |
 
 ¹ `principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/ate-system/sa/SERVICE_ACCOUNT` — note it is keyed to the **project number**, not the ID.
 ² setup-gcp grants nothing on the project except the node SA's role, which only exists there. Installs set up before this also granted atelet `roles/artifactregistry.reader` and `roles/storage.objectAdmin` on the project; `teardown.sh --revoke-atelet-permissions` removes them.
