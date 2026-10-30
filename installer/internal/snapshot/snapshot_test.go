@@ -240,7 +240,7 @@ func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 		// teardown must outlast it, or the immediate re-probe reads (and
 		// caches) the half-deleted install as still installed.
 		"kubectl wait --for=delete namespace/ate-system",
-		`KUBECONFIG=$(mktemp)`,
+		`export KUBECONFIG="$kubeconfig_dir/config"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("delete script missing %q:\n%s", want, script)
@@ -1927,10 +1927,10 @@ func TestDeployAteSystemCordonsOnlyWithSystemPools(t *testing.T) {
 	st := prebuiltSetup(t)
 	script := strings.Join(b.DeployAteSystem(st).Argv, " ")
 	for _, want := range []string{
-		"export ATE_INSTALL_CORDON_CONTROL_PLANE=false",
-		"kubectl get nodes -l ate.dev/workloadType=ate-control-plane",
+		"export ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=false",
+		"kubectl get nodes -l ate.dev/workloadType=ate-system-infra",
 		"kubectl get nodes -l ate.dev/workloadType=ate-postgres",
-		"export ATE_INSTALL_CORDON_CONTROL_PLANE=true",
+		"export ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=true",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("deploy script lacks %q:\n%s", want, script)
@@ -1942,7 +1942,7 @@ func TestDeployAteSystemCordonsOnlyWithSystemPools(t *testing.T) {
 
 	st.SharedSystemNodes = true
 	script = strings.Join(b.DeployAteSystem(st).Argv, " ")
-	if !strings.Contains(script, "export ATE_INSTALL_CORDON_CONTROL_PLANE=false") || strings.Contains(script, "CORDON_CONTROL_PLANE=true") || strings.Contains(script, "kubectl get nodes") {
+	if !strings.Contains(script, "export ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=false") || strings.Contains(script, "CORDON_SYSTEM_INFRA_COMPONENTS=true") || strings.Contains(script, "kubectl get nodes") {
 		t.Errorf("shared system nodes must deploy uncordoned without checking:\n%s", script)
 	}
 	if !slices.Contains(b.Bootstrap(st).Env, "SEPARATE_SYSTEM_NODES=false") {
@@ -1957,13 +1957,18 @@ func TestCordonCheckScript(t *testing.T) {
 		name       string
 		nodes      map[string]string
 		kubectlErr bool
-		want       string
+		// env selects an external database, which needs no ate-postgres pool.
+		env  string
+		want string
 	}{
-		{"both pools", map[string]string{"ate-control-plane": "node/a", "ate-postgres": "node/b"}, false, SeparateSystemNodesLine},
-		{"no postgres pool", map[string]string{"ate-control-plane": "node/a"}, false, SharedSystemNodesLine},
-		{"no pools", nil, false, SharedSystemNodesLine},
+		{"both pools", map[string]string{"ate-system-infra": "node/a", "ate-postgres": "node/b"}, false, "", SeparateSystemNodesLine},
+		{"no postgres pool", map[string]string{"ate-system-infra": "node/a"}, false, "", SharedSystemNodesLine},
+		{"no pools", nil, false, "", SharedSystemNodesLine},
+		{"external DSN, no postgres pool", map[string]string{"ate-system-infra": "node/a"}, false, "ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING=postgres://db", SeparateSystemNodesLine},
+		{"Cloud SQL, no postgres pool", map[string]string{"ate-system-infra": "node/a"}, false, "ATE_API_POSTGRES_CLOUDSQL_INSTANCE=p:r:i", SeparateSystemNodesLine},
+		{"external DSN, no system pool", map[string]string{"ate-postgres": "node/b"}, false, "ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING=postgres://db", SharedSystemNodesLine},
 		// A failed check must stop the deploy, not read as "no pools".
-		{"kubectl fails", map[string]string{"ate-control-plane": "node/a", "ate-postgres": "node/b"}, true, ""},
+		{"kubectl fails", map[string]string{"ate-system-infra": "node/a", "ate-postgres": "node/b"}, true, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bin := t.TempDir()
@@ -1981,9 +1986,13 @@ func TestCordonCheckScript(t *testing.T) {
 				kubectl = "echo 'Unable to connect to the server' >&2; exit 1\n" + kubectl
 			}
 			write("kubectl", kubectl+"esac\n")
-			script := cordonLines(testSetup(t)) + `echo "cordon=$ATE_INSTALL_CORDON_CONTROL_PLANE"`
+			script := cordonLines(testSetup(t)) + `echo "cordon=$ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS"`
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"),
+				"ATE_API_POSTGRES_READ_WRITE_CONNECTION_STRING=", "ATE_API_POSTGRES_CLOUDSQL_INSTANCE=")
+			if tc.env != "" {
+				cmd.Env = append(cmd.Env, tc.env)
+			}
 			out, err := cmd.CombinedOutput()
 			if tc.want == "" {
 				if err == nil || strings.Contains(string(out), "cordon=") {
@@ -1999,5 +2008,85 @@ func TestCordonCheckScript(t *testing.T) {
 				t.Errorf("got\n%s\nwant %q and %q", out, tc.want, wantCordon)
 			}
 		})
+	}
+}
+
+// After a cordoned deploy the step fails, naming the node, unless every
+// ate-api-server pod runs on an ate-system-infra node. An uncordoned deploy
+// is not checked.
+func TestPlacementCheckScript(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// cordon is ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS for the deploy.
+		cordon string
+		// pods is what the pod query prints: one node name per pod.
+		pods string
+		// labels maps a node to its ate.dev/workloadType label.
+		labels     map[string]string
+		kubectlErr bool
+		wantErr    string
+	}{
+		{"on system nodes", "true", "sys-1\nsys-2\n", map[string]string{"sys-1": "ate-system-infra", "sys-2": "ate-system-infra"}, false, ""},
+		{"one pod on a worker", "true", "sys-1\nworker-1\n", map[string]string{"sys-1": "ate-system-infra", "worker-1": "<no value>"}, false, "ate-api-server is running on node worker-1, which is not labeled ate.dev/workloadType=ate-system-infra"},
+		{"no scheduled pod", "true", "\n", nil, false, "No scheduled ate-api-server pod"},
+		{"kubectl fails", "true", "sys-1\n", map[string]string{"sys-1": "ate-system-infra"}, true, "Unable to connect"},
+		// Not cordoned: kubectl would fail, so the check must not run.
+		{"uncordoned", "false", "worker-1\n", nil, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			write := func(name, body string) {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env bash\n"+body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("gcloud", "exit 0\n")
+			kubectl := "case \"$*\" in\n"
+			kubectl += fmt.Sprintf("  'get pods -n ate-system -l app=ate-api-server '*) printf %%s %s ;;\n", ShellQuote(tc.pods))
+			for node, label := range tc.labels {
+				kubectl += fmt.Sprintf("  'get node %s '*) printf %%s %s ;;\n", node, ShellQuote(label))
+			}
+			kubectl += "  *) echo \"unexpected kubectl $*\" >&2; exit 1 ;;\nesac\n"
+			if tc.kubectlErr {
+				kubectl = "echo 'Unable to connect to the server' >&2; exit 1\n" + kubectl
+			}
+			write("kubectl", kubectl)
+			script := "set -euo pipefail\nexport ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=" + tc.cordon + placementLines(testSetup(t)) + "\necho done"
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if tc.wantErr != "" {
+				if err == nil || strings.Contains(string(out), "done") || !strings.Contains(string(out), tc.wantErr) {
+					t.Fatalf("err = %v, want a failure with %q:\n%s", err, tc.wantErr, out)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(string(out), "done") {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if checked := strings.Contains(string(out), PlacementLine); checked != (tc.cordon == "true") {
+				t.Errorf("placement line printed = %v, want %v:\n%s", checked, tc.cordon == "true", out)
+			}
+		})
+	}
+}
+
+// The deploy runs the placement check after ate-setup, skips pods that are
+// terminating, and leaves it out entirely when system nodes are shared.
+func TestDeployAteSystemChecksPlacement(t *testing.T) {
+	b := NewBuilder("/tmp/substrate-pin", true)
+	st := prebuiltSetup(t)
+	script := strings.Join(b.DeployAteSystem(st).Argv, " ")
+	deploy := strings.Index(script, "go run ./cmd/ate-setup deploy ate-system")
+	check := strings.Index(script, "-l app=ate-api-server")
+	if deploy < 0 || check < deploy {
+		t.Errorf("placement check does not follow the deploy:\n%s", script)
+	}
+	if !strings.Contains(script, "deletionTimestamp") {
+		t.Errorf("placement check does not skip terminating pods:\n%s", script)
+	}
+	st.SharedSystemNodes = true
+	if script := strings.Join(b.DeployAteSystem(st).Argv, " "); strings.Contains(script, "app=ate-api-server") {
+		t.Errorf("shared system nodes still check placement:\n%s", script)
 	}
 }

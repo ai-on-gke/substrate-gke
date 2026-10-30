@@ -6,7 +6,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 > **New here?** Run `make dry-run` first — it walks the entire wizard without touching GCP, so you can see every prompt before committing to anything.
 
 > [!WARNING]
-> **This creates billable GCP resources.** A completed install provisions a GKE cluster (by default with two small extra node pools for Substrate's system components), snapshot and micro-VM asset buckets, snapshot transfer and node service accounts, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
+> **This creates billable GCP resources.** A completed install provisions a GKE cluster (by default with small extra node pools for Substrate's system components), snapshot and micro-VM asset buckets, snapshot transfer and node service accounts, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
 
 ![The installer's welcome screen](docs/screenshots/welcome.svg)
 

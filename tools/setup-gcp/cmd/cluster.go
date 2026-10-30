@@ -122,16 +122,22 @@ func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateCl
 			ProvisionedThroughput: cfg.BootDiskProvisionedThroughputMBps,
 		}
 	}
+	pools := []*containerpb.NodePool{{
+		Name:             "substrate-node-pool",
+		InitialNodeCount: 2,
+		Config:           nodeConfig,
+	}}
+	// A regional cluster gets its system pools afterwards, in one zone (see
+	// addRegionalSystemPools).
+	if !regional(cfg) {
+		pools = append(pools, systemNodePools(cfg)...)
+	}
 	req := &containerpb.CreateClusterRequest{
 		Parent: parent,
 		Cluster: &containerpb.Cluster{
 			Name:                  cfg.ClusterName,
 			InitialClusterVersion: cfg.ClusterVersion,
-			NodePools: append([]*containerpb.NodePool{{
-				Name:             "substrate-node-pool",
-				InitialNodeCount: 2,
-				Config:           nodeConfig,
-			}}, systemNodePools(cfg)...),
+			NodePools:             pools,
 			EnableK8SBetaApis: &containerpb.K8SBetaAPIConfig{
 				EnabledApis: requiredBetaAPIs,
 			},
@@ -275,14 +281,20 @@ func kubernetesMinor(version string) (int, bool) {
 	return n, true
 }
 
-func createClusterInternal(ctx context.Context, cfg *Config, client *container.ClusterManagerClient, parent string) error {
+func createClusterInternal(ctx context.Context, cfg *Config, client *container.ClusterManagerClient, parent, clusterName string) error {
 	slog.Info("Cluster does not exist. Creating...", slog.String("cluster", cfg.ClusterName))
 	req := buildCreateClusterRequest(parent, cfg)
 	op, err := client.CreateCluster(ctx, req)
 	if err != nil {
 		return fmt.Errorf("create cluster: %w", err)
 	}
-	return waitContainerOperation(ctx, client, op.Name, cfg)
+	if err := waitContainerOperation(ctx, client, op.Name, cfg); err != nil {
+		return err
+	}
+	if regional(cfg) {
+		return addRegionalSystemPools(ctx, cfg, client, clusterName)
+	}
+	return nil
 }
 
 func createClusterIdempotent(ctx context.Context, cfg *Config) error {
@@ -316,7 +328,7 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 		if err := validateClusterVersion(cfg); err != nil {
 			return err
 		}
-		return createClusterInternal(ctx, cfg, client, parent)
+		return createClusterInternal(ctx, cfg, client, parent, clusterName)
 	}
 
 	slog.Info("Cluster exists. Checking attributes...", slog.String("cluster", cfg.ClusterName))
