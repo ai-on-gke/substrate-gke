@@ -138,8 +138,7 @@ func getEnv[T getEnvType](key string, fallback T) T {
 }
 
 // assetBucketName is the bucket for micro-VM sandbox assets.
-// hack/install-microvm-deps.sh in agent-substrate/substrate derives the same
-// name.
+// agent-substrate/substrate's ate-setup derives the same name.
 func (c *Config) assetBucketName() string {
 	return c.BucketName + "-assets"
 }

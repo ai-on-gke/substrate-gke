@@ -341,24 +341,30 @@ func TestFilestoreScriptQuotesWizardAnswers(t *testing.T) {
 	}
 }
 
-// The micro-VM script uploads assets and applies a cluster-scoped resource, so
-// pointing it at the wrong cluster is not a no-op. It must target the cluster
-// the wizard chose, never whatever context happens to be ambient.
-func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
-	st := testSetup(t)
-	st.ClusterName = "clu'ster $HOME"
-	st.Zone = "us-central1-a; id -u"
+// Every ate-setup deploy replaces the install record the upgrade flow reads,
+// so the micro-VM step passes the control-plane step's settings and records
+// both sandbox classes. The control-plane step deploys gVisor only, because
+// Micro-VM is chosen after it.
+func TestMicroVMDepsKeepsTheControlPlaneSettings(t *testing.T) {
+	st := prebuiltSetup(t)
+	b := NewBuilder(fakeCheckout(t), false)
+	controlPlane := b.DeployAteSystem(st).Env
+	microVM := b.InstallMicroVMDeps(st)
 
-	script := NewBuilder(fakeCheckout(t), false).InstallMicroVMDeps(st).Argv[2]
-	for _, want := range []string{
-		"gcloud container clusters get-credentials " + ShellQuote(st.ClusterName),
-		"--location " + ShellQuote(st.Zone),
-		"--project " + ShellQuote(st.ProjectID),
-		"hack/install-microvm-deps.sh --install",
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("script missing %q:\n%s", want, script)
+	if !slices.Contains(controlPlane, "ATE_INSTALL_SANDBOX_CLASSES=gvisor") {
+		t.Errorf("control-plane env does not limit ate-setup to gVisor:\n%v", controlPlane)
+	}
+	if !slices.Contains(microVM.Env, "ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm") {
+		t.Errorf("micro-VM env does not record both sandbox classes:\n%v", microVM.Env)
+	}
+	for _, kv := range controlPlane {
+		if !strings.HasPrefix(kv, "ATE_INSTALL_SANDBOX_CLASSES=") && !slices.Contains(microVM.Env, kv) {
+			t.Errorf("micro-VM env is missing the control-plane setting %q", kv)
 		}
+	}
+	want := "go run ./cmd/ate-setup deploy sandboxconfig --image-repo " + ShellQuote(testImageRepo) + " --image-tag " + ShellQuote(testImageTag)
+	if !strings.Contains(microVM.Argv[2], want) {
+		t.Errorf("micro-VM step does not run %q:\n%s", want, microVM.Argv[2])
 	}
 }
 
@@ -373,11 +379,10 @@ func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
 	st.MicroVMDeployed = true
 	b := NewBuilder(fakeCheckout(t), false)
 
-	for _, spec := range []execx.Spec{b.InstallMicroVMDeps(st), b.DeployDemo(st, "counter")} {
-		for _, want := range []string{"ARCH=amd64", "ATE_INSTALL_KIND=false"} {
-			if !slices.Contains(spec.Env, want) {
-				t.Errorf("%s: env missing %q:\n%v", spec.Label, want, spec.Env)
-			}
+	spec := b.DeployDemo(st, "counter")
+	for _, want := range []string{"ARCH=amd64", "ATE_INSTALL_KIND=false"} {
+		if !slices.Contains(spec.Env, want) {
+			t.Errorf("%s: env missing %q:\n%v", spec.Label, want, spec.Env)
 		}
 	}
 }
