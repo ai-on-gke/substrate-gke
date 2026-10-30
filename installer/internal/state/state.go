@@ -121,9 +121,9 @@ func (s Step) Title() string {
 	case ControlPlane:
 		return "Turn on Substrate"
 	case Sandbox:
-		return "Choose your sandbox runtime"
+		return "Choose sandbox runtime"
 	case FilestoreCSI:
-		return "Install Filestore CSI driver"
+		return "Install Filestore CSI"
 	case Autoscaling:
 		return "Configure autoscaling"
 	case Demo:
@@ -131,7 +131,7 @@ func (s Step) Title() string {
 	case Complete:
 		return "Complete"
 	case UpgradeSource:
-		return "Choose the installed cluster"
+		return "Choose installed cluster"
 	case UpgradePlan:
 		return "Prepare the upgrade"
 	}

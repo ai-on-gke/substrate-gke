@@ -26,6 +26,8 @@ import (
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
+	"github.com/muesli/termenv"
+
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/steps"
@@ -1038,18 +1040,24 @@ func (s *completeScreen) View(w int) string {
 	}
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")
 
-	summary := fmt.Sprintf(
-		"project    %s\ncluster    %s (%s)%s\nsandbox    %s\nbucket     gs://%s\nimages     %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
-		st.ProjectID,
-		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
-		SandboxSummary(st),
-		st.BucketName,
-		st.ImageSummary(),
-		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
-		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
-		DemoSummary(st),
-	)
-	b.WriteString(theme.Panel.Width(min(w-4, 76)).Render(summary) + "\n")
+	rows := [][2]string{
+		{"project", st.ProjectID},
+		{"cluster", st.ClusterName + " (" + st.Zone + ")" + map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew]},
+		{"sandbox", SandboxSummary(st)},
+		{"bucket", "gs://" + st.BucketName},
+		{"images", st.ImageSummary()},
+		{"filestore", map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed]},
+		{"autoscale", map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled]},
+		{"demo", DemoSummary(st)},
+	}
+	// Each row hangs under its own value: a bucket name wider than the panel
+	// was wrapping back into the key column.
+	panelW := min(w-4, 76)
+	lines := make([]string, len(rows))
+	for i, r := range rows {
+		lines[i] = hangingIndent(fmt.Sprintf("%-11s", r[0]), r[1], panelW-2)
+	}
+	b.WriteString(theme.Panel.Width(panelW).Render(strings.Join(lines, "\n")) + "\n")
 
 	if s.comp != nil {
 		b.WriteString("\n" + s.comp.view(w) + "\n")
@@ -1057,10 +1065,17 @@ func (s *completeScreen) View(w int) string {
 		b.WriteString("\n" + theme.Subtle.Render("Press [y] to run `kubectl get pods -n ate-system` and see it live.") + "\n")
 	}
 
+	panelWidth := min(w-4, 92)
+	textW := max(panelWidth-4, 20)
+	// Commands break at their flags with continuations, as the guard's
+	// cleanup command does, so a copied one still runs.
+	command := func(cmd string) string {
+		return theme.CommandLine.Render(strings.Join(shellLines(cmd, textW), "\n"))
+	}
 	lead, demo := s.deps.Builder.NextSteps(st)
 	next := theme.Title.Render("Next steps")
 	if lead != "" {
-		next += "\n" + theme.CommandLine.Render(lead)
+		next += "\n" + command(lead)
 	}
 	if st.DemoDeployed {
 		intro := "then, to try the " + DemoName(st) + " demo:"
@@ -1069,14 +1084,16 @@ func (s *completeScreen) View(w int) string {
 		}
 		next += "\n" + theme.Subtle.Render(intro)
 		for _, cmd := range demo {
-			next += "\n" + theme.CommandLine.Render(cmd)
+			next += "\n" + command(cmd)
 		}
 	}
-	panelWidth := min(w-4, 92)
-	if note := s.deps.Builder.RouterNote(st); note != "" {
-		// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
-		next += "\n" + theme.Subtle.Width(max(panelWidth-4, 20)).Render(note)
-	}
+	// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
+	next += "\n" + theme.Subtle.Width(textW).Render(s.deps.Builder.RouterNoteLead(st))
+	// The link on a line of its own, as a terminal hyperlink: the full URL
+	// is longer than the panel and, wrapped, split at every slash and hyphen
+	// into something no terminal could open. The exit summary prints it in
+	// full.
+	next += "\n" + theme.Subtle.Render(termenv.Hyperlink(s.deps.Builder.RouterAuthURL(), snapshot.RouterAuthDoc))
 	b.WriteString("\n" + theme.AccentPanel.Width(panelWidth).Render(next))
 	return b.String()
 }

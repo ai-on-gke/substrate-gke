@@ -1176,6 +1176,34 @@ func (s *clusterScreen) Hints() []Hint {
 	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
 }
 
+// aboutOne reports whether the screen is showing a panel about the cluster
+// under the cursor — the readiness confirmation, the reinstall guard, a
+// teardown — rather than the list to choose from.
+func (s *clusterScreen) aboutOne() bool {
+	switch s.mode {
+	case "confirm", "installed", "partial", "teardown-confirm", "teardown":
+		return true
+	}
+	return false
+}
+
+// exitNotes leaves the reinstall guard's cleanup command in the terminal
+// when the wizard exits on the guard. The panel's copy is meant to be
+// copied, but it sits in a bordered panel and comes out with the border
+// characters on every line; after the alt screen closes it can be copied
+// clean.
+func (s *clusterScreen) exitNotes() []ExitNote {
+	sel, ok := s.selected()
+	if s.mode != "installed" || !ok {
+		return nil
+	}
+	return []ExitNote{{
+		Lead:    fmt.Sprintf("Cluster %s already runs Substrate. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run:", sel.Name),
+		Command: snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""),
+		Trail:   "(--bucket: the snapshot bucket that install used)",
+	}}
+}
+
 // selected is the cluster under the cursor, and false on the create-new row.
 func (s *clusterScreen) selected() (gcp.Cluster, bool) {
 	if s.cursor < 0 || s.cursor >= len(s.clusters) {
@@ -1649,10 +1677,11 @@ func (s *clusterScreen) View(w int) string {
 		badges[i], shorts[i] = badge, short
 	}
 	for i, row := range clusterRows(s.clusters, badges, shorts, w-2) {
-		// The confirmation needs every row the terminal has: at 80×24 the
-		// full list leaves it a handful, and the remedy was being clamped
-		// away. While it is open the list shrinks to the row it is about.
-		if s.mode == "confirm" && i != s.cursor {
+		// A panel about one cluster needs every row the terminal has: at
+		// 80×24 the full list leaves it a handful, and the remedy — or the
+		// guard's cleanup command — was being clamped away. While one is
+		// open the list shrinks to the row it is about.
+		if s.aboutOne() && i != s.cursor {
 			continue
 		}
 		if i == s.cursor {
@@ -1663,7 +1692,7 @@ func (s *clusterScreen) View(w int) string {
 	}
 	createRow := fmt.Sprintf("[%d] ＋ Create a new cluster (recommended)", len(s.clusters)+1)
 	switch {
-	case s.mode == "confirm":
+	case s.aboutOne():
 	case s.cursor == len(s.clusters):
 		b.WriteString(theme.Selected.Render(" "+createRow+" ") + "\n")
 	default:
@@ -1708,9 +1737,9 @@ func (s *clusterScreen) View(w int) string {
 			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete the Substrate control plane on this cluster now (the cluster and its snapshots are kept) and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
 			"     " + strings.Join(shellLines(snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW-5), "\n     "),
 			hangingIndent("     ", "(--bucket: the snapshot bucket that install used)", textW),
-			"",
-			theme.Key.Render("[t]") + " tear down here   " + theme.Key.Render("[esc]") + " choose another   " + theme.Key.Render("[r]") + " re-probe",
 		}, "\n")))
+		// The keys are not repeated here: the bottom bar shows them, outside
+		// the clamp, and a second copy with its own wording disagreed with it.
 	case "teardown-confirm":
 		sel := s.clusters[s.cursor]
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 76)).Render(
