@@ -42,6 +42,10 @@ type fakeREST struct {
 	requestedVersions map[string][]int32
 	// written records each policy written.
 	written map[string][]*iampb.Policy
+	// fail makes IAM policy calls on a resource return this HTTP status.
+	fail map[string]int
+	// calls counts IAM policy calls per resource.
+	calls map[string]int
 }
 
 // newFakeREST starts the fake and points restClientOptions at it for the test.
@@ -51,6 +55,8 @@ func newFakeREST(t *testing.T) *fakeREST {
 		policies:          map[string]*iampb.Policy{},
 		requestedVersions: map[string][]int32{},
 		written:           map[string][]*iampb.Policy{},
+		fail:              map[string]int{},
+		calls:             map[string]int{},
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -87,6 +93,7 @@ func (f *fakeREST) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, policyToJSON(policyAtVersion(stored, version)))
 
 	// IAM: POST v1/<resource>:getIamPolicy and :setIamPolicy.
+	case f.failed(w, path):
 	case strings.HasSuffix(path, ":getIamPolicy"):
 		resource := strings.TrimSuffix(strings.TrimPrefix(path, "v1/"), ":getIamPolicy")
 		version := f.requested(r, resource, "options.requestedPolicyVersion")
@@ -105,6 +112,24 @@ func (f *fakeREST) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, `{"error":{"code":404,"message":"fakeREST: unhandled `+r.Method+" "+path+`"}}`, http.StatusNotFound)
 	}
+}
+
+// failed counts an IAM policy call and, when the test made its resource
+// fail, writes the error and reports true.
+func (f *fakeREST) failed(w http.ResponseWriter, path string) bool {
+	resource, _, ok := strings.Cut(strings.TrimPrefix(path, "v1/"), ":")
+	if !ok || !(strings.HasSuffix(path, ":getIamPolicy") || strings.HasSuffix(path, ":setIamPolicy")) {
+		return false
+	}
+	f.mu.Lock()
+	f.calls[resource]++
+	code := f.fail[resource]
+	f.mu.Unlock()
+	if code == 0 {
+		return false
+	}
+	http.Error(w, `{"error":{"code":`+strconv.Itoa(code)+`,"message":"fakeREST: injected"}}`, code)
+	return true
 }
 
 // policy returns the stored policy for resource, creating an empty one.

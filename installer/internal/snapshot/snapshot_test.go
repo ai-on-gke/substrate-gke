@@ -1772,11 +1772,16 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if !tc.prebuilt && !slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) {
 				t.Errorf("build must use %q", tc.registry)
 			}
-			steps := 8
+			// Bootstrap needs the pre-built registry to grant or print the
+			// nodes' image pull access; a build names it in KO_DOCKER_REPO.
+			if slices.Contains(spec.Env, "ATE_IMAGE_REPO="+st.ImageRepo) != tc.prebuilt {
+				t.Errorf("ATE_IMAGE_REPO must be passed for pre-built images only: %v", spec.Env)
+			}
+			steps := 9
 			if tc.create {
 				steps++
 			}
-			if slices.Contains(spec.SimLines, "Step 2/9: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
+			if slices.Contains(spec.SimLines, "Step 2/10: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
 				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
 			}
 			if strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {

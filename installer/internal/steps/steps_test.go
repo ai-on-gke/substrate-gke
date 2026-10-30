@@ -44,7 +44,7 @@ func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 			if ar {
 				phases = append(phases, "Creating Artifact Registry repository")
 			}
-			phases = append(phases, "Creating GKE Cluster", "Creating GCS buckets for snapshots and micro-VM assets",
+			phases = append(phases, "Creating the GKE node service account", "Creating GKE Cluster", "Creating GCS buckets for snapshots and micro-VM assets",
 				"Granting GKE Node permissions", "Granting Atelet permissions",
 				"Creating the snapshot transfer service account",
 				"Creating IAM policy bindings for the buckets", "Creating Monitoring Dashboards")
@@ -191,7 +191,7 @@ func TestFilestoreCSIChecklistTracksDeployOutputWithoutAddonDisable(t *testing.T
 	}
 }
 
-// Upstream logs "Creating GKE Cluster" for step 2 whatever the cluster, but on
+// Upstream logs "Creating GKE Cluster" for step 3 whatever the cluster, but on
 // an existing one it creates nothing. The label has to say what is actually
 // happening — above all when it is a ten-minute control-plane update, which a
 // "create" label makes look like the install is rebuilding the user's cluster.
@@ -205,8 +205,8 @@ func TestBootstrapLabelsTheClusterStepForTheSituation(t *testing.T) {
 		{"existing, missing the beta APIs", false, true, "Turn on the beta PodCertificate APIs"},
 		{"existing and ready", false, false, "Check the existing GKE cluster"},
 	} {
-		if got := Bootstrap(fetchLabel, false, tc.isNew, tc.enableBetas)[2].Label; !strings.HasPrefix(got, tc.want) {
-			t.Errorf("%s: step 2 = %q, want it to start %q", tc.name, got, tc.want)
+		if got := Bootstrap(fetchLabel, false, tc.isNew, tc.enableBetas)[3].Label; !strings.HasPrefix(got, tc.want) {
+			t.Errorf("%s: step 3 = %q, want it to start %q", tc.name, got, tc.want)
 		}
 	}
 }
