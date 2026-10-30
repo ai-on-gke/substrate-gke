@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 
@@ -46,6 +47,11 @@ type fakeGCP struct {
 	cluster *containerpb.Cluster
 	// clusterCalls lists the mutating ClusterManager RPCs, in order.
 	clusterCalls []string
+	// zones are the node locations CreateCluster gives a cluster that asks
+	// for none, as GKE picks a regional cluster's zones.
+	zones []string
+	// nodePoolRequests records each CreateNodePool request.
+	nodePoolRequests []*containerpb.CreateNodePoolRequest
 
 	// policy is the project's stored IAM policy, conditions included.
 	policy *iampb.Policy
@@ -116,8 +122,23 @@ func (f *fakeGCP) CreateCluster(_ context.Context, req *containerpb.CreateCluste
 	f.record("CreateCluster")
 	f.mu.Lock()
 	f.cluster = proto.Clone(req.GetCluster()).(*containerpb.Cluster)
+	if len(f.cluster.Locations) == 0 {
+		f.cluster.Locations = slices.Clone(f.zones)
+	}
 	f.mu.Unlock()
 	return doneOp("op-create"), nil
+}
+
+func (f *fakeGCP) CreateNodePool(_ context.Context, req *containerpb.CreateNodePoolRequest) (*containerpb.Operation, error) {
+	f.record("CreateNodePool " + req.GetNodePool().GetName())
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cluster == nil {
+		return nil, status.Error(codes.NotFound, "cluster not found")
+	}
+	f.nodePoolRequests = append(f.nodePoolRequests, proto.Clone(req).(*containerpb.CreateNodePoolRequest))
+	f.cluster.NodePools = append(f.cluster.NodePools, proto.Clone(req.GetNodePool()).(*containerpb.NodePool))
+	return doneOp("op-create-node-pool"), nil
 }
 
 func (f *fakeGCP) UpdateCluster(_ context.Context, _ *containerpb.UpdateClusterRequest) (*containerpb.Operation, error) {
