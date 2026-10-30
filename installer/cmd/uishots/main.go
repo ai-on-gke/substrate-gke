@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -80,11 +81,7 @@ func main() {
 		pump(app, m)
 	}
 
-	// Each screen gets the frame height that shows it whole: the installer
-	// clamps a screen to the terminal, so a short frame cuts off its panels.
-	resize(app, 31)
-	shot(out, "welcome", app)
-	resize(app, 26)
+	shot(out, "welcome", app, "Quickstart (recommended)")
 
 	press(app, "enter")      // welcome → doctor
 	press(app, "enter")      // doctor → images
@@ -95,16 +92,14 @@ func main() {
 	paste(app, "v0.6.0")
 	press(app, "enter", "enter")
 	press(app, "enter", "enter", "enter") // project fields
-	shot(out, "clusters", app)            // list with install-state badges
+	shot(out, "clusters", app, "Create a new cluster")
 
 	press(app, "5", "enter") // the installed fixture → blocked panel
-	resize(app, 43)
-	shot(out, "guard", app)
-	resize(app, 26)
+	shot(out, "guard", app, "already runs Substrate")
 
 	press(app, "esc")        // back to the list
 	press(app, "1", "enter") // the clean cluster → provision runs (dry)
-	shot(out, "provision", app)
+	shot(out, "provision", app, "run . bootstrap")
 
 	press(app, "enter")      // provision → ingress clients
 	press(app, "enter")      // the demo drivers' IDs → control plane
@@ -114,8 +109,64 @@ func main() {
 	press(app, "enter")      // gVisor is the default choice → demo
 	press(app, "1", "enter") // deploy the counter demo
 	press(app, "enter")      // → complete
-	resize(app, 36)
-	shot(out, "complete", app)
+	shot(out, "complete", app, "SUBSTRATE IS ON")
+}
+
+// shot writes the screen the wizard is on, sized to show it whole, and
+// refuses to write any other: the walk above is a hand-copied key sequence
+// that nothing else runs, and when a wizard change stalled it the tool
+// wrote five copies of the screen it was stuck on without a word (#86).
+// marker is text the wanted screen shows and no other does.
+func shot(dir, name string, app *ui.App, marker string) {
+	fit(app)
+	view := app.View()
+	if !strings.Contains(plain(view), marker) {
+		fatal(fmt.Errorf("%s: the wizard is not on that screen (no %q in the frame)\n\n%s", name, marker, plain(view)))
+	}
+	path := filepath.Join(dir, name+".ans")
+	if err := os.WriteFile(path, []byte(view), 0o644); err != nil {
+		fatal(err)
+	}
+	fmt.Println("wrote", path)
+}
+
+// fit sizes the frame to the screen on it. The installer clamps a screen to
+// the terminal, so a frame one row short cuts off a panel's bottom border;
+// a hand-tuned height did so silently after the next wording change, which
+// is how a cropped guard screenshot was committed. The screen is rendered
+// tall, measured, and given its rows plus one blank row above the key bar,
+// which is then checked for.
+func fit(app *ui.App) {
+	resize(app, 200)
+	tall := strings.Split(app.View(), "\n")
+	content := tall[:len(tall)-2] // above the key bar's separator
+	last := len(content) - 1
+	for last > 0 && strings.TrimSpace(plain(content[last])) == "" {
+		last--
+	}
+	want := nonBlank(content[:last+1])
+	// The body sits one row short of the frame (see App.View), so the first
+	// guess can land a row low; a frame that is a row too tall only shows a
+	// second blank row, so the search goes up.
+	for h := last + 4; h <= last+8; h++ {
+		resize(app, h)
+		lines := strings.Split(app.View(), "\n")
+		body := lines[:len(lines)-2]
+		if nonBlank(body) == want && strings.TrimSpace(plain(body[len(body)-1])) == "" {
+			return
+		}
+	}
+	fatal(fmt.Errorf("no frame height shows the screen whole with a blank row above the key bar"))
+}
+
+func nonBlank(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.TrimSpace(plain(l)) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // resize sets the frame to the README's 110 columns and h rows.
@@ -123,13 +174,10 @@ func resize(app *ui.App, h int) {
 	pump(app, tea.WindowSizeMsg{Width: 110, Height: h})
 }
 
-func shot(dir, name string, app *ui.App) {
-	path := filepath.Join(dir, name+".ans")
-	if err := os.WriteFile(path, []byte(app.View()), 0o644); err != nil {
-		fatal(err)
-	}
-	fmt.Println("wrote", path)
-}
+// plain strips the colors and the terminal hyperlinks from a frame.
+var ansiSeq = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)")
+
+func plain(s string) string { return ansiSeq.ReplaceAllString(s, "") }
 
 func press(app *ui.App, keys ...string) {
 	for _, k := range keys {

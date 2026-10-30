@@ -3577,6 +3577,41 @@ func TestHintBarFitsTheGuardAt80Columns(t *testing.T) {
 	}
 }
 
+// The reinstall guard is a panel about one cluster, like the readiness
+// confirmation: while it is open the list shrinks to that cluster's row so
+// the panel gets the terminal's height, and the panel does not repeat the
+// bottom bar's keys with its own wording. Exiting on it leaves the cleanup
+// command in the terminal, where it can be copied without panel borders.
+func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("5", "enter") // substrate-installed: the reinstall guard
+	scr := app.cur.(*clusterScreen)
+	if scr.mode != "installed" {
+		t.Fatalf("mode = %q, want installed", scr.mode)
+	}
+	view := flat(scr.View(110))
+	for _, other := range []string{"substrate-poc", "legacy-prod", "Create a new cluster"} {
+		if strings.Contains(view, other) {
+			t.Errorf("the guard still lists %s:\n%s", other, view)
+		}
+	}
+	if !strings.Contains(view, "[5] substrate-installed") {
+		t.Errorf("the guard lost its own cluster's row:\n%s", view)
+	}
+	if strings.Contains(view, "tear down here") {
+		t.Errorf("the guard panel repeats the keys:\n%s", view)
+	}
+	notes := app.ExitNotes()
+	if len(notes) != 1 || !strings.Contains(notes[0].Command, "--cluster 'substrate-installed'") || !strings.Contains(notes[0].Command, "--location 'us-west1-c'") {
+		t.Errorf("exit notes on the guard = %+v, want the cleanup command", notes)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the list
+	if notes := app.ExitNotes(); len(notes) != 0 {
+		t.Errorf("exit notes off the guard = %+v, want none", notes)
+	}
+}
+
 // `make run` has no demo step; `make run-demo` ends with it. Both set the
 // ingress allowlist right before the control plane is turned on.
 func TestRunAndRunDemoFlows(t *testing.T) {

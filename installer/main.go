@@ -230,6 +230,20 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	st, b := deps.Setup, deps.Builder
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
+		// A screen's own parting words: the reinstall guard's cleanup
+		// command, which its panel's borders made awkward to copy.
+		for _, n := range app.ExitNotes() {
+			fmt.Println()
+			if n.Lead != "" {
+				fmt.Println(theme.Subtle.Render("  " + n.Lead))
+			}
+			if n.Command != "" {
+				fmt.Println("  " + theme.CommandLine.Render(n.Command))
+			}
+			if n.Trail != "" {
+				fmt.Println(theme.Subtle.Render("  " + n.Trail))
+			}
+		}
 		if deps.LogPath != "" {
 			fmt.Printf("\nDetailed command log written to:\n  %s\n", theme.Accent.Render(deps.LogPath))
 		}
@@ -313,10 +327,13 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		for _, cmd := range demo {
 			command(cmd)
 		}
-		if routerNote := b.RouterNote(st); routerNote != "" {
-			note(routerNote)
-		}
 	}
+
+	// The wizard's panel links to the router's documentation as a terminal
+	// hyperlink, which not every terminal opens; the URL is printed here in
+	// full, where it can be copied.
+	section("Reaching actors through the ingress router")
+	note(b.RouterNote(st))
 }
 
 // absPath returns path made absolute, or path itself if that fails.
