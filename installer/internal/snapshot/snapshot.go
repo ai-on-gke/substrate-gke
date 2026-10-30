@@ -889,7 +889,9 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree(b.withOverlay("go run ./cmd/ate-setup deploy ate-system" + argv)),
-		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv()),
+		// Micro-VM is chosen later, on the sandbox screen, and
+		// InstallMicroVMDeps stages it then.
+		Env: append(b.controlPlaneEnv(st), sandboxClassesEnv(state.SandboxGVisor)),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -897,6 +899,18 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 			`daemon set "atelet" successfully rolled out`,
 		),
 	}
+}
+
+// controlPlaneEnv is the environment of every ate-setup deploy. Each deploy
+// replaces ate-setup's install record, which the upgrade flow reads, so a
+// partial deploy must pass the same settings as the full one.
+func (b *Builder) controlPlaneEnv(st *state.Setup) []string {
+	return slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv())
+}
+
+// sandboxClassesEnv selects the default SandboxConfigs ate-setup deploys.
+func sandboxClassesEnv(classes ...string) string {
+	return "ATE_INSTALL_SANDBOX_CLASSES=" + strings.Join(classes, ",")
 }
 
 // defaultCredentialProvider is the egress credential provider the control
@@ -1147,40 +1161,32 @@ func (b *Builder) microVMEnv(st *state.Setup) []string {
 }
 
 // InstallMicroVMDeps stages the micro-VM sandbox assets and applies the
-// cluster-wide `microvm` SandboxConfig, using upstream's
-// hack/install-microvm-deps.sh from the pinned checkout.
+// cluster-wide `microvm` SandboxConfig with `ate-setup deploy sandboxconfig`.
 //
 // This is a separate step because upstream makes it one: ate-setup applies the
 // gVisor SandboxConfig unconditionally, but the micro-VM one is opt-in and
-// needs its five sandbox binaries — cloud-hypervisor, virtiofsd, the guest
-// kernel, the guest rootfs and the base kata config — assembled and uploaded
-// under kata-assets/ first, because the runtime fetches them from the bucket
-// at boot rather than carrying them in the worker image.
+// needs its sandbox binaries assembled and uploaded first, because the runtime
+// fetches them from the bucket at boot rather than carrying them in the worker
+// image.
 //
-// The script is driven rather than reimplemented in Go: it computes the staged
-// virtiofsd's sha256 and injects it into the manifest at apply time, which
-// cannot be pinned ahead of time because the arm64 binary is built from source
-// and its bytes vary by toolchain.
-//
-// Credentials are fetched into a throwaway KUBECONFIG the same way the probes
-// do. The script refuses to run without a resolvable context — deliberately,
-// since it would otherwise discover the problem only after assembling and
-// uploading everything — and an install must target the cluster the wizard
-// chose, never whatever context happens to be ambient.
+// Every ate-setup deploy replaces the install record the upgrade flow reads,
+// so this one passes the control-plane step's settings and records both
+// sandbox classes.
 func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
-	lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
-	lines = append(lines, "hack/install-microvm-deps.sh --install")
+	display, argv := imageArgs(st)
 	return execx.Spec{
-		Label:   "install-microvm-deps --install",
-		Display: "./hack/install-microvm-deps.sh --install",
-		Argv:    b.inTree(strings.Join(lines, "\n")),
-		Env:     b.microVMEnv(st),
+		Label:   "ate-setup deploy sandboxconfig",
+		Display: "go run ./cmd/ate-setup deploy sandboxconfig" + display,
+		Argv:    b.inTree("go run ./cmd/ate-setup deploy sandboxconfig" + argv),
+		Env:     append(b.controlPlaneEnv(st), sandboxClassesEnv(state.SandboxGVisor, state.SandboxMicroVM)),
 		SimLines: append(b.fetchSimLines(),
-			"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
-			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"/kata-assets/ ...",
-			"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
-			"sandboxconfig.ate.dev/microvm created",
-			"[install-microvm-deps]: Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm).",
+			"[step]: prepare_microvm_deps",
+			"Assembling microVM assets into bin/microvm-assets/amd64 (arch=amd64)...",
+			"Assembling microVM assets into bin/microvm-assets/arm64 (arch=arm64)...",
+			"Uploading assets to gs://"+st.BucketName+"-assets/microvm-assets/ ...",
+			"[step]: deploy_microvm_sandboxconfig",
+			"Applying microvm SandboxConfig from manifests/ate-install/sandboxconfig-microvm.yaml.tmpl...",
+			"Done. Installed cluster-wide microvm SandboxConfig.",
 		),
 	}
 }

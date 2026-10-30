@@ -112,7 +112,7 @@ func FilestoreCSI() []ChecklistItem {
 	}
 }
 
-// MicroVMDeps tracks the three phases of `install-microvm-deps.sh --install`,
+// MicroVMDeps tracks the three phases of `ate-setup deploy sandboxconfig`,
 // preceded by the same fetch the other in-tree steps pay for, named by
 // fetchLabel.
 //
@@ -123,8 +123,8 @@ func FilestoreCSI() []ChecklistItem {
 func MicroVMDeps(fetchLabel string) []ChecklistItem {
 	return []ChecklistItem{
 		{fetchLabel, containsAny(snapshot.FetchLine, snapshot.CachedLine)},
-		{"Assemble the micro-VM asset set", containsAny("Assembling micro-VM assets", "Assets already present", "re-assembling")},
-		{"Upload assets to GCS (kata-assets/)", contains("Uploading assets to gs://")},
+		{"Assemble the micro-VM asset set", containsAny("Assembling microVM assets", "Assets already present", "re-assembling")},
+		{"Upload assets to GCS", contains("Uploading assets to gs://")},
 		{"Apply the cluster-wide microvm SandboxConfig", contains("Applying microvm SandboxConfig")},
 	}
 }

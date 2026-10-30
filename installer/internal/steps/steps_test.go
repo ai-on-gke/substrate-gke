@@ -147,9 +147,9 @@ func TestMicroVMDepsChecklistTracksInstallOutput(t *testing.T) {
 	items := MicroVMDeps(fetchLabel)
 	lines := []string{
 		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
-		"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
-		"[install-microvm-deps]: Uploading assets to gs://ate-snapshots-p-c-z/kata-assets/ ...",
-		"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
+		"Assembling microVM assets into bin/microvm-assets/amd64 (arch=amd64)...",
+		"Uploading assets to gs://ate-snapshots-p-c-z-assets/microvm-assets/ ...",
+		"Applying microvm SandboxConfig from manifests/ate-install/sandboxconfig-microvm.yaml.tmpl...",
 	}
 	for i := range lines {
 		if got := feed(items, lines[:i+1]); got != i {
@@ -165,7 +165,7 @@ func TestMicroVMDepsChecklistTracksCachedAssets(t *testing.T) {
 	items := MicroVMDeps(fetchLabel)
 	lines := []string{
 		snapshot.CachedLine + snapshot.ShortCommit(),
-		"[install-microvm-deps]: Assets already present in bin/microvm-assets/amd64; skipping assemble.",
+		"Assets already present in bin/microvm-assets/amd64; skipping assemble.",
 	}
 	if got := feed(items, lines); got != 1 {
 		t.Fatalf("active = %d, want 1 (assemble phase satisfied by the skip)", got)
