@@ -17,13 +17,13 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 	"testing"
 
 	"cloud.google.com/go/iam/apiv1/iampb"
+	"github.com/spf13/cobra"
 	"google.golang.org/genproto/googleapis/type/expr"
 	"google.golang.org/protobuf/proto"
 )
@@ -135,9 +135,8 @@ func TestBucketGrantPreservesConditionalBindings(t *testing.T) {
 	f := newFakeREST(t)
 	cfg := iamConfig()
 	cfg.BucketName = "acme-snapshots"
-	cfg.AteletSnapshotAccess = true
-	atelet := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
-	existing := withCondition("roles/storage.objectAdmin", atelet)
+	apiServer := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/ate-api-server"
+	existing := withCondition("roles/storage.objectAdmin", apiServer)
 	f.policies["b/acme-snapshots"] = &iampb.Policy{Etag: []byte("etag-1"), Version: 3, Bindings: []*iampb.Binding{existing}}
 
 	if err := createIamPolicyBindings(context.Background(), cfg); err != nil {
@@ -146,8 +145,8 @@ func TestBucketGrantPreservesConditionalBindings(t *testing.T) {
 
 	resource := "b/acme-snapshots"
 	checkConditionalBindingKept(t, f.requestedVersions[resource], f.written[resource], existing)
-	if written := f.written[resource]; len(written) == 1 && !hasPlainGrant(written[0], "roles/storage.objectAdmin", atelet) {
-		t.Errorf("atelet's conditional objectAdmin binding was taken as the grant; bindings: %v", written[0].GetBindings())
+	if written := f.written[resource]; len(written) == 1 && !hasPlainGrant(written[0], "roles/storage.objectAdmin", apiServer) {
+		t.Errorf("ate-api-server's conditional objectAdmin binding was taken as the grant; bindings: %v", written[0].GetBindings())
 	}
 }
 
@@ -223,29 +222,67 @@ func TestAteletGrantLogsUnderItsOwnName(t *testing.T) {
 	}
 }
 
-// atelet's project-level storage.objectAdmin is granted only with
-// --atelet-snapshot-access; artifactregistry.reader is granted either way.
-func TestAteletProjectGrantFollowsSnapshotAccess(t *testing.T) {
+// atelet gets artifactregistry.reader on the project and no storage role:
+// snapshot transfers run on per-actor credentials, and atelet reads micro-VM
+// assets through its asset bucket grant only.
+func TestAteletProjectGrantHasNoStorageRole(t *testing.T) {
 	member := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
-	for _, access := range []bool{false, true} {
-		t.Run(fmt.Sprintf("snapshot access %v", access), func(t *testing.T) {
-			f := newFakeGCP(t)
-			cfg := iamConfig()
-			cfg.AteletSnapshotAccess = access
+	f := newFakeGCP(t)
 
-			if err := grantAteletPermissions(context.Background(), cfg); err != nil {
-				t.Fatal(err)
-			}
+	if err := grantAteletPermissions(context.Background(), iamConfig()); err != nil {
+		t.Fatal(err)
+	}
 
-			if len(f.written) != 1 {
-				t.Fatalf("policy written %d times, want 1", len(f.written))
+	if len(f.written) != 1 {
+		t.Fatalf("policy written %d times, want 1", len(f.written))
+	}
+	if !hasPlainGrant(f.written[0], "roles/artifactregistry.reader", member) {
+		t.Errorf("atelet lacks artifactregistry.reader; bindings: %v", f.written[0].GetBindings())
+	}
+	for _, b := range f.written[0].GetBindings() {
+		if strings.HasPrefix(b.GetRole(), "roles/storage.") && slices.Contains(b.GetMembers(), member) {
+			t.Errorf("atelet has project-level %s", b.GetRole())
+		}
+	}
+}
+
+// A set ATELET_SNAPSHOT_ACCESS is ignored with a warning, whatever its value.
+func TestRemovedAteletSnapshotAccessEnvWarns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		set      bool
+		wantWarn bool
+	}{
+		{"unset", false, false},
+		{"set", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("ATELET_SNAPSHOT_ACCESS", "true")
 			}
-			if !hasPlainGrant(f.written[0], "roles/artifactregistry.reader", member) {
-				t.Errorf("atelet lacks artifactregistry.reader; bindings: %v", f.written[0].GetBindings())
-			}
-			if got := hasPlainGrant(f.written[0], "roles/storage.objectAdmin", member); got != access {
-				t.Errorf("atelet has project storage.objectAdmin = %v, want %v", got, access)
+			var buf bytes.Buffer
+			restore := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(restore) })
+
+			warnRemovedAteletSnapshotAccessEnv()
+
+			if got := strings.Contains(buf.String(), "Ignoring ATELET_SNAPSHOT_ACCESS"); got != tc.wantWarn {
+				t.Errorf("warned = %t, want %t (log: %q)", got, tc.wantWarn, buf.String())
 			}
 		})
+	}
+}
+
+// --atelet-snapshot-access is removed but still parses, so scripts that pass
+// it keep working.
+func TestRemovedAteletSnapshotAccessFlagStillParses(t *testing.T) {
+	for _, cmd := range []*cobra.Command{bootstrapCmd, iamCmd} {
+		if err := cmd.ParseFlags([]string{"--atelet-snapshot-access=true"}); err != nil {
+			t.Errorf("%s: ParseFlags(--atelet-snapshot-access=true) = %v", cmd.Name(), err)
+		}
+		if f := cmd.Flags().Lookup("atelet-snapshot-access"); f == nil || !f.Hidden {
+			t.Errorf("%s: --atelet-snapshot-access should be registered and hidden", cmd.Name())
+		}
 	}
 }

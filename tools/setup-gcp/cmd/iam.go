@@ -122,14 +122,9 @@ func grantAteletPermissions(ctx context.Context, cfg *Config) error {
 
 	member := fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/ate-system/sa/atelet", cfg.ProjectNumber, cfg.ProjectID)
 
+	// atelet gets no storage role here, see bucketGrants.
 	// TODO: grant artifactregistry.reader on the repository in use only.
 	changed := addBinding(&policy.Bindings, "roles/artifactregistry.reader", member)
-	// Storage access for revisions that move snapshots with atelet's own
-	// identity; see bucketGrants.
-	// TODO: This shouldn't be a project-level binding.
-	if cfg.AteletSnapshotAccess && addBinding(&policy.Bindings, "roles/storage.objectAdmin", member) {
-		changed = true
-	}
 
 	if !changed {
 		slog.Info("IAM policy already has required atelet permissions. Skipping update.", slog.String("project", cfg.ProjectID))
@@ -177,6 +172,7 @@ var iamCmd = &cobra.Command{
 		atelet, _ := cmd.Flags().GetBool("atelet")
 		transferAccount, _ := cmd.Flags().GetBool("transfer-service-account")
 		bucketBindings, _ := cmd.Flags().GetBool("bucket-bindings")
+		warnRemovedAteletSnapshotAccessEnv()
 
 		if err := validateIamFlags(cmd.Context(), &cfg, bucketBindings); err != nil {
 			return err
