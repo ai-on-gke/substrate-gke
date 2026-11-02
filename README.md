@@ -130,10 +130,20 @@ cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
 rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
 whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
-runs upstream's `hack/install-microvm-deps.sh --install` to assemble those five assets,
-upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0, in
-`<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
-points at them.
+stages those five assets and applies a cluster-wide `SandboxConfig` named `microvm` that
+points at them. How it stages them depends on the Substrate tree:
+
+- **Up to v1.0.0-rc.1** (the current pin): upstream's `hack/install-microvm-deps.sh
+  --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
+  snapshot bucket up to Substrate v0.5.0, in `<bucket>-assets` after).
+- **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
+  on** (upstream `main` and `release-1.0`, so from v1.0.0-rc.2): `ate-setup deploy
+  sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets
+  for both amd64 and arm64 and uploads them to `<bucket>-assets` under
+  `microvm-assets/<arch>/<sha256>`. It passes the control-plane step's settings and image
+  flags too, because every ate-setup deploy replaces the install record that `--upgrade`
+  reads. The control-plane step passes `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a
+  gVisor-only install stages nothing.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
 
@@ -196,15 +206,27 @@ upstream's `demos/counter/counter-microvm.yaml.tmpl` and
 > Until node provisioning lands, bring your own KVM-capable pool — a node type with
 > nested virtualization enabled, or bare metal, where KVM is native.
 
-**Upgrading and teardown:** The upgrade flow (`--upgrade`) updates the control plane and
-gVisor `SandboxConfig`, but does not re-stage `kata-assets/`; after upgrading a cluster
-that uses micro-VM across a Substrate revision bump, target the cluster's kube context and
-re-run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket> hack/install-microvm-deps.sh --install`
-so the bucket assets and `microvm` `SandboxConfig` digests stay in sync. Full teardown
-(`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all `SandboxConfig`
-resources automatically; if you want to drop micro-VM without tearing anything else down,
-run `NO_DEV_ENV=1 hack/install-microvm-deps.sh --delete` against the cluster's kube
-context (the staged assets in `kata-assets/` remain inert in the bucket).
+**Upgrading and teardown:** After upgrading a cluster that uses micro-VM across a
+Substrate revision bump, the bucket assets and `microvm` `SandboxConfig` digests must be
+re-staged from the new tree:
+
+- From agent-substrate/substrate#2092 on: the runbook's `deploy sandboxconfig --config
+  ~/ate-upgrade/new.yaml` step re-stages them, because the install record lists both
+  sandbox classes. Assets are content-addressed, so this is safe to repeat. To re-stage
+  by hand, run `go run ./cmd/ate-setup deploy sandboxconfig --config <record>
+  --sandbox-classes=gvisor,microvm` from the new tree, with the cluster's ate-setup
+  record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster) for where
+  it is). Without `--config`, the run replaces that record with one that lacks the
+  control plane's settings.
+- Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. Target the cluster's kube
+  context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
+  hack/install-microvm-deps.sh --install`.
+
+Full teardown (`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all
+`SandboxConfig` resources automatically. To drop micro-VM without tearing anything else
+down, delete the `microvm` `SandboxConfig` (`kubectl delete sandboxconfig microvm` from
+#2092 on, or `NO_DEV_ENV=1 hack/install-microvm-deps.sh --delete` up to v1.0.0-rc.1). The
+staged assets (`microvm-assets/` or `kata-assets/`) stay in the bucket, unused.
 
 ## Reaching actors through the ingress router
 

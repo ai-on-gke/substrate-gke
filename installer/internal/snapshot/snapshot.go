@@ -889,7 +889,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree(b.withOverlay("go run ./cmd/ate-setup deploy ate-system" + argv)),
-		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv()),
+		Env:     append(b.controlPlaneEnv(st), sandboxClassesEnv(state.SandboxGVisor)),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -897,6 +897,25 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 			`daemon set "atelet" successfully rolled out`,
 		),
 	}
+}
+
+// controlPlaneEnv is the environment of every ate-setup deploy. Each deploy
+// replaces ate-setup's install record, which the upgrade flow reads, so a
+// partial deploy must pass the same settings as the full one.
+func (b *Builder) controlPlaneEnv(st *state.Setup) []string {
+	return slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv())
+}
+
+// sandboxClassesEnv selects the default SandboxConfigs ate-setup deploys.
+//
+// From agent-substrate/substrate#2092, ate-setup defaults to gvisor,microvm
+// and stages the micro-VM assets on every deploy, which needs gcloud and the
+// asset bucket even on a cluster that never runs a micro-VM. DeployAteSystem
+// passes gvisor alone, and InstallMicroVMDeps adds microvm once the user picks
+// it and the KVM check has run. Older trees ignore the variable, as they
+// ignore ATE_CREDENTIAL_PROVIDER.
+func sandboxClassesEnv(classes ...string) string {
+	return "ATE_INSTALL_SANDBOX_CLASSES=" + strings.Join(classes, ",")
 }
 
 // defaultCredentialProvider is the egress credential provider the control
@@ -1098,7 +1117,7 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 			Display:          "deploy demo counter-microvm",
 			DisplayIsSummary: true,
 			Argv:             b.inTree(strings.Join(lines, "\n")),
-			Env:              b.microVMEnv(st),
+			Env:              microVMEnv(b.env(st)),
 			SimLines: append(b.fetchSimLines(),
 				"[step]: deploy_demo_counter_microvm",
 				"workerpool.ate.dev/counter-microvm created",
@@ -1119,8 +1138,11 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	}
 }
 
-// microVMEnv is env plus the two settings upstream's micro-VM script reads
-// that no other step needs.
+// microVMEnv is base (env or controlPlaneEnv) plus the two settings
+// upstream's micro-VM script reads that no other step needs. ate-setup's port
+// of the script
+// (agent-substrate/substrate#2092) ignores ARCH, since it stages both amd64
+// and arm64 on GKE, and reads ATE_INSTALL_KIND the same way.
 //
 // ARCH is pinned rather than left to the script's own resolution, which reads
 // KO_DEFAULTPLATFORMS and falls back to the workstation's `go env GOARCH`.
@@ -1142,42 +1164,82 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // `kubectl apply`, after the assets were assembled and uploaded. Blank, both
 // use that KUBECONFIG's current context — install-ate.sh re-fetches the same
 // credentials into it first, which is redundant but harmless.
-func (b *Builder) microVMEnv(st *state.Setup) []string {
-	return append(b.env(st), "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
+func microVMEnv(base []string) []string {
+	return append(base, "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
 }
 
+// legacyMicroVMScript is upstream's shell micro-VM installer. Its presence in
+// the checkout selects how InstallMicroVMDeps stages the assets:
+// agent-substrate/substrate#2092 ported it into ate-setup (`deploy
+// sandboxconfig --sandbox-classes`) and deleted it in the same commit, so the
+// script and the flag never coexist. The pinned Commit (v1.0.0-rc.1) predates
+// #2092 and still has the script; upstream main and release-1.0 do not.
+const legacyMicroVMScript = "hack/install-microvm-deps.sh"
+
+// microVMATESetup stages the micro-VM assets and applies the `microvm`
+// SandboxConfig on trees from agent-substrate/substrate#2092 on. It stages
+// both amd64 and arm64 into gs://<BUCKET_NAME>-assets under
+// microvm-assets/<arch>/<sha256> with gcloud. The sandbox classes come from
+// sandboxClassesEnv.
+const microVMATESetup = "go run ./cmd/ate-setup deploy sandboxconfig"
+
 // InstallMicroVMDeps stages the micro-VM sandbox assets and applies the
-// cluster-wide `microvm` SandboxConfig, using upstream's
-// hack/install-microvm-deps.sh from the pinned checkout.
+// cluster-wide `microvm` SandboxConfig from the pinned checkout: with
+// ate-setup where the tree has it (see legacyMicroVMScript), else with
+// upstream's hack/install-microvm-deps.sh.
 //
-// This is a separate step because upstream makes it one: ate-setup applies the
-// gVisor SandboxConfig unconditionally, but the micro-VM one is opt-in and
-// needs its five sandbox binaries — cloud-hypervisor, virtiofsd, the guest
-// kernel, the guest rootfs and the base kata config — assembled and uploaded
-// under kata-assets/ first, because the runtime fetches them from the bucket
-// at boot rather than carrying them in the worker image.
+// This is a separate step because micro-VM is opt-in: deploy ate-system is
+// kept to gVisor (see sandboxClassesEnv), and the micro-VM SandboxConfig
+// needs its sandbox binaries — cloud-hypervisor, virtiofsd, the guest kernel,
+// the guest rootfs and the base kata config — staged in the asset bucket
+// first, because the runtime fetches them from the bucket at boot rather than
+// carrying them in the worker image.
 //
-// The script is driven rather than reimplemented in Go: it computes the staged
-// virtiofsd's sha256 and injects it into the manifest at apply time, which
-// cannot be pinned ahead of time because the arm64 binary is built from source
-// and its bytes vary by toolchain.
+// Upstream's tooling is driven rather than reimplemented in Go: it pins the
+// staged assets' sha256 digests into the SandboxConfig at apply time.
 //
 // Credentials are fetched into a throwaway KUBECONFIG the same way the probes
-// do. The script refuses to run without a resolvable context — deliberately,
-// since it would otherwise discover the problem only after assembling and
+// do. Both paths refuse to run without a resolvable context — deliberately,
+// since they would otherwise discover the problem only after assembling and
 // uploading everything — and an install must target the cluster the wizard
 // chose, never whatever context happens to be ambient.
+//
+// Every ate-setup deploy replaces the install record the upgrade flow reads,
+// so the ate-setup branch passes the control-plane step's settings and image
+// flags, and records both sandbox classes. The script ignores them.
+//
+// TODO(#99): Drop the script branch, ARCH in microVMEnv, and the
+// sha256sum/zstd/unzip entries in doctor.MicroVMTools once Commit is past
+// agent-substrate/substrate#2092 and older commits typed into the images step
+// no longer need them.
 func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
+	display, argv := imageArgs(st)
 	lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
-	lines = append(lines, "hack/install-microvm-deps.sh --install")
+	// Display is fixed before the tree is inspected, so each branch says
+	// which one ran: that line is how the log tells them apart.
+	lines = append(lines,
+		"if [ -f "+legacyMicroVMScript+" ]; then",
+		"  echo "+ShellQuote("Staging with: "+legacyMicroVMScript+" --install"),
+		"  "+legacyMicroVMScript+" --install",
+		"else",
+		"  echo "+ShellQuote("Staging with: "+microVMATESetup+display),
+		"  "+microVMATESetup+argv,
+		"fi",
+	)
+	env := microVMEnv(b.controlPlaneEnv(st))
 	return execx.Spec{
-		Label:   "install-microvm-deps --install",
-		Display: "./hack/install-microvm-deps.sh --install",
-		Argv:    b.inTree(strings.Join(lines, "\n")),
-		Env:     b.microVMEnv(st),
+		Label: "stage micro-VM assets",
+		// Which command runs is decided in the script, so the title names
+		// the step and the script prints "Staging with: …".
+		Display:          "stage micro-VM assets and apply the microvm SandboxConfig",
+		DisplayIsSummary: true,
+		Argv:             b.inTree(strings.Join(lines, "\n")),
+		Env:              append(env, sandboxClassesEnv(state.SandboxGVisor, state.SandboxMicroVM)),
+		// The dry run follows the pinned Commit, which still has the script.
 		SimLines: append(b.fetchSimLines(),
+			"Staging with: "+legacyMicroVMScript+" --install",
 			"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
-			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"/kata-assets/ ...",
+			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"-assets/kata-assets/ ...",
 			"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
 			"sandboxconfig.ate.dev/microvm created",
 			"[install-microvm-deps]: Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm).",

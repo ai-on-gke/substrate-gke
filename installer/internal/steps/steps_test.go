@@ -158,6 +158,23 @@ func TestMicroVMDepsChecklistTracksInstallOutput(t *testing.T) {
 	}
 }
 
+// From agent-substrate/substrate#2092 the same phases come from ate-setup,
+// which spells the assets "microVM" and stages under microvm-assets/.
+func TestMicroVMDepsChecklistTracksATESetupOutput(t *testing.T) {
+	items := MicroVMDeps(fetchLabel)
+	lines := []string{
+		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
+		"Assembling microVM assets into bin/microvm-assets/amd64 (arch=amd64)...",
+		"Uploading assets to gs://ate-snapshots-p-c-z-assets/microvm-assets/ ...",
+		"Applying microvm SandboxConfig from manifests/ate-install/sandboxconfig-microvm.yaml.tmpl...",
+	}
+	for i := range lines {
+		if got := feed(items, lines[:i+1]); got != i {
+			t.Fatalf("after %d lines active = %d, want %d", i+1, got, i)
+		}
+	}
+}
+
 // A second install finds the asset set already built and says so instead of
 // assembling. The row has to light either way: it is the step's slowest phase,
 // and an unlit row on the fast path reads as a stall.

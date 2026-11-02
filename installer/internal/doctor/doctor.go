@@ -290,6 +290,8 @@ func gkeAuthPluginFix(sdkRoot string) string {
 // MicroVMTools are the host utilities the micro-VM path needs beyond the
 // always-checked ones: sha256sum, zstd and unzip for upstream's asset
 // scripts, and make and jq for the demo on older trees such as v0.1.0.
+// Trees from agent-substrate/substrate#2092 on stage assets in ate-setup and
+// need none of them; see the TODO on snapshot.InstallMicroVMDeps.
 var MicroVMTools = []string{"sha256sum", "zstd", "unzip", "jq", "make"}
 
 // MissingMicroVMTools returns whichever of MicroVMTools are not on PATH.
