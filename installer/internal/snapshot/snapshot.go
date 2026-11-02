@@ -1173,7 +1173,7 @@ func microVMEnv(base []string) []string {
 // agent-substrate/substrate#2092 ported it into ate-setup (`deploy
 // sandboxconfig --sandbox-classes`) and deleted it in the same commit, so the
 // script and the flag never coexist. The pinned Commit (v1.0.0-rc.1) predates
-// #2092 and still has the script; core main does not.
+// #2092 and still has the script; upstream main and release-1.0 do not.
 const legacyMicroVMScript = "hack/install-microvm-deps.sh"
 
 // microVMATESetup stages the micro-VM assets and applies the `microvm`

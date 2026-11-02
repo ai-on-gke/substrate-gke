@@ -137,12 +137,13 @@ points at them. How it stages them depends on the Substrate tree:
   --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
   snapshot bucket up to Substrate v0.5.0, in `<bucket>-assets` after).
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
-  on** (core `main`): `ate-setup deploy sandboxconfig` with
-  `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets for both amd64 and
-  arm64 and uploads them to `<bucket>-assets` under `microvm-assets/<arch>/<sha256>`. It
-  passes the control-plane step's settings and image flags too, because every ate-setup
-  deploy replaces the install record that `--upgrade` reads. The control-plane step passes
-  `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a gVisor-only install stages nothing.
+  on** (upstream `main` and `release-1.0`, so from v1.0.0-rc.2): `ate-setup deploy
+  sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets
+  for both amd64 and arm64 and uploads them to `<bucket>-assets` under
+  `microvm-assets/<arch>/<sha256>`. It passes the control-plane step's settings and image
+  flags too, because every ate-setup deploy replaces the install record that `--upgrade`
+  reads. The control-plane step passes `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a
+  gVisor-only install stages nothing.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
 
@@ -211,7 +212,12 @@ re-staged from the new tree:
 
 - From agent-substrate/substrate#2092 on: the runbook's `deploy sandboxconfig --config
   ~/ate-upgrade/new.yaml` step re-stages them, because the install record lists both
-  sandbox classes. Assets are content-addressed, so this is safe to repeat.
+  sandbox classes. Assets are content-addressed, so this is safe to repeat. To re-stage
+  by hand, run `go run ./cmd/ate-setup deploy sandboxconfig --config <record>
+  --sandbox-classes=gvisor,microvm` from the new tree, with the cluster's ate-setup
+  record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster) for where
+  it is). Without `--config`, the run replaces that record with one that lacks the
+  control plane's settings.
 - Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. Target the cluster's kube
   context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
   hack/install-microvm-deps.sh --install`.
