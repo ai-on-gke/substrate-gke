@@ -80,23 +80,54 @@ func newInput(value, placeholder string) textinput.Model {
 	return in
 }
 
-// enterRelease offers the pin's published release: upstream's release
-// registry at the release tag naming the pin (see snapshot.ReleaseRepo). All
-// three fields are editable, so a team installs its own published build, a
-// staging registry or a private rebuild by typing them here.
+// enterRelease offers a registry and tag (see offeredImages): by default the
+// pin's published release, upstream's release registry at the release tag
+// naming the pin (see snapshot.ReleaseRepo). All three fields are editable,
+// so a team installs its own published build, a staging registry or a
+// private rebuild by typing them here.
 //
 // The commit the images were built from comes with them, because ate-setup
 // reads the manifests from the Substrate tree at that commit. It defaults to
 // the pin, which only fits images built from the pin.
 func (s *imagesScreen) enterRelease() tea.Cmd {
+	registry, tag := s.offeredImages()
 	s.mode, s.focus, s.errText, s.note = "release", 0, "", ""
 	s.labels = []string{"Image registry", "Image tag", "Commit the images were built from"}
 	s.fields = []textinput.Model{
-		newInput(snapshot.ReleaseRepo, snapshot.ReleaseRepo),
-		newInput(snapshot.ReleaseVersion, "the tag your images were published under"),
+		newInput(registry, snapshot.ReleaseRepo),
+		newInput(tag, "the tag your images were published under"),
 		newInput(snapshot.Commit, snapshot.Commit),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
+}
+
+// offeredImages is the registry and tag the pre-built track starts at. A
+// registry the run already holds wins: the screen is rebuilt on every entry,
+// so coming back to the step keeps what was typed. On the upgrade track the
+// next registry is the one the cluster's record installs from, since
+// PrepareUpgrade writes the offered registry into new.yaml and a cluster
+// installed from a mirror upgrades from that mirror. Otherwise it is
+// upstream's release registry. The release tag is offered only with the
+// release registry; any other registry's tag is the user's to give.
+func (s *imagesScreen) offeredImages() (registry, tag string) {
+	st := s.deps.Setup
+	if st.ImageRepo != "" {
+		return st.ImageRepo, st.ImageTag
+	}
+	if st.Upgrade {
+		if record, err := snapshot.RecordPath(st); err == nil {
+			if repo, _ := snapshot.RecordImageRepo(record); repo != "" {
+				registry = repo
+			}
+		}
+	}
+	if registry == "" {
+		registry = snapshot.ReleaseRepo
+	}
+	if registry == snapshot.ReleaseRepo {
+		tag = snapshot.ReleaseVersion
+	}
+	return registry, tag
 }
 
 // enterSource offers a revision of the Substrate repository, prefilled with
@@ -329,11 +360,12 @@ func (s *imagesScreen) View(w int) string {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
 	case s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
-	// The offered commit is the one the offered tag was built from, so another
-	// registry or tag with it runs behind manifests that may not match.
-	case s.mode == "release" && s.value(2) == snapshot.Commit &&
-		(s.value(0) != snapshot.ReleaseRepo || s.value(1) != snapshot.ReleaseVersion):
-		b.WriteString(theme.Warning.Render("The commit below is the one " + snapshot.ReleaseRepo + ":" + snapshot.ReleaseVersion + "\nwas built from. Give the commit these images were built from: ate-setup\nreads the manifests from it."))
+	// The offered commit is the one the release tag was built from, so another
+	// tag with it runs behind manifests that may not match. The registry is
+	// left out: a mirror of the release carries the same tag, built from the
+	// same commit.
+	case s.mode == "release" && s.value(2) == snapshot.Commit && s.value(1) != snapshot.ReleaseVersion:
+		b.WriteString(theme.Warning.Render("The commit below is the one the " + snapshot.ReleaseVersion + " release was built\nfrom. If these images were not built from it, give the commit they were:\nate-setup reads the manifests from it."))
 	case s.mode == "release":
 		b.WriteString(theme.Subtle.Render("Defaults to the " + snapshot.ReleaseVersion + " release; change any of these to install your own\nbuild. Every image is pulled at this tag and pinned to the digest it names,\nand ate-setup reads the manifests from the commit."))
 	default:
@@ -342,11 +374,20 @@ func (s *imagesScreen) View(w int) string {
 	// An unmanaged root is a checkout the user handed us with --substrate-root,
 	// and it is used exactly as it stands: nothing is fetched, so the commit
 	// asked for above is recorded and then not honoured. Say so, rather than
-	// echoing back a revision the install will quietly ignore.
+	// echoing back a revision the install will quietly ignore. On the
+	// pre-built track the manifests come from that tree too, so the images
+	// have to match it, and the offered release only does if the tree is at
+	// the pin.
 	if !s.deps.Builder.Managed {
-		b.WriteString("\n\n" + theme.Warning.Render(
-			"--substrate-root is set, so the install builds "+s.deps.Builder.Root+"\n"+
-				"as it stands. The commit above is not fetched."))
+		note := "--substrate-root is set, so the install builds " + s.deps.Builder.Root + "\n" +
+			"as it stands. The commit above is not fetched."
+		if s.mode == "release" {
+			note = "--substrate-root is set, so the install reads the manifests from\n" +
+				s.deps.Builder.Root + " as it stands. The commit above is not\n" +
+				"fetched, and the images have to have been built from that tree: the\n" +
+				snapshot.ReleaseVersion + " release only matches a tree at " + snapshot.ShortCommit() + "."
+		}
+		b.WriteString("\n\n" + theme.Warning.Render(note))
 	}
 	return b.String()
 }

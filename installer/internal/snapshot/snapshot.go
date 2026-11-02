@@ -72,9 +72,7 @@ const (
 
 	// ReleaseRepo is where upstream's release workflow publishes the images
 	// of each release tag, every image tagged with the release tag. The
-	// images step offers it as the pre-built registry. It replaces the
-	// deprecated GKE release registry
-	// (us-docker.pkg.dev/gke-substrate-release/substrate).
+	// images step offers it as the pre-built registry.
 	//
 	// A registry is read-only to an install: images are pulled from it and
 	// never pushed to it, which is why installing pre-built images leaves
@@ -88,7 +86,8 @@ const (
 	// ReleaseVersion is the release tag naming Commit, whose images
 	// ReleaseRepo holds; the images step offers it as the pre-built tag. It
 	// moves with Commit, because the manifests read out of that tree have to
-	// match the images this tag names.
+	// match the images this tag names. `make substrate-pin-check` fails when
+	// the tag does not name Commit.
 	//
 	// Both are defaults, not limits: the images step takes any registry and
 	// tag, along with the commit those images were built from.

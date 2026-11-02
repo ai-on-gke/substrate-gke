@@ -320,8 +320,9 @@ For source builds using the default registry, the installer creates `ate-images`
 <summary><strong>Other details worth knowing</strong> (click to expand)</summary>
 
 - `ate-setup` pins every image to the digest its tag resolves to — nothing is built or pushed for a pre-built install.
+- Coming back to the images step keeps the registry and tag you typed. On the upgrade track, a cluster installed from another registry (a mirror, say) is offered that registry rather than the release one, with the tag left for you to give.
 - The tag doubles as the Substrate version that ate-setup records. The wizard checks at the prompt that it is a valid image tag. A tag carrying its digest (`v0.1.0-gke.1@sha256:…`) is fine — the version is the tag alone.
-- For build-from-source, a checkout of your own (fork included) is installed with `--substrate-root` instead — see [How Substrate itself is obtained](#how-substrate-itself-is-obtained).
+- For build-from-source, a checkout of your own (fork included) is installed with `--substrate-root` instead — see [How Substrate itself is obtained](#how-substrate-itself-is-obtained). With pre-built images, `--substrate-root` supplies the manifests, so the images have to have been built from that tree; the default release only matches a tree at the pin.
 - Whatever you name is resolved to an exact commit *before* the install starts, and checked against the remote via a filtered shallow fetch — so a naming mismatch is caught at the prompt, not ten minutes into an install.
 
 </details>

@@ -3557,7 +3557,7 @@ func TestImagesScreenOffersTheReleaseAndThePin(t *testing.T) {
 	if scr.value(0) != snapshot.ReleaseRepo || scr.value(1) != snapshot.ReleaseVersion || scr.value(2) != snapshot.Commit {
 		t.Fatalf("pre-built fields = %q, %q, %q; want %s, %s, the pin", scr.value(0), scr.value(1), scr.value(2), snapshot.ReleaseRepo, snapshot.ReleaseVersion)
 	}
-	if v := scr.View(120); strings.Contains(v, "was built from. Give the commit") {
+	if v := scr.View(120); strings.Contains(v, mismatchWarning) {
 		t.Errorf("the offered release warns about its own commit:\n%s", v)
 	}
 	scr.fields[0].SetValue("")
@@ -3567,12 +3567,18 @@ func TestImagesScreenOffersTheReleaseAndThePin(t *testing.T) {
 	if app.mach.Current() != state.Images || !strings.Contains(scr.errText, "registry is required") || scr.focus != 0 {
 		t.Fatalf("an empty registry was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
 	}
-	// Another registry with the pin's commit is the mismatch the screen
-	// warns about.
+	// A mirror of the release carries the same tag, built from the same
+	// commit, so the pin's commit is right for it.
 	scr.errText = ""
 	scr.fields[0].SetValue("registry.example.com/substrate")
-	if v := scr.View(120); !strings.Contains(v, "was built from. Give the commit") {
-		t.Errorf("another registry with the pin's commit gave no warning:\n%s", v)
+	if v := scr.View(120); strings.Contains(v, mismatchWarning) {
+		t.Errorf("a mirror of the release warns about the pin's commit:\n%s", v)
+	}
+	// Another tag with the pin's commit is the mismatch the screen warns
+	// about.
+	scr.fields[1].SetValue("v0.6.0")
+	if v := scr.View(120); !strings.Contains(v, mismatchWarning) {
+		t.Errorf("another tag with the pin's commit gave no warning:\n%s", v)
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the choice
@@ -3580,6 +3586,75 @@ func TestImagesScreenOffersTheReleaseAndThePin(t *testing.T) {
 	pump(t, app, key("enter")) // build from source
 	if got := scr.value(0); got != snapshot.Commit {
 		t.Errorf("source revision = %q, want the pin %s", got, snapshot.Commit)
+	}
+}
+
+// mismatchWarning is the images step's warning that the offered commit may
+// not be the one the given images were built from.
+const mismatchWarning = "If these images were not built from it"
+
+// The images screen is rebuilt on every entry, so the pre-built track has to
+// start from what the run already holds: coming back after typing a mirror
+// must not offer the release again, or enter-through would install from it.
+func TestImagesScreenKeepsTheTypedRegistry(t *testing.T) {
+	app := testApp(t)
+	st := app.deps.Setup
+	st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
+
+	scr := newImagesScreen(app.deps)
+	scr.enterRelease()
+	if scr.value(0) != testImageRepo || scr.value(1) != testImageTag {
+		t.Errorf("re-entered pre-built fields = %q, %q; want %s, %s", scr.value(0), scr.value(1), testImageRepo, testImageTag)
+	}
+}
+
+// On the upgrade track PrepareUpgrade writes the offered registry into
+// new.yaml, so a cluster installed from a mirror is offered that mirror, with
+// its tag left to the user. A record of a build from source has no registry
+// and gets the release.
+func TestImagesScreenOffersTheRecordsRegistryOnUpgrade(t *testing.T) {
+	const mirror = "us-docker.pkg.dev/acme/mirror"
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
+
+	for name, tc := range map[string]struct {
+		record    string
+		repo, tag string
+	}{
+		"mirror": {"images:\n  repo: " + mirror + "\n  tag: v0.6.0\n", mirror, ""},
+		"source": {"ko:\n  dockerRepo: us-west1-docker.pkg.dev/acme/ate-images\n", snapshot.ReleaseRepo, snapshot.ReleaseVersion},
+	} {
+		app := testApp(t)
+		st := app.deps.Setup
+		st.Upgrade = true
+		st.ProjectID, st.Zone, st.ClusterName = "acme", "us-west1-c", "ate-"+name
+		record, err := snapshot.RecordPath(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(record, []byte(tc.record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		scr := newImagesScreen(app.deps)
+		scr.enterRelease()
+		if scr.value(0) != tc.repo || scr.value(1) != tc.tag {
+			t.Errorf("%s: upgrade pre-built fields = %q, %q; want %q, %q", name, scr.value(0), scr.value(1), tc.repo, tc.tag)
+		}
+	}
+}
+
+// With --substrate-root the manifests come from the user's tree, so the
+// pre-built track has to say the images must match it: every field can stay
+// at its default and still pair that tree with the release's images.
+func TestImagesScreenSaysUnmanagedImagesMustMatchTheTree(t *testing.T) {
+	app := testApp(t) // testApp's builder is an unmanaged root
+	scr := newImagesScreen(app.deps)
+	scr.enterRelease()
+	if v := scr.View(120); !strings.Contains(v, "the images have to have been built from that tree") {
+		t.Errorf("the unmanaged-root note does not say the images must match it:\n%s", v)
 	}
 }
 
