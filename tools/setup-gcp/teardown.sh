@@ -121,6 +121,12 @@ transfer_service_account() {
   echo "${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}@${PROJECT_ID}.iam.gserviceaccount.com"
 }
 
+# node_service_account prints the node service account's email, from
+# NODE_GSA_NAME as setup-gcp builds it.
+node_service_account() {
+  echo "${NODE_GSA_NAME:-ate-gke-node}@${PROJECT_ID}.iam.gserviceaccount.com"
+}
+
 function usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
@@ -132,8 +138,9 @@ function usage() {
   echo "Project-wide options. These affect every Substrate cluster in the project:"
   echo "  --delete-dashboards                   Delete the Substrate monitoring dashboards"
   echo "  --delete-transfer-service-account     Delete the snapshot transfer service account"
-  echo "  --revoke-atelet-permissions           Revoke atelet's project-level IAM bindings"
-  echo "  --revoke-gke-node-permissions         Revoke GKE nodes permission to pull images, on every cluster that uses the default compute service account"
+  echo "  --revoke-atelet-permissions           Revoke the project-wide grants older installs gave atelet"
+  echo "  --revoke-gke-node-permissions         Revoke the project-wide image pull grants older installs gave the default compute service account"
+  echo "  --delete-node-service-account         Delete the GKE node service account and its project role (after the clusters that use it)"
   echo "  --all                                 Run every step above (reverse order of setup)"
   echo "  --delete-repository                   Delete the Artifact Registry repository and its images (not part of --all)"
   exit 1
@@ -251,6 +258,26 @@ delete_transfer_service_account() {
   echo "Deleting the snapshot transfer service account..."
   gcloud_step "delete transfer service account" \
     iam service-accounts delete "$(transfer_service_account)" \
+    --project="${PROJECT_ID}" --quiet
+}
+
+# Delete the GKE node service account (Reverse of ensureNodeServiceAccount).
+# Its project binding is removed first, so no binding is left naming a deleted
+# account. Grants on image repositories go with the repository, or name the
+# deleted account until IAM cleans them up. Nodes still running as the account
+# lose their logging, monitoring and image pulls, so --all runs this after
+# deleting the cluster.
+delete_node_service_account() {
+  require PROJECT_ID
+  echo "Deleting the GKE node service account..."
+  gcloud_step "revoke node service account role" \
+    projects remove-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:$(node_service_account)" \
+    --role=roles/container.defaultNodeServiceAccount \
+    --condition=None \
+    --quiet
+  gcloud_step "delete node service account" \
+    iam service-accounts delete "$(node_service_account)" \
     --project="${PROJECT_ID}" --quiet
 }
 
@@ -378,6 +405,7 @@ for arg in "$@"; do
     --delete-gvisor-node-pool) steps+=(delete_gvisor_node_pool) ;;
     --delete-cluster) steps+=(delete_cluster) ;;
     --delete-dashboards) steps+=(delete_dashboards) ;;
+    --delete-node-service-account) steps+=(delete_node_service_account) ;;
     --delete-repository)
       steps+=(delete_repository)
       delete_repository_requested=true
@@ -388,7 +416,7 @@ for arg in "$@"; do
       ;;
     --all)
       all_requested=true
-      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}")
+      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}" delete_node_service_account)
       ;;
     *) usage ;;
   esac

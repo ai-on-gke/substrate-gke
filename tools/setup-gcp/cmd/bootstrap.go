@@ -25,7 +25,7 @@ import (
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
 	Short: "Fully bootstrap the GCP environment",
-	Long:  `Enables APIs, creates the cluster, the snapshot and asset buckets, and the snapshot transfer service account, grants IAM permissions, and creates dashboards. Use --create-repository to also create an image repository for source builds.`,
+	Long:  `Enables APIs, creates the node service account and the cluster, the snapshot and asset buckets, and the snapshot transfer service account, grants IAM permissions, and creates dashboards. Use --create-repository to also create an image repository for source builds.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		warnDeprecatedMachineTypeEnv(cmd)
@@ -45,7 +45,7 @@ var bootstrapCmd = &cobra.Command{
 		}
 
 		slog.Info("Starting full bootstrap...")
-		total := 8
+		total := 9
 		if cfg.CreateArtifactRepository {
 			total++
 		}
@@ -67,6 +67,11 @@ var bootstrapCmd = &cobra.Command{
 			}
 		}
 
+		logStep("Creating the GKE node service account...")
+		if err := ensureNodeServiceAccount(ctx, &cfg); err != nil {
+			return err
+		}
+
 		logStep("Creating GKE Cluster...")
 		if err := createClusterIdempotent(ctx, &cfg); err != nil {
 			return err
@@ -78,7 +83,13 @@ var bootstrapCmd = &cobra.Command{
 		}
 
 		logStep("Granting GKE Node permissions...")
-		if err := grantGkeNodePermissions(ctx, &cfg); err != nil {
+		// The cluster's own node pools, so a cluster the user brought can
+		// pull too, whatever its nodes run as.
+		nodeAccounts, err := readClusterNodeServiceAccounts(ctx, &cfg)
+		if err != nil {
+			return err
+		}
+		if err := grantNodeImagePull(ctx, &cfg, nodeAccounts); err != nil {
 			return err
 		}
 
@@ -117,6 +128,7 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&cfg.Network, "network", getEnv("NETWORK", "default"), "VPC network name [env: NETWORK]")
 	bootstrapCmd.Flags().StringVar(&cfg.Subnetwork, "subnetwork", getEnv("SUBNETWORK", "default"), "VPC subnetwork name [env: SUBNETWORK]")
 	bootstrapCmd.Flags().StringVar(&cfg.MachineType, "machine-type", resolveMachineTypeDefault(), "Machine type for the node pool [env: NODE_MACHINE_TYPE]")
+	addNodeGSANameFlag(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&cfg.EnableNestedVirtualization, "enable-nested-virtualization", getEnv("ENABLE_NESTED_VIRTUALIZATION", true), "Create the node pool with nested virtualization, exposing /dev/kvm for micro-VM workers; needs a machine type that supports it. Turn off with --enable-nested-virtualization=false [env: ENABLE_NESTED_VIRTUALIZATION]")
 	bootstrapCmd.Flags().Int32Var(&cfg.BootDiskSizeGB, "boot-disk-size", getEnv("BOOT_DISK_SIZE_GB", int32(0)), "Boot disk size in GB for the node pool; 0 = GKE default (100 GB) [env: BOOT_DISK_SIZE_GB]")
 	bootstrapCmd.Flags().StringVar(&cfg.BootDiskType, "boot-disk-type", getEnv("BOOT_DISK_TYPE", ""), "Boot disk type for the node pool; empty = GKE default, or hyperdisk-balanced when provisioned IOPS/throughput are set [env: BOOT_DISK_TYPE]")

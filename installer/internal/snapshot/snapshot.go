@@ -806,6 +806,7 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 		phases = append(phases, "Creating Artifact Registry repository...")
 	}
 	phases = append(phases,
+		"Creating the GKE node service account...",
 		"Creating GKE Cluster...",
 		"Creating GCS buckets for snapshots and micro-VM assets...",
 		"Granting GKE Node permissions...",
@@ -819,11 +820,19 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 		lines = append(lines, fmt.Sprintf("Step %d/%d: %s", i+1, len(phases), phase))
 	}
 	run := "go -C " + ShellQuote(b.SetupGCP) + " run . bootstrap"
+	env := b.env(st)
+	if st.Prebuilt() {
+		// Bootstrap grants or prints the nodes' image pull access for the
+		// registry the images come from: KO_DOCKER_REPO for a source build
+		// (see env), and this for pre-built images. Only bootstrap gets it;
+		// ate-setup takes the registry from --image-repo (see imageArgs).
+		env = append(env, "ATE_IMAGE_REPO="+st.ImageRepo)
+	}
 	return execx.Spec{
 		Label:    "setup-gcp bootstrap",
 		Display:  run,
 		Argv:     b.inTree(run),
-		Env:      b.env(st),
+		Env:      env,
 		SimLines: append(lines, "Bootstrap completed successfully."),
 	}
 }

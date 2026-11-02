@@ -100,6 +100,15 @@ func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateCl
 		LinuxNodeConfig: &containerpb.LinuxNodeConfig{
 			Sysctls: maps.Clone(requiredNodeSysctls),
 		},
+		// The node service account holds only what nodes need (see
+		// ensureNodeServiceAccount), so the broad scope GKE recommends with a
+		// custom service account grants nothing beyond its IAM roles.
+		ServiceAccount: nodeGSAEmail(cfg),
+		OauthScopes:    []string{"https://www.googleapis.com/auth/cloud-platform"},
+		ShieldedInstanceConfig: &containerpb.ShieldedInstanceConfig{
+			EnableSecureBoot:          true,
+			EnableIntegrityMonitoring: true,
+		},
 	}
 	if cfg.EnableNestedVirtualization {
 		nodeConfig.AdvancedMachineFeatures = &containerpb.AdvancedMachineFeatures{
@@ -442,6 +451,17 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 			slog.String("remedy", "recreate the cluster, or add a node pool with nested virtualization"))
 	}
 
+	// A pool's service account is also fixed at creation. Bootstrap still
+	// creates the node service account and its grant for an existing cluster,
+	// but its pools keep running as whatever they ran as before.
+	if pools := poolsNotOnNodeServiceAccount(cluster, cfg); len(pools) > 0 {
+		slog.Warn("Node pools don't run as the node service account; it only applies to node pools this tool creates",
+			slog.String("cluster", cfg.ClusterName),
+			slog.String("node_pools", strings.Join(pools, ",")),
+			slog.String("node_service_account", nodeGSAEmail(cfg)),
+			slog.String("remedy", "add a node pool with --service-account="+nodeGSAEmail(cfg)+" --shielded-secure-boot --shielded-integrity-monitoring, move workloads to it, and delete the old pool"))
+	}
+
 	if !nodeSysctlsConfigured(cluster) {
 		slog.Warn("Cluster has no node pool with high-density node sysctls; create cluster only sets them on a cluster it creates",
 			slog.String("cluster", cfg.ClusterName),
@@ -607,6 +627,11 @@ var clusterCmd = &cobra.Command{
 		if err := resolveProjectID(ctx, &cfg); err != nil {
 			return err
 		}
+		// A new cluster's nodes run as this account, so it has to exist
+		// first. `create iam` grants it image pull access.
+		if err := ensureNodeServiceAccount(ctx, &cfg); err != nil {
+			return err
+		}
 		return createClusterIdempotent(ctx, &cfg)
 	},
 }
@@ -620,6 +645,7 @@ func init() {
 	clusterCmd.Flags().StringVar(&cfg.Network, "network", getEnv("NETWORK", "default"), "VPC network name [env: NETWORK]")
 	clusterCmd.Flags().StringVar(&cfg.Subnetwork, "subnetwork", getEnv("SUBNETWORK", "default"), "VPC subnetwork name [env: SUBNETWORK]")
 	clusterCmd.Flags().StringVar(&cfg.MachineType, "machine-type", resolveMachineTypeDefault(), "Machine type for the node pool [env: NODE_MACHINE_TYPE]")
+	addNodeGSANameFlag(clusterCmd)
 	clusterCmd.Flags().BoolVar(&cfg.EnableDataplaneV2, "enable-dataplane-v2", getEnv("ENABLE_DATAPLANE_V2", true), "Enable Dataplane V2 [env: ENABLE_DATAPLANE_V2]")
 	clusterCmd.Flags().BoolVar(&cfg.EnableNestedVirtualization, "enable-nested-virtualization", getEnv("ENABLE_NESTED_VIRTUALIZATION", true), "Create the node pool with nested virtualization, exposing /dev/kvm for micro-VM workers; needs a machine type that supports it. Turn off with --enable-nested-virtualization=false [env: ENABLE_NESTED_VIRTUALIZATION]")
 	clusterCmd.Flags().Int32Var(&cfg.BootDiskSizeGB, "boot-disk-size", getEnv("BOOT_DISK_SIZE_GB", int32(0)), "Boot disk size in GB for the node pool; 0 = GKE default (100 GB) [env: BOOT_DISK_SIZE_GB]")
