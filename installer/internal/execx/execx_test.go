@@ -53,7 +53,8 @@ func TestCleanNeutralizesTerminalControl(t *testing.T) {
 
 func TestRealStreamsOutputAndExit(t *testing.T) {
 	ch := (&Real{}).Start(context.Background(), Spec{
-		Argv: []string{"sh", "-c", `printf 'one\n\x1b[1;36mtwo\x1b[0m\n'; echo err >&2`},
+		// Octal escapes: POSIX printf (dash, the sh on Ubuntu) has no \x.
+		Argv: []string{"sh", "-c", `printf 'one\n\033[1;36mtwo\033[0m\n'; echo err >&2`},
 	})
 	var stderrLines []string
 	lines := []string{}

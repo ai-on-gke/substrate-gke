@@ -47,7 +47,7 @@ jobs:
         run: make verify MODULES="${MODULE}"
         env:
           MODULE: ${{ matrix.module }}
-      - name: make test
-        run: make test MODULES="${MODULE}"
+      - name: make test (no network)
+        run: .github/workflows/test-offline.sh "${MODULE}"
         env:
           MODULE: ${{ matrix.module }}
