@@ -29,10 +29,6 @@ import (
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
-// RunbookURL is upstream's upgrade runbook, which the upgrade track prepares
-// for and hands over to.
-const RunbookURL = "https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md"
-
 // DefaultUpgradeDir is where the upgrade track keeps the two source trees.
 // They live beside the install cache but outside the directories Cleanup
 // sweeps, because the runbook runs from them, through the links the hand-over
@@ -339,10 +335,17 @@ func (b *Builder) UpgradeNotes(st *state.Setup) []string {
 	return notes
 }
 
+// RunbookURL is upstream's upgrade runbook, which the upgrade track prepares
+// for and hands over to, at the new commit: the runbook runs from that tree,
+// so its steps have to match it.
+func (b *Builder) RunbookURL() string {
+	return strings.TrimSuffix(b.repo, ".git") + "/blob/" + b.commit + "/docs/guides/upgrade.md"
+}
+
 // UpgradeSummary is the hand-over printed when the installer exits: the
 // runbook, the line to run, then the notes.
 func (b *Builder) UpgradeSummary(st *state.Setup) string {
-	lines := []string{"Run this in the shell you upgrade from, then follow upstream's upgrade runbook from step 1:", "  " + RunbookURL, "", "  " + b.UpgradeShellLine(st)}
+	lines := []string{"Run this in the shell you upgrade from, then follow upstream's upgrade runbook from step 1:", "  " + b.RunbookURL(), "", "  " + b.UpgradeShellLine(st)}
 	for _, note := range b.UpgradeNotes(st) {
 		lines = append(lines, "", note)
 	}
