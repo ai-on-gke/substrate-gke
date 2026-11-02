@@ -371,20 +371,23 @@ func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 // pinned rc.1) and one without it (core main, from
 // agent-substrate/substrate#2092 on).
 func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
-	st := testSetup(t)
-	st.SandboxClass = state.SandboxMicroVM
 	b := NewBuilder(fakeCheckout(t), false)
+	source, prebuilt := testSetup(t), prebuiltSetup(t)
+	imageFlags := " --image-repo " + testImageRepo + " --image-tag " + testImageTag
 
 	for _, tc := range []struct {
 		name      string
+		st        *state.Setup
 		hasScript bool
 		want      string
 		announce  string
 	}{
-		{"old tree", true, "install-microvm-deps.sh --install", "Staging with: hack/install-microvm-deps.sh --install"},
-		{"new tree", false, "go run ./cmd/ate-setup deploy sandboxconfig --sandbox-classes=microvm", "Staging with: " + microVMATESetup},
+		{"old tree", source, true, "install-microvm-deps.sh --install", "Staging with: hack/install-microvm-deps.sh --install"},
+		{"new tree", source, false, "go run ./cmd/ate-setup deploy sandboxconfig", "Staging with: " + microVMATESetup},
+		{"pre-built, new tree", prebuilt, false, "go run ./cmd/ate-setup deploy sandboxconfig" + imageFlags, "Staging with: " + microVMATESetup + imageFlags},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			tc.st.SandboxClass = state.SandboxMicroVM
 			dir := t.TempDir()
 			bin := filepath.Join(dir, "bin")
 			stubs := map[string]string{filepath.Join(bin, "go"): `echo "go $*" >> calls`}
@@ -402,7 +405,7 @@ func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 
 			// Everything from the branch on: the fetch and the
 			// get-credentials before it need a network.
-			script := b.InstallMicroVMDeps(st).Argv[2]
+			script := b.InstallMicroVMDeps(tc.st).Argv[2]
 			script = "set -euo pipefail\n" + script[strings.Index(script, "if [ -f "+legacyMicroVMScript+" ]"):]
 			cmd := exec.Command("bash", "-c", script)
 			cmd.Dir = dir
@@ -436,6 +439,24 @@ func TestDeployAteSystemKeepsToGVisor(t *testing.T) {
 		// there.
 		if strings.Contains(spec.Argv[2], "--sandbox-classes") {
 			t.Errorf("deploy ate-system passes --sandbox-classes, which older trees reject:\n%s", spec.Argv[2])
+		}
+	}
+}
+
+// Every ate-setup deploy replaces the install record the upgrade flow reads,
+// so the micro-VM step passes the control-plane step's settings and records
+// both sandbox classes.
+func TestInstallMicroVMDepsKeepsTheControlPlaneSettings(t *testing.T) {
+	for _, st := range []*state.Setup{testSetup(t), prebuiltSetup(t)} {
+		b := NewBuilder(fakeCheckout(t), false)
+		microVM := b.InstallMicroVMDeps(st).Env
+		if !slices.Contains(microVM, "ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm") {
+			t.Errorf("micro-VM env does not record both sandbox classes:\n%v", microVM)
+		}
+		for _, kv := range b.DeployAteSystem(st).Env {
+			if !strings.HasPrefix(kv, "ATE_INSTALL_SANDBOX_CLASSES=") && !slices.Contains(microVM, kv) {
+				t.Errorf("micro-VM env is missing the control-plane setting %q", kv)
+			}
 		}
 	}
 }

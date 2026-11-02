@@ -137,9 +137,11 @@ points at them. How it stages them depends on the Substrate tree:
   --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
   snapshot bucket up to Substrate v0.5.0, in `<bucket>-assets` after).
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
-  on** (core `main`): `ate-setup deploy sandboxconfig --sandbox-classes=microvm` downloads
-  the assets for both amd64 and arm64 and uploads them to `<bucket>-assets` under
-  `microvm-assets/<arch>/<sha256>`. The control-plane step passes
+  on** (core `main`): `ate-setup deploy sandboxconfig` with
+  `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets for both amd64 and
+  arm64 and uploads them to `<bucket>-assets` under `microvm-assets/<arch>/<sha256>`. It
+  passes the control-plane step's settings and image flags too, because every ate-setup
+  deploy replaces the install record that `--upgrade` reads. The control-plane step passes
   `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a gVisor-only install stages nothing.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
@@ -203,18 +205,15 @@ upstream's `demos/counter/counter-microvm.yaml.tmpl` and
 > Until node provisioning lands, bring your own KVM-capable pool — a node type with
 > nested virtualization enabled, or bare metal, where KVM is native.
 
-**Upgrading and teardown:** The upgrade flow (`--upgrade`) updates the control plane and
-gVisor `SandboxConfig`, but does not re-stage the micro-VM assets. After upgrading a
-cluster that uses micro-VM across a Substrate revision bump, target the cluster's kube
-context and re-stage from the new tree so the bucket assets and `microvm` `SandboxConfig`
-digests stay in sync:
+**Upgrading and teardown:** After upgrading a cluster that uses micro-VM across a
+Substrate revision bump, the bucket assets and `microvm` `SandboxConfig` digests must be
+re-staged from the new tree:
 
-- From agent-substrate/substrate#2092 on: `NO_DEV_ENV=1 BUCKET_NAME=<bucket> go run
-  ./cmd/ate-setup deploy sandboxconfig --sandbox-classes=microvm`. Assets are
-  content-addressed, so this is safe to repeat. Upstream's runbook runs `deploy
-  ate-system`, which stages micro-VM by default on these trees unless
-  `--sandbox-classes=gvisor` is passed.
-- Up to v1.0.0-rc.1: `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
+- From agent-substrate/substrate#2092 on: the runbook's `deploy sandboxconfig --config
+  ~/ate-upgrade/new.yaml` step re-stages them, because the install record lists both
+  sandbox classes. Assets are content-addressed, so this is safe to repeat.
+- Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. Target the cluster's kube
+  context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
   hack/install-microvm-deps.sh --install`.
 
 Full teardown (`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all
