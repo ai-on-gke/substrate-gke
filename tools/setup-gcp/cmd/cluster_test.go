@@ -941,4 +941,3 @@ func TestKubernetesMinor(t *testing.T) {
 		})
 	}
 }
-

@@ -150,21 +150,28 @@ func TestGKEAuthPluginCheck(t *testing.T) {
 			t.Errorf("plugin in the SDK bin directory: got %+v, want Pass naming %s", got, sdk)
 		}
 	})
+	t.Run("missing", func(t *testing.T) {
+		// An empty SDK root, so the result does not depend on whether the
+		// host has the plugin installed.
+		bin, sdk := t.TempDir(), t.TempDir()
+		writeExecutable(t, bin, "gcloud", "echo "+sdk)
+		got := runCheck(t, bin, "gke-auth-plugin")
+		if got.Status != Fail {
+			t.Errorf("got %+v, want Fail", got)
+		}
+		if want := gkeAuthPluginFix(sdk); got.Fix != want {
+			t.Errorf("fix = %q, want %q", got.Fix, want)
+		}
+	})
 	for _, tt := range []struct {
 		name, sdkRoot, wantFix string
 	}{
-		{"missing from a standalone SDK", "/home/you/google-cloud-sdk", "gcloud components install gke-gcloud-auth-plugin"},
-		{"missing from an apt or dnf SDK", "/usr/lib/google-cloud-sdk", "google-cloud-cli-gke-gcloud-auth-plugin"},
+		{"fix for a standalone SDK", "/home/you/google-cloud-sdk", "gcloud components install gke-gcloud-auth-plugin"},
+		{"fix for an apt or dnf SDK", "/usr/lib/google-cloud-sdk", "google-cloud-cli-gke-gcloud-auth-plugin"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			bin := t.TempDir()
-			writeExecutable(t, bin, "gcloud", "echo "+tt.sdkRoot)
-			got := runCheck(t, bin, "gke-auth-plugin")
-			if got.Status != Fail {
-				t.Errorf("got %+v, want Fail", got)
-			}
-			if !strings.Contains(got.Fix, tt.wantFix) {
-				t.Errorf("fix %q does not contain %q", got.Fix, tt.wantFix)
+			if got := gkeAuthPluginFix(tt.sdkRoot); !strings.Contains(got, tt.wantFix) {
+				t.Errorf("gkeAuthPluginFix(%q) = %q, want it to contain %q", tt.sdkRoot, got, tt.wantFix)
 			}
 		})
 	}
