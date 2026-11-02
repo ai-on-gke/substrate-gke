@@ -23,11 +23,10 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/muesli/termenv"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
-	"github.com/muesli/termenv"
-
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/steps"
@@ -435,7 +434,7 @@ func (s *sandboxScreen) Update(msg tea.Msg) tea.Cmd {
 
 func (s *sandboxScreen) View(w int) string {
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Choose your sandbox runtime") + "\n")
+	b.WriteString(theme.Title.Render(state.Sandbox.Title()) + "\n")
 	b.WriteString(theme.Subtle.Render(
 		"gVisor is installed with the control plane and needs nothing here.\n"+
 			"Micro-VM is opt-in: its sandbox binaries are staged to the snapshot\nbucket and a cluster-wide SandboxConfig is applied.") + "\n\n")
@@ -589,7 +588,7 @@ func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
 
 func (s *filestoreScreen) View(w int) string {
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Install Filestore CSI driver") + "\n")
+	b.WriteString(theme.Title.Render(state.FilestoreCSI.Title()) + "\n")
 	st := s.deps.Setup
 	skip := "[2] Skip — I'll configure storage drivers later"
 	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
@@ -1030,6 +1029,13 @@ func (s *completeScreen) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// routerAuthDoc is what a terminal shows for the hyperlink to the router's
+// documentation. Short enough not to wrap in the panel at 80 columns:
+// wrapped, a hyperlink is re-opened on every line and freeze shows the text
+// alone, so a long label only looks worse. A terminal without hyperlinks
+// shows the label with nothing behind it, which the remark after it covers.
+const routerAuthDoc = "router README § client authentication"
+
 func (s *completeScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
@@ -1051,11 +1057,14 @@ func (s *completeScreen) View(w int) string {
 		{"demo", DemoSummary(st)},
 	}
 	// Each row hangs under its own value: a bucket name wider than the panel
-	// was wrapping back into the key column.
+	// was wrapping back into the key column. The key column is ten wide —
+	// the widest key is nine — because the eleventh column is the one the
+	// longest default bucket name ("gs://" plus maxBucketNameLength) needs
+	// to stay on one line at 110 columns.
 	panelW := min(w-4, 76)
 	lines := make([]string, len(rows))
 	for i, r := range rows {
-		lines[i] = hangingIndent(fmt.Sprintf("%-11s", r[0]), r[1], panelW-2)
+		lines[i] = hangingIndent(fmt.Sprintf("%-10s", r[0]), r[1], panelW-2)
 	}
 	b.WriteString(theme.Panel.Width(panelW).Render(strings.Join(lines, "\n")) + "\n")
 
@@ -1093,7 +1102,7 @@ func (s *completeScreen) View(w int) string {
 	// is longer than the panel and, wrapped, split at every slash and hyphen
 	// into something no terminal could open. The exit summary prints it in
 	// full.
-	next += "\n" + theme.Subtle.Render(termenv.Hyperlink(s.deps.Builder.RouterAuthURL(), snapshot.RouterAuthDoc))
+	next += "\n" + theme.Subtle.Render(termenv.Hyperlink(s.deps.Builder.RouterAuthURL(), routerAuthDoc)) + theme.Fainted.Render(" (full link printed on exit)")
 	b.WriteString("\n" + theme.AccentPanel.Width(panelWidth).Render(next))
 	return b.String()
 }

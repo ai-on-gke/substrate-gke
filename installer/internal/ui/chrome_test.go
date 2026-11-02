@@ -29,16 +29,22 @@ func TestHangingIndent(t *testing.T) {
 	const colored = "\x1b[31m• \x1b[0m" // two columns, many bytes
 	for _, tc := range []struct {
 		name, first, text string
-		width             int
+		width, wantLines  int // wantLines 0: any number
 	}{
-		{"fits on one line", "  1. ", "short", 40},
-		{"wraps", "  1. ", "Upgrade this cluster: exit or restart the installer and choose the upgrade track.", 32},
-		{"colored prefix", colored, "The control plane and atelet roll to the new commit at once.", 24},
-		{"width below the prefix", "      ", "narrow", 3},
+		{"fits on one line", "  1. ", "short", 40, 1},
+		{"wraps", "  1. ", "Upgrade this cluster: exit or restart the installer and choose the upgrade track.", 32, 0},
+		{"colored prefix", colored, "The control plane and atelet roll to the new commit at once.", 24, 0},
+		{"width below the prefix", "      ", "narrow", 3, 0},
 	} {
 		got := hangingIndent(tc.first, tc.text, tc.width)
 		lines := strings.Split(got, "\n")
 		pad := lipgloss.Width(tc.first)
+		if tc.wantLines > 0 && len(lines) != tc.wantLines {
+			t.Errorf("%s: %d lines, want %d: %q", tc.name, len(lines), tc.wantLines, got)
+		}
+		if tc.wantLines == 0 && len(lines) < 2 {
+			t.Errorf("%s: did not wrap: %q", tc.name, got)
+		}
 		if !strings.HasPrefix(lines[0], tc.first) {
 			t.Errorf("%s: first line %q lacks the prefix %q", tc.name, lines[0], tc.first)
 		}
@@ -65,57 +71,71 @@ func TestHangingIndent(t *testing.T) {
 }
 
 // The key bar never runs past the terminal's edge, where the last keys were
-// being cut off. Squeezed, it gives up [/] commands first, then [?] help,
-// then the dots, and only then the screen's own keys — from the right, with
-// an ellipsis standing in — while [ctrl+c] exit survives any width.
+// being cut off. Squeezed, it gives up [/] commands first, then the dots,
+// then [?] help, and only then the screen's own keys — from the right, with
+// an ellipsis standing in — while [ctrl+c] exit survives any width. Each
+// cutoff is checked one column either side.
 func TestHintBarGivesUpKeysInOrder(t *testing.T) {
-	hints := []Hint{{"t", "tear down and reinstall"}, {"r", "re-probe"}, {"esc", "choose another"}}
+	hints := []Hint{{"t", "tear down and reinstall"}, {"esc", "choose another"}, {"r", "re-probe"}}
 	global := []Hint{{"?", "help"}, {"/", "commands"}, {"ctrl+c", "exit"}}
-	full := hintBar(200, hints, global)
-	for _, want := range []string{"[t]", "[r]", "[esc]", "[?]", "[/]", "[ctrl+c]", " · "} {
-		if !strings.Contains(full, want) {
-			t.Errorf("a wide bar lost %q: %q", want, full)
+	has := func(bar string, keys ...string) bool {
+		for _, k := range keys {
+			if !strings.Contains(bar, k) {
+				return false
+			}
 		}
+		return true
 	}
-	w := lipgloss.Width(full)
-
-	// Just above and below the threshold: one column short drops exactly
-	// [/] commands and nothing else.
-	if got := hintBar(w, hints, global); got != full {
-		t.Errorf("at its own width the bar changed: %q", got)
+	// Each stage's bar is the widest the next stage has to fit into: a bar
+	// one column narrower than a stage's width must have moved on.
+	stages := []struct {
+		name string
+		want func(bar string) bool
+	}{
+		{"everything, with dots", func(b string) bool { return has(b, "[t]", "[esc]", "[r]", "[?]", "[/]", "[ctrl+c]", " · ") }},
+		{"without [/]", func(b string) bool { return has(b, "[t]", "[esc]", "[r]", "[?]", "[ctrl+c]", " · ") && !has(b, "[/]") }},
+		{"without the dots", func(b string) bool {
+			return has(b, "[t]", "[esc]", "[r]", "[?]", "[ctrl+c]") && !has(b, "[/]") && !has(b, " · ")
+		}},
+		{"without [?]", func(b string) bool {
+			return has(b, "[t]", "[esc]", "[r]", "[ctrl+c]") && !has(b, "[?]") && !has(b, "…")
+		}},
+		{"without [r], elided", func(b string) bool { return has(b, "[t]", "[esc]", "…", "[ctrl+c]") && !has(b, "[r]") }},
+		{"without [esc], elided", func(b string) bool { return has(b, "[t]", "…", "[ctrl+c]") && !has(b, "[esc]") }},
 	}
-	short := hintBar(w-1, hints, global)
-	if strings.Contains(short, "[/]") || !strings.Contains(short, "[?]") || !strings.Contains(short, "[esc]") {
-		t.Errorf("one column short should drop only [/] commands: %q", short)
-	}
-	if lipgloss.Width(short) > w-1 {
-		t.Errorf("bar is wider than %d: %q", w-1, short)
-	}
-
-	// Narrowing further: help goes before the screen's keys, the screen's
-	// keys go last and leave an ellipsis, and exit is always there. At no
-	// width does the bar overflow.
-	seenEllipsis := false
-	for width := w - 1; width >= 20; width-- {
+	width := 200
+	for i, stage := range stages {
 		bar := hintBar(width, hints, global)
-		if lipgloss.Width(bar) > width {
+		if !stage.want(bar) {
+			t.Fatalf("at %d columns, want %s: %q", width, stage.name, bar)
+		}
+		w := lipgloss.Width(bar)
+		if got := hintBar(w, hints, global); got != bar {
+			t.Errorf("%s: at its own width %d the bar changed: %q", stage.name, w, got)
+		}
+		if i+1 < len(stages) {
+			next := hintBar(w-1, hints, global)
+			if !stages[i+1].want(next) {
+				t.Errorf("one column under %s (%d), want %s: %q", stage.name, w, stages[i+1].name, next)
+			}
+			if lipgloss.Width(next) > w-1 {
+				t.Errorf("at %d columns the bar is %d wide: %q", w-1, lipgloss.Width(next), next)
+			}
+		}
+		width = w - 1
+	}
+	// Down to a width nothing fits in: never wider than asked, down to the
+	// narrowest bar there is (the ellipsis and exit), and never without the
+	// way out.
+	floor := lipgloss.Width(hintBar(1, hints, global))
+	for width := 120; width >= 10; width-- {
+		bar := hintBar(width, hints, global)
+		if lipgloss.Width(bar) > width && width >= floor {
 			t.Errorf("at %d columns the bar is %d wide: %q", width, lipgloss.Width(bar), bar)
 		}
 		if !strings.Contains(bar, "[ctrl+c]") {
 			t.Errorf("at %d columns the bar lost [ctrl+c]: %q", width, bar)
 		}
-		if strings.Contains(bar, "[?]") && !strings.Contains(bar, "[esc]") {
-			t.Errorf("at %d columns help outlived the screen's own keys: %q", width, bar)
-		}
-		if strings.Contains(bar, "…") {
-			seenEllipsis = true
-			if strings.Contains(bar, "[esc]") {
-				t.Errorf("at %d columns the ellipsis shows with nothing hidden: %q", width, bar)
-			}
-		}
-	}
-	if !seenEllipsis {
-		t.Error("no width hid a screen key behind an ellipsis")
 	}
 
 	// The log overlay's bar has only exit as its global key.

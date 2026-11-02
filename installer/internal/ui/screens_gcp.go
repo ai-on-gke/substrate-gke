@@ -321,24 +321,95 @@ func wrapNames(names []string, width int) []string {
 	return lines
 }
 
-// shellLines breaks a command into lines no wider than width at its " --"
-// flag boundaries, ending every line but the last with " \", so the lines can
-// be copied and run as they are. Word wrapping broke quoted values at their
-// hyphens instead. A flag wider than width gets a line of its own.
+// shellLines breaks a command into lines no wider than width, ending every
+// line but the last with " \", so the lines can be copied and run as they
+// are. Word wrapping broke quoted values at their hyphens instead, and a
+// panel re-wrapping a line wider than itself separated an option from its
+// value. Lines break between an option and the next; within one only when
+// it is wider than width, at its spaces; a single word wider than width
+// gets a line of its own.
 func shellLines(command string, width int) []string {
-	parts := strings.Split(command, " --")
 	var lines []string
-	line := parts[0]
-	for _, p := range parts[1:] {
-		p = "--" + p
-		if lipgloss.Width(line)+1+lipgloss.Width(p)+2 <= width {
-			line += " " + p
+	// A trailing comment goes on its own line above the command: it cannot
+	// follow a continuation, and it was wrapping into the command itself.
+	if i := commentStart(command); i >= 0 {
+		lines = append(lines, strings.TrimSpace(command[i:]))
+		command = strings.TrimRight(command[:i], " ")
+	}
+	// Units are an option with its values ("-a ate-demo-counter",
+	// "--project 'p'") or the command's head, so a line never separates an
+	// option from its value. A unit wider than the width is the exception,
+	// broken at its spaces.
+	var units [][]string
+	for _, word := range splitOutsideQuotes(command) {
+		if len(units) == 0 || (strings.HasPrefix(word, "-") && len(word) > 1) {
+			units = append(units, nil)
+		}
+		units[len(units)-1] = append(units[len(units)-1], word)
+	}
+	line := ""
+	add := func(s string) {
+		switch {
+		case line == "":
+			line = s
+		case lipgloss.Width(line)+1+lipgloss.Width(s)+2 <= width: // room for " \\"
+			line += " " + s
+		default:
+			lines = append(lines, line+" \\")
+			line = "  " + s
+		}
+	}
+	for _, unit := range units {
+		if joined := strings.Join(unit, " "); lipgloss.Width(joined)+2 <= width || len(unit) == 1 {
+			add(joined)
 			continue
 		}
-		lines = append(lines, line+" \\")
-		line = "  " + p
+		for _, word := range unit {
+			add(word)
+		}
 	}
 	return append(lines, line)
+}
+
+// commentStart is the index of a trailing " #" comment outside single quotes,
+// or -1.
+func commentStart(command string) int {
+	quoted := false
+	for i, r := range command {
+		switch {
+		case r == '\'':
+			quoted = !quoted
+		case r == '#' && !quoted && i > 0 && command[i-1] == ' ':
+			return i
+		}
+	}
+	return -1
+}
+
+// splitOutsideQuotes splits a command at spaces that are not inside single
+// quotes, the quoting ShellQuote produces.
+func splitOutsideQuotes(command string) []string {
+	var words []string
+	var word strings.Builder
+	quoted := false
+	for _, r := range command {
+		switch {
+		case r == '\'':
+			quoted = !quoted
+			word.WriteRune(r)
+		case r == ' ' && !quoted:
+			if word.Len() > 0 {
+				words = append(words, word.String())
+				word.Reset()
+			}
+		default:
+			word.WriteRune(r)
+		}
+	}
+	if word.Len() > 0 {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 // Labels of the new-cluster fields, which submit reads back to ask GKE
@@ -1187,7 +1258,9 @@ func (s *clusterScreen) Hints() []Hint {
 		}
 		return []Hint{{"esc", "cancel"}}
 	case "installed":
-		return []Hint{{"t", "tear down and reinstall"}, {"r", "re-probe"}, {"esc", "choose another"}}
+		// Squeezed, the bar hides keys from the right: re-probe goes before
+		// the way back, which goes before the destructive one.
+		return []Hint{{"t", "tear down and reinstall"}, {"esc", "choose another"}, {"r", "re-probe"}}
 	case "partial":
 		return []Hint{{"y", "continue"}, {"r", "re-probe"}, {"esc", "choose another"}}
 	case "teardown-confirm":
@@ -1225,7 +1298,7 @@ func (s *clusterScreen) exitNotes() []ExitNote {
 		return nil
 	}
 	return []ExitNote{{
-		Lead:    fmt.Sprintf("Cluster %s already runs Substrate. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run:", sel.Name),
+		Lead:    fmt.Sprintf("Cluster %s already runs Substrate. To upgrade it, run the installer again and choose \"Upgrade an installed cluster\". For the full GCP cleanup — cluster, bucket, IAM, dashboards — run:", sel.Name),
 		Command: snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""),
 		Trail:   "(--bucket: the snapshot bucket that install used)",
 	}}
@@ -1666,8 +1739,15 @@ func truncateTo(s string, n int) string {
 func (s *clusterScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
-	// Wrapped to the content width: at 80 columns it ran past the edge.
-	b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render(fmt.Sprintf("GKE clusters in %s (via `gcloud container clusters list`).", s.deps.Setup.ProjectID)) + "\n\n")
+	if s.aboutOne() {
+		// The subtitle is about the list, and a panel about one cluster
+		// needs its rows: at 80×24 they are the difference between the
+		// guard's remedies showing and not.
+		b.WriteString("\n")
+	} else {
+		// Wrapped to the content width: at 80 columns it ran past the edge.
+		b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render(fmt.Sprintf("GKE clusters in %s (via `gcloud container clusters list`).", s.deps.Setup.ProjectID)) + "\n\n")
+	}
 
 	switch {
 	case s.loading:
@@ -1754,27 +1834,31 @@ func (s *clusterScreen) View(w int) string {
 		// padding), rather than broken by hand: hand-broken lines wider than
 		// the panel were re-wrapped by it into ragged half-lines, and list
 		// items lost their indent.
+		//
+		// The ways forward come first and the reasoning last: the panel is
+		// clamped from the bottom at 110×26 and 80×24, and what has to
+		// survive is the safe path, not why it is the safe path. The keys
+		// are not repeated — the bottom bar shows them, outside the clamp,
+		// and a second copy with its own wording disagreed with it — and
+		// neither is the cleanup command: it took four rows the remedies
+		// need, and exiting on this panel prints it (exitNotes), where it
+		// can be copied without the panel's borders.
 		panelW := min(w-4, 88)
 		textW := panelW - 2
 		para := lipgloss.NewStyle().Width(textW)
 		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(strings.Join([]string{
 			para.Render(theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))),
 			"",
-			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order:"),
-			hangingIndent("  • ", "The control plane and atelet roll to the new commit at once.", textW),
-			hangingIndent("  • ", "Worker pools stay on the older worker image.", textW),
-			"",
 			theme.Title.Render("Supported paths forward:"),
-			hangingIndent("  1. ", "Upgrade this cluster: exit or restart the installer and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
+			hangingIndent("  1. ", "Upgrade it: exit, run the installer again and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
+			hangingIndent("  2. ", "Tear down and reinstall: "+theme.Key.Render("[t]")+" deletes Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and the install continues here. Exiting instead prints the command for the full GCP cleanup — cluster, bucket, IAM, dashboards.", textW),
 			"",
-			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
-			"     " + strings.Join(shellLines(snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW-5), "\n     "),
-			hangingIndent("     ", "(--bucket: the snapshot bucket that install used)", textW),
+			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order: the control plane and atelet roll to the new commit at once, while worker pools stay on the older worker image."),
 		}, "\n")))
-		// The keys are not repeated here: the bottom bar shows them, outside
-		// the clamp, and a second copy with its own wording disagreed with it.
 	case "teardown-confirm":
 		sel := s.clusters[s.cursor]
+		// Wrapped by the panel; the keys are left to the bottom bar, as on
+		// the guard.
 		panelW := min(w-4, 76)
 		textW := panelW - 2
 		para := lipgloss.NewStyle().Width(textW)
@@ -1790,8 +1874,6 @@ func (s *clusterScreen) View(w int) string {
 			"",
 			"Type " + theme.Key.Render(sel.Name) + " to confirm:",
 			s.confirmInput.View(),
-			"",
-			theme.Key.Render("[enter]") + " tear it down   " + theme.Key.Render("[esc]") + " back",
 		}, "\n")))
 	case "teardown":
 		sel := s.clusters[s.cursor]
@@ -1799,12 +1881,11 @@ func (s *clusterScreen) View(w int) string {
 		b.WriteString(s.comp.view(w))
 	case "partial":
 		sel := s.clusters[s.cursor]
-		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 76)).Render(
-			theme.Warning.Render(fmt.Sprintf("Cluster %q has an ate-system namespace but no atelet.", sel.Name))+"\n\n"+
-				"That looks like an interrupted install or an unfinished delete, not a\n"+
-				"running Substrate. Re-running the install over it is safe: upstream's\n"+
-				"deploy steps are idempotent.\n\n"+
-				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
+		panelW := min(w-4, 76)
+		para := lipgloss.NewStyle().Width(panelW - 2)
+		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(
+			para.Render(theme.Warning.Render(fmt.Sprintf("Cluster %q has an ate-system namespace but no atelet.", sel.Name)))+"\n\n"+
+				para.Render("That looks like an interrupted install or an unfinished delete, not a running Substrate. Re-running the install over it is safe: upstream's deploy steps are idempotent.")))
 	case "confirm":
 		sel := s.clusters[s.cursor]
 		// Two outcomes, and the control plane picks which. GKE upgrades node

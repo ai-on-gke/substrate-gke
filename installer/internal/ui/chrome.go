@@ -145,10 +145,11 @@ func (a *App) bottomView() string {
 // the global ones. Nothing is left to be cut at the terminal's edge; when
 // the bar does not fit, it gives things up in a fixed order instead:
 //
-//  1. the global keys other than the last, front to back — [/] commands,
-//     then [?] help, which every other screen's bar shows;
-//  2. the dots between keys;
-//  3. the screen's own keys, from the right, with an ellipsis in their place
+//  1. the global key before the last — [/] commands, the least used;
+//  2. the dots between keys, which are only cosmetic;
+//  3. the other global keys, from the one nearest the end backwards —
+//     [?] help, which every other screen's bar shows;
+//  4. the screen's own keys, from the right, with an ellipsis in their place
 //     so a hidden key is known to exist. These are shown nowhere else, which
 //     is why they outlast help.
 //
@@ -169,19 +170,25 @@ func hintBar(width int, hints, global []Hint) string {
 	}
 	fits := func(line string) bool { return lipgloss.Width(line) <= width }
 
-	line := render(hints, false, global, " · ")
-	// The global keys go from the one before exit backwards: [/] commands,
-	// then [?] help.
-	for !fits(line) && len(global) > 1 {
-		global = slices.Concat(global[:len(global)-2], global[len(global)-1:])
-		line = render(hints, false, global, " · ")
+	// dropGlobal removes the global key before the last.
+	dropGlobal := func() { global = slices.Concat(global[:len(global)-2], global[len(global)-1:]) }
+	sep := " · "
+	line := render(hints, false, global, sep)
+	if !fits(line) && len(global) > 1 {
+		dropGlobal()
+		line = render(hints, false, global, sep)
 	}
 	if !fits(line) {
-		line = render(hints, false, global, "  ")
+		sep = "  "
+		line = render(hints, false, global, sep)
+	}
+	for !fits(line) && len(global) > 1 {
+		dropGlobal()
+		line = render(hints, false, global, sep)
 	}
 	for elided := false; !fits(line) && len(hints) > 0; {
 		hints, elided = hints[:len(hints)-1], true
-		line = render(hints, elided, global, "  ")
+		line = render(hints, elided, global, sep)
 	}
 	return line
 }

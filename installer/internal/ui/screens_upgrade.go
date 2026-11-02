@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/theme"
 )
 
@@ -230,7 +231,7 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 
 func (s *upgradeSourceScreen) View(w int) string {
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Choose the installed cluster") + "\n")
+	b.WriteString(theme.Title.Render(state.UpgradeSource.Title()) + "\n")
 	b.WriteString(theme.Subtle.Render("The cluster to upgrade, and the Substrate it runs today.") + "\n\n")
 
 	switch s.mode {

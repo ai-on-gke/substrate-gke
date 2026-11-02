@@ -103,7 +103,10 @@ var UpgradeOrder = []Step{
 	Welcome, CheckSetup, UpgradeSource, Images, UpgradePlan, Complete,
 }
 
-// Title returns the heading shown for a step.
+// Title is a step's label in the step rail, and the name the README's step
+// table uses. The rail is 30 columns and a two-digit step's prefix takes
+// seven of them, so a title is at most 23 columns or it wraps onto a second
+// rail line (TestStepTitlesFitTheRail).
 func (s Step) Title() string {
 	switch s {
 	case Welcome:

@@ -427,24 +427,22 @@ func (b *Builder) hasCounterDriver() bool {
 // RouterNote explains how to reach actors through the Envoy router, which
 // admits only allowlisted clients.
 func (b *Builder) RouterNote(st *state.Setup) string {
-	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
-		IngressAllowlistSummary(st) + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
-		" and the substrate-gke README."
+	return routerNoteBody(st) + b.RouterAuthURL() + " and the substrate-gke README."
 }
 
 // RouterNoteLead is RouterNote up to the link, for a screen that shows the
 // link on a line of its own: wrapped into a panel, the URL broke at every
 // slash and hyphen and could not be clicked.
 func (b *Builder) RouterNoteLead(st *state.Setup) string {
-	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
-		IngressAllowlistSummary(st) + "). To call actors from your own workloads, see the substrate-gke README and upstream's router documentation:"
+	return routerNoteBody(st) + "the substrate-gke README and upstream's router documentation:"
 }
 
-// RouterAuthDoc is what a terminal shows for a hyperlink to RouterAuthURL.
-// Short enough not to wrap in the completion screen's panel at 80 columns:
-// wrapped, a hyperlink is re-opened on every line and freeze shows the text
-// alone, so a long label only looks worse.
-const RouterAuthDoc = "router README § client authentication"
+// routerNoteBody is what RouterNote and RouterNoteLead share, up to where
+// one names the URL and the other says where to find it.
+func routerNoteBody(st *state.Setup) string {
+	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
+		IngressAllowlistSummary(st) + "). To call actors from your own workloads, see "
+}
 
 // RouterAuthURL is upstream's documentation of ingress client authentication
 // at the commit this install runs.

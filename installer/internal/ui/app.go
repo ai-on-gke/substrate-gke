@@ -120,6 +120,9 @@ type App struct {
 	Completed bool
 }
 
+// Step is the step the wizard is on.
+func (a *App) Step() state.Step { return a.mach.Current() }
+
 // An ExitNote is something a screen wants left in the terminal when the
 // wizard exits on it: a lead line, a command to copy, and a trailing remark.
 // Any of the three may be empty.
