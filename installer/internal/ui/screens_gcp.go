@@ -360,7 +360,9 @@ func shellLines(command string, width int) []string {
 		}
 	}
 	for _, unit := range units {
-		if joined := strings.Join(unit, " "); lipgloss.Width(joined)+2 <= width || len(unit) == 1 {
+		// Room for the continuation indent and " \\" both: a unit that fit
+		// only without the indent came out two columns wide.
+		if joined := strings.Join(unit, " "); lipgloss.Width(joined)+4 <= width || len(unit) == 1 {
 			add(joined)
 			continue
 		}
@@ -1862,8 +1864,16 @@ func (s *clusterScreen) View(w int) string {
 		panelW := min(w-4, 76)
 		textW := panelW - 2
 		para := lipgloss.NewStyle().Width(textW)
+		// The prompt and its input come right after the title: the panel is
+		// clamped from the bottom, and at 80×24 they were the part cut off,
+		// so the name was typed blind and [enter] did nothing until it
+		// matched, with no reason shown. What goes last is what the guard
+		// has already said: what is kept.
 		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(strings.Join([]string{
 			theme.Warning.Render(fmt.Sprintf("Tear down Substrate on %q?", sel.Name)),
+			"",
+			"Type " + theme.Key.Render(sel.Name) + " to confirm:",
+			s.confirmInput.View(),
 			"",
 			para.Render("Runs `ate-setup delete ate-system` against the cluster. It deletes:"),
 			hangingIndent("  • ", "every actor, whether running, suspended, or crashed", textW),
@@ -1871,9 +1881,6 @@ func (s *clusterScreen) View(w int) string {
 			hangingIndent("  • ", "the control plane, the ate.dev CRDs, and the database volume", textW),
 			"",
 			para.Render("The cluster, its nodes, and the snapshot bucket are kept. The snapshots in the bucket then belong to no actor. The install then continues here."),
-			"",
-			"Type " + theme.Key.Render(sel.Name) + " to confirm:",
-			s.confirmInput.View(),
 		}, "\n")))
 	case "teardown":
 		sel := s.clusters[s.cursor]

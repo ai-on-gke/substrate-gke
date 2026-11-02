@@ -3574,6 +3574,11 @@ func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
 	// a copied first line ran without -a's value.
 	install := "go install ./cmd/kubectl-ate    # run inside your substrate checkout"
 	create := "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter"
+	// The managed tree's install clones upstream into a temp dir first; its
+	// URL and commit are single words wider than 39 columns, which is
+	// allowed, but nothing else may be: a unit that fit only without the
+	// continuation indent used to come out two columns too wide.
+	managed := snapshot.NewBuilder(t.TempDir(), true).KubectlAteInstall()
 	for _, tc := range []struct {
 		command string
 		widths  []int
@@ -3581,6 +3586,7 @@ func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
 		{cleanup, []int{36, 50, 80, 200}},
 		{install, []int{39, 69}},
 		{create, []int{39, 69}},
+		{managed, []int{39, 69}},
 	} {
 		for _, width := range tc.widths {
 			lines := shellLines(tc.command, width)
@@ -3612,10 +3618,13 @@ func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
 	}
 }
 
-// The guard is clamped from the bottom at ordinary terminal sizes, and what
-// used to be clamped away was the way forward: at 110×26 the second remedy
-// and at 80×24 every remedy. The safe path and the key the bar offers have
-// to be explained within the rows those sizes leave.
+// The guard and the teardown prompt behind it are clamped from the bottom
+// at ordinary terminal sizes, and what used to be clamped away was the part
+// that mattered: at 110×26 the guard's second remedy and at 80×24 every
+// remedy, and the teardown prompt's "type the name" line and input, so the
+// name was typed blind. Both have to show within the rows those sizes
+// leave; the teardown prompt is the destructive dialog, so its name prompt
+// and the list of what goes must survive too.
 func TestGuardRemediesSurviveSmallTerminals(t *testing.T) {
 	for _, size := range [][2]int{{110, 26}, {80, 24}} {
 		app := testApp(t)
@@ -3626,6 +3635,13 @@ func TestGuardRemediesSurviveSmallTerminals(t *testing.T) {
 		for _, want := range []string{"Supported paths forward", "Upgrade it", "[t] deletes Substrate on this cluster"} {
 			if !strings.Contains(view, want) {
 				t.Errorf("at %dx%d the guard lost %q:\n%s", size[0], size[1], want, app.View())
+			}
+		}
+		press("t") // the teardown prompt
+		view = flat(app.View())
+		for _, want := range []string{"Type substrate-installed to confirm", "every actor", "ActorTemplate, atespace, and WorkerPool", "database volume"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("at %dx%d the teardown prompt lost %q:\n%s", size[0], size[1], want, app.View())
 			}
 		}
 	}

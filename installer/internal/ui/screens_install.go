@@ -23,6 +23,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
@@ -1077,9 +1078,18 @@ func (s *completeScreen) View(w int) string {
 	panelWidth := min(w-4, 92)
 	textW := max(panelWidth-4, 20)
 	// Commands break at their flags with continuations, as the guard's
-	// cleanup command does, so a copied one still runs.
+	// cleanup command does, so a copied one still runs. One the panel cannot
+	// hold even so — the managed kubectl-ate install carries a URL and a
+	// commit, each a word wider than the panel at 80 columns — is not
+	// shown broken; the exit summary prints every command in full.
 	command := func(cmd string) string {
-		return theme.CommandLine.Render(strings.Join(shellLines(cmd, textW), "\n"))
+		lines := shellLines(cmd, textW)
+		for _, l := range lines {
+			if lipgloss.Width(l) > textW {
+				return theme.Subtle.Render("(printed in full when you exit)")
+			}
+		}
+		return theme.CommandLine.Render(strings.Join(lines, "\n"))
 	}
 	lead, demo := s.deps.Builder.NextSteps(st)
 	next := theme.Title.Render("Next steps")
