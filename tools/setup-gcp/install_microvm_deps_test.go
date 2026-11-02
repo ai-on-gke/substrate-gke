@@ -88,6 +88,18 @@ func fakeSubstrate(t *testing.T) string {
 	return root
 }
 
+// postATESetupSubstrate returns a Substrate tree from
+// agent-substrate/substrate#2092 on: it has cmd/ate-setup, but #2092 deleted
+// assemble.sh and the template.
+func postATESetupSubstrate(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "ate-setup"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // runMicroVMDeps runs install-microvm-deps.sh against fakeGcloud and
 // fakeKubectl, with SUBSTRATE_ROOT set to root (unless vars sets it) and only
 // the given variables in the environment.
@@ -228,8 +240,9 @@ func TestInstallMicroVMDepsFailsEarly(t *testing.T) {
 	}{
 		"no BUCKET_NAME":       {fakeSubstrate(t), noBucket, nil, "BUCKET_NAME is not set"},
 		"not a Substrate tree": {t.TempDir(), microVMEnv, nil, "is not an agent-substrate/substrate"},
+		"tree past core #2092": {postATESetupSubstrate(t), microVMEnv, nil, "past agent-substrate/substrate#2092"},
 		"no asset bucket": {fakeSubstrate(t), microVMEnv,
-			[]rule{{"storage buckets describe", "1", "", "ERROR: (gcloud.storage.buckets.describe) gs://acme-snapshots-assets not found: 404."}},
+			[]rule{{"storage ls gs://acme-snapshots-assets", "1", "", "ERROR: (gcloud.storage.ls) gs://acme-snapshots-assets not found: 404."}},
 			"cannot read gs://acme-snapshots-assets"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -261,8 +274,15 @@ func TestDeleteMicroVMDepsKeepsAConfigInUse(t *testing.T) {
 		t.Errorf("delete did not name the pool using the config:\n%s", run.output)
 	}
 
-	// Delete needs no Substrate checkout: it removes the config by name.
-	run = runMicroVMDeps(t, t.TempDir(), microVMEnv, nil, "--delete")
+	// Delete needs no Substrate checkout and no bucket: it removes the config
+	// by name.
+	noBucket := map[string]string{}
+	for k, v := range microVMEnv {
+		if k != "BUCKET_NAME" {
+			noBucket[k] = v
+		}
+	}
+	run = runMicroVMDeps(t, t.TempDir(), noBucket, nil, "--delete")
 	if run.exitCode != 0 || !strings.Contains(run.calls, "kubectl delete --ignore-not-found --timeout=60s sandboxconfig microvm") {
 		t.Errorf("delete with no users: exit %d; calls:\n%s", run.exitCode, run.calls)
 	}

@@ -42,11 +42,14 @@ set -o errexit -o nounset -o pipefail
 # Bucket contents are left alone: they are inert until a SandboxConfig points
 # at them, and re-staging is cheap.
 #
-# Run from a Substrate checkout, or name one with SUBSTRATE_ROOT.
+# Run from a Substrate checkout, or name one with SUBSTRATE_ROOT. The checkout
+# must predate agent-substrate/substrate#2092 (v1.0.0-rc.1 or older), which
+# removed both files above; from #2092 on, `ate-setup deploy sandboxconfig`
+# stages micro-VM instead.
 #
 # Env:
-#   BUCKET_NAME      (required) the snapshot bucket setup-gcp was given. The
-#                    assets go to BUCKET_NAME-assets.
+#   BUCKET_NAME      (required for --install) the snapshot bucket setup-gcp
+#                    was given. The assets go to BUCKET_NAME-assets.
 #   SUBSTRATE_ROOT   Substrate checkout (default: the git root of the working
 #                    directory).
 #   KUBECTL_CONTEXT  (optional) kube context; otherwise the current context.
@@ -92,14 +95,6 @@ if [[ -z "${action}" ]]; then
   usage
   exit 1
 fi
-
-if [[ -z "${BUCKET_NAME:-}" ]]; then
-  echo "Error: BUCKET_NAME is not set; export the snapshot bucket name setup-gcp" >&2
-  echo "       was given (see tools/setup-gcp/README.md). The assets go to" >&2
-  echo "       BUCKET_NAME-assets." >&2
-  exit 1
-fi
-ASSET_BUCKET="${BUCKET_NAME}-assets"
 
 # kubectl falls back to localhost:8080 when neither --context nor a kubeconfig
 # current-context is set, which would surface as "connection refused" from the
@@ -156,15 +151,38 @@ if [[ "${action}" == "delete" ]]; then
     echo "       again." >&2
     exit 1
   fi
-  log "Done. (Bucket assets at gs://${ASSET_BUCKET}/kata-assets/ left in place.)"
+  log "Done. (Staged assets in the asset bucket's kata-assets/ left in place.)"
   exit 0
 fi
 
 # --- install ----------------------------------------------------------------
 
+# Only install needs the bucket: --delete removes the config by name.
+if [[ -z "${BUCKET_NAME:-}" ]]; then
+  echo "Error: BUCKET_NAME is not set; export the snapshot bucket name setup-gcp" >&2
+  echo "       was given (see tools/setup-gcp/README.md). The assets go to" >&2
+  echo "       BUCKET_NAME-assets." >&2
+  exit 1
+fi
+ASSET_BUCKET="${BUCKET_NAME}-assets"
+
 SUBSTRATE_ROOT="${SUBSTRATE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 ASSEMBLE="hack/microvm-assets/assemble.sh"
 MANIFEST_TEMPLATE="manifests/microvm/sandboxconfig-microvm.yaml.tmpl"
+# agent-substrate/substrate#2092 moved micro-VM staging into ate-setup and
+# deleted assemble.sh and the template, so a checkout from it on has
+# cmd/ate-setup but neither file. Name that case rather than calling it the
+# wrong directory, so a re-pin past #2092 is diagnosable.
+if [[ -n "${SUBSTRATE_ROOT}" && -d "${SUBSTRATE_ROOT}/cmd/ate-setup" \
+      && ! -f "${SUBSTRATE_ROOT}/${ASSEMBLE}" && ! -f "${SUBSTRATE_ROOT}/${MANIFEST_TEMPLATE}" ]]; then
+  echo "Error: ${SUBSTRATE_ROOT} is past agent-substrate/substrate#2092, which" >&2
+  echo "       removed ${ASSEMBLE} and ${MANIFEST_TEMPLATE}" >&2
+  echo "       and moved micro-VM staging into ate-setup. Stage from that tree with:" >&2
+  echo "         go run ./cmd/ate-setup deploy sandboxconfig --config <record> --sandbox-classes=gvisor,microvm" >&2
+  echo "       (the installer does this on such trees; see the root README's" >&2
+  echo "       Sandbox runtimes section for <record>)." >&2
+  exit 1
+fi
 if [[ -z "${SUBSTRATE_ROOT}" || ! -f "${SUBSTRATE_ROOT}/${ASSEMBLE}" || ! -f "${SUBSTRATE_ROOT}/${MANIFEST_TEMPLATE}" ]]; then
   echo "Error: ${SUBSTRATE_ROOT:-the working directory} is not an agent-substrate/substrate" >&2
   echo "       checkout with ${ASSEMBLE} and ${MANIFEST_TEMPLATE}." >&2
@@ -191,8 +209,10 @@ assemble() {
 }
 
 # Fail before the slow assemble if the asset bucket is missing: setup-gcp
-# creates it, and nothing here should.
-if ! run_gcloud storage buckets describe "gs://${ASSET_BUCKET}" --format="value(name)" >/dev/null; then
+# creates it, and nothing here should. Listing needs only
+# storage.objects.list, which object-scoped roles (roles/storage.objectUser,
+# objectAdmin) grant, where `buckets describe` would need storage.buckets.get.
+if ! run_gcloud storage ls "gs://${ASSET_BUCKET}" >/dev/null; then
   echo "Error: cannot read gs://${ASSET_BUCKET}. setup-gcp creates it beside the" >&2
   echo "       snapshot bucket: run \`go run ./tools/setup-gcp create bucket\` from" >&2
   echo "       substrate-gke, or check BUCKET_NAME and PROJECT_ID." >&2
