@@ -347,10 +347,11 @@ func grantCloudSQLProjectRoles(ctx context.Context, cfg *Config) error {
 		if err == nil {
 			return nil
 		}
-		if attempt >= 6 {
+		if attempt >= grantAttempts {
 			return fmt.Errorf("set project iam policy: %w", err)
 		}
-		slog.Warn("Setting IAM policy failed, retrying...", slog.Int("attempt", attempt), slog.Any("err", err))
+		slog.Info("Project IAM policy is not accepted yet (a new service account takes a moment to propagate), retrying",
+			slog.String("attempt", attemptOf(attempt, grantAttempts)), slog.Any("err", err))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -134,10 +134,13 @@ func retryUntilPropagated(ctx context.Context, action, accounts string, grant fu
 		}
 		// Neither is a propagation delay, so a retry won't fix it. The
 		// project grant goes through gRPC, the repository grant through REST.
-		if attempt >= 6 || isPermissionDenied(err) || isNotFound(err) || status.Code(err) == codes.PermissionDenied {
+		if attempt >= grantAttempts || isPermissionDenied(err) || isNotFound(err) || status.Code(err) == codes.PermissionDenied {
 			return err
 		}
-		slog.Warn(action+" failed, retrying...", slog.String("gsa", accounts), slog.Int("attempt", attempt), slog.Any("err", err))
+		// Expected, so not a warning and not "failed": that wording read as
+		// a terminal failure on the installer's screen (ai-on-gke/substrate-gke#115).
+		slog.Info(action+" is not accepted yet (a new service account takes a moment to propagate), retrying",
+			slog.String("gsa", accounts), slog.String("attempt", attemptOf(attempt, grantAttempts)), slog.Any("err", err))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -145,6 +148,9 @@ func retryUntilPropagated(ctx context.Context, action, accounts string, grant fu
 		}
 	}
 }
+
+// attemptOf renders attempt as "n/m" for the retry logs.
+func attemptOf(attempt, of int) string { return fmt.Sprintf("%d/%d", attempt, of) }
 
 // clusterNodeServiceAccounts returns the service accounts the cluster's node
 // pools run as, sorted and without duplicates. A pool that names none runs as

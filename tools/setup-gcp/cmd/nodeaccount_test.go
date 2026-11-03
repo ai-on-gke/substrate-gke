@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -282,5 +284,37 @@ func TestRetryUntilPropagatedStopsOnPermissionDenied(t *testing.T) {
 				t.Errorf("err = %v after %d calls, want an error after %d", err, calls, tc.calls)
 			}
 		})
+	}
+}
+
+// ai-on-gke/substrate-gke#115: a retry while the service account propagates
+// is expected, so the log says so, with the attempt out of the total, rather
+// than "failed", which read as a terminal failure on the installer's screen.
+func TestRetryUntilPropagatedLogsAnExpectedWait(t *testing.T) {
+	orig := nodeAccountRetryDelay
+	nodeAccountRetryDelay = 0
+	t.Cleanup(func() { nodeAccountRetryDelay = orig })
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	calls := 0
+	err := retryUntilPropagated(context.Background(), "Granting the role", nodeSA, func() error {
+		calls++
+		if calls == 1 {
+			return status.Error(codes.InvalidArgument, "does not exist")
+		}
+		return nil
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("err = %v after %d calls, want success on the second", err, calls)
+	}
+	log := buf.String()
+	if strings.Contains(strings.ToLower(log), "fail") || !strings.Contains(log, "level=INFO") {
+		t.Errorf("retry logged as a failure:\n%s", log)
+	}
+	if !strings.Contains(log, "attempt=1/6") || !strings.Contains(log, "propagate") {
+		t.Errorf("retry log lacks the attempt count or the reason:\n%s", log)
 	}
 }

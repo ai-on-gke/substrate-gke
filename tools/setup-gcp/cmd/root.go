@@ -24,6 +24,17 @@ var rootCmd = &cobra.Command{
 	Use:   "setup-gcp",
 	Short: "Setup GCP resources for Agent Substrate",
 	Long:  `A tool to provision and configure GCP resources required for Agent Substrate.`,
+	// main prints the error; left to cobra it would be printed twice, with
+	// the usage text in between.
+	SilenceErrors: true,
+	// The usage text helps with a flag the command does not know, not with
+	// an API call that failed, where it pushes the error off the screen
+	// (ai-on-gke/substrate-gke#115). Silence it once the flags have parsed:
+	// a failing RunE prints only the error, while --help and a bad flag or
+	// subcommand, which fail before this hook, still show usage.
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		cmd.SilenceUsage = true
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
