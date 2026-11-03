@@ -120,26 +120,40 @@ func TestProgressNeverMovesBackward(t *testing.T) {
 	}
 }
 
+// The rows follow the script's order (snapshot.DeployFilestoreCSI): fetch and
+// the API check before anything changes, then the addon, IAM, and the apply.
 func TestFilestoreCSIChecklistTracksDeployOutput(t *testing.T) {
 	items := FilestoreCSI()
 	lines := []string{
-		"Disabling managed GKE Filestore CSI Driver addon...",
 		"Cloning into 'gcp-filestore-csi-driver'...",
+		snapshot.FilestoreAPICheckLine + " (ate.dev/v1)...",
+		"The cluster serves csidriverconfigs.ate.dev as: v1",
+		"Disabling managed GKE Filestore CSI Driver addon...",
+		"Updating [prod]...",
 		"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
 		"🔐 Configuring Service Account & IAM Bindings...",
 		"📦 Applying Substrate Filestore CSI Driver Overlay via Kustomize...",
 	}
-	if got := feed(items, lines[:1]); got != 0 {
-		t.Fatalf("active = %d, want 0 (disable addon phase)", got)
+	for i, want := range []int{0, 1, 1, 2, 2, 2, 3, 4} {
+		if got := feed(items, lines[:i+1]); got != want {
+			t.Fatalf("after %d lines active = %d, want %d", i+1, got, want)
+		}
 	}
-	if got := feed(items, lines[:2]); got != 1 {
-		t.Fatalf("active = %d, want 1 (fetch phase)", got)
+	if items[1].Label != "Check the cluster serves the overlay's CSIDriverConfig API" || !strings.HasPrefix(items[2].Label, "Disable managed") {
+		t.Errorf("the API check row must come before the addon row: %q, %q", items[1].Label, items[2].Label)
 	}
-	if got := feed(items, lines[:4]); got != 2 {
-		t.Fatalf("active = %d, want 2 (IAM phase)", got)
+}
+
+// A check that fails stops the step at its row: nothing after it has run.
+func TestFilestoreCSIChecklistStopsAtAFailedAPICheck(t *testing.T) {
+	lines := []string{
+		"Cloning into 'gcp-filestore-csi-driver'...",
+		snapshot.FilestoreAPICheckLine + " (ate.dev/v1alpha1)...",
+		"error: the Filestore overlay's CSIDriverConfig is written against ate.dev/v1alpha1, but this cluster serves csidriverconfigs.ate.dev as: v1",
+		"Nothing was changed: no IAM binding was granted and the managed Filestore addon was left as it is.",
 	}
-	if got := feed(items, lines); got != 3 {
-		t.Fatalf("active = %d, want 3 (apply phase)", got)
+	if got := feed(FilestoreCSI(), lines); got != 1 {
+		t.Fatalf("active = %d, want 1 (the check row)", got)
 	}
 }
 
@@ -189,22 +203,23 @@ func TestMicroVMDepsChecklistTracksCachedAssets(t *testing.T) {
 	}
 }
 
+// A cluster without the managed driver has nothing to disable. The script
+// says so, and the row lights on that line rather than staying unlit while
+// deploy.sh runs.
 func TestFilestoreCSIChecklistTracksDeployOutputWithoutAddonDisable(t *testing.T) {
 	items := FilestoreCSI()
 	lines := []string{
 		"Cloning into 'gcp-filestore-csi-driver'...",
+		snapshot.FilestoreAPICheckLine + " (ate.dev/v1)...",
+		snapshot.FilestoreAddonOffLine,
 		"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
 		"🔐 Configuring Service Account & IAM Bindings...",
 		"📦 Applying Substrate Filestore CSI Driver Overlay via Kustomize...",
 	}
-	if got := feed(items, lines[:1]); got != 1 {
-		t.Fatalf("active = %d, want 1 (fetch phase)", got)
-	}
-	if got := feed(items, lines[:3]); got != 2 {
-		t.Fatalf("active = %d, want 2 (IAM phase)", got)
-	}
-	if got := feed(items, lines); got != 3 {
-		t.Fatalf("active = %d, want 3 (apply phase)", got)
+	for i, want := range []int{0, 1, 2, 2, 3, 4} {
+		if got := feed(items, lines[:i+1]); got != want {
+			t.Fatalf("after %d lines active = %d, want %d", i+1, got, want)
+		}
 	}
 }
 

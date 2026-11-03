@@ -103,11 +103,19 @@ func Deploy(prebuilt bool) []ChecklistItem {
 	})
 }
 
-// FilestoreCSI tracks the phases of deploying the Filestore CSI driver substrate overlay.
+// FilestoreCSI tracks the phases of deploying the Filestore CSI driver
+// substrate overlay, in the order snapshot.DeployFilestoreCSI runs them: the
+// fetch and the API check first, since neither changes anything, and the
+// check fails the step before the managed addon is turned off or deploy.sh
+// grants IAM when the overlay's CSIDriverConfig is written against an API
+// version the cluster does not serve (#114). The addon row lights either
+// way — the script says so when there is nothing to disable — so a cluster
+// without the managed driver does not show it as a stall.
 func FilestoreCSI() []ChecklistItem {
 	return []ChecklistItem{
-		{"Disable managed Filestore CSI driver addon (if enabled)", containsAny("Disabling managed", "GcpFilestoreCsiDriver=DISABLED", "Updating [")},
 		{"Fetch Filestore CSI driver overlay repository", containsAny("Cloning into", "Fetching")},
+		{"Check the cluster serves the overlay's CSIDriverConfig API", contains(snapshot.FilestoreAPICheckLine)},
+		{"Disable managed Filestore CSI driver addon (if enabled)", containsAny("Disabling managed", "GcpFilestoreCsiDriver=DISABLED", "Updating [", snapshot.FilestoreAddonOffLine)},
 		{"Configure Service Account & IAM Bindings", contains("Configuring Service Account")},
 		{"Apply Kustomize overlay", contains("Applying Substrate Filestore CSI Driver Overlay")},
 	}

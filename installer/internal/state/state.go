@@ -338,7 +338,14 @@ type Setup struct {
 	KoDockerRepo               string
 	ArtifactRegistryRepository string
 
+	// FilestoreCSIDeployed records that the optional Filestore step
+	// installed the driver; FilestoreCSIFailed that it was run, failed, and
+	// was skipped from the failure. Neither set means it was skipped
+	// outright. The summaries tell the three apart because a failed run may
+	// have changed things a skip never does — an IAM grant, a half-applied
+	// gcp-filestore-csi-driver namespace — and "skipped" would hide that.
 	FilestoreCSIDeployed bool
+	FilestoreCSIFailed   bool
 
 	// SandboxClass is the runtime this install sets up: SandboxGVisor or
 	// SandboxMicroVM. MicroVMDeployed records that the micro-VM assets were

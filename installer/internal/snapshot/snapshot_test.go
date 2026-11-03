@@ -2198,3 +2198,88 @@ func TestDeployAteSystemChecksPlacement(t *testing.T) {
 		t.Errorf("shared system nodes still check placement:\n%s", script)
 	}
 }
+
+// The Filestore step must not change anything until it knows the overlay can
+// be applied: the overlay's CSIDriverConfig is written against an API version
+// the cluster may not serve (#114), and deploy.sh grants IAM before it
+// applies. So the clone and the API check come first, and the managed addon
+// update and deploy.sh after, in that order — with no gcloud at all ahead of
+// the check.
+func TestFilestoreScriptChecksTheAPIBeforeChangingAnything(t *testing.T) {
+	script := NewBuilder(fakeCheckout(t), false).DeployFilestoreCSI(testSetup(t)).Argv[2]
+	last := -1
+	for _, want := range []string{
+		"git clone --depth 1 " + FilestoreOverlayRepo,
+		"kubectl get crd csidriverconfigs.ate.dev",
+		"gcloud container clusters describe",
+		"GcpFilestoreCsiDriver=DISABLED",
+		FilestoreAddonOffLine,
+		"./deploy.sh --project-id",
+	} {
+		i := strings.Index(script, want)
+		if i < 0 {
+			t.Fatalf("script lacks %q:\n%s", want, script)
+		}
+		if i < last {
+			t.Errorf("%q runs before the step that must precede it:\n%s", want, script)
+		}
+		last = i
+	}
+	if strings.Index(script, "gcloud") < strings.Index(script, "kubectl get crd") {
+		t.Errorf("gcloud runs before the API check:\n%s", script)
+	}
+}
+
+// filestoreAPICheck runs as written against a fake kubectl. A cluster that
+// serves only v1 must fail an overlay written against v1alpha1 — upstream's
+// state at the v1.0.0-rc.1 pin — naming both versions and saying nothing was
+// changed; pass an overlay on v1, or a cluster that still serves both; and
+// fail a cluster without the CRD.
+func TestFilestoreAPICheckComparesTheOverlayWithTheCluster(t *testing.T) {
+	bin := t.TempDir()
+	fake := "#!/bin/sh\n[ -n \"$FAKE_SERVED\" ] || exit 1\nprintf '%s' \"$FAKE_SERVED\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(apiVersion, served string) (string, error) {
+		overlay := t.TempDir()
+		manifest := "# Substrate CSIDriverConfig (" + apiVersion + ").\napiVersion: " + apiVersion + "\nkind: CSIDriverConfig\n"
+		if err := os.WriteFile(filepath.Join(overlay, "csi_driver_config.yaml"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "-c", "set -euo pipefail\n"+filestoreAPICheck)
+		cmd.Dir = overlay
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FAKE_SERVED="+served)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	out, err := run("ate.dev/v1alpha1", "v1 ")
+	if err == nil {
+		t.Fatalf("an overlay on v1alpha1 passed a cluster serving only v1:\n%s", out)
+	}
+	for _, want := range []string{
+		FilestoreAPICheckLine + " (ate.dev/v1alpha1)",
+		"written against ate.dev/v1alpha1, but this cluster serves csidriverconfigs.ate.dev as: v1",
+		"Nothing was changed",
+		"kubernetes-sigs/gcp-filestore-csi-driver#1416",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure output lacks %q:\n%s", want, out)
+		}
+	}
+	if out, err := run("ate.dev/v1", "v1 "); err != nil {
+		t.Errorf("an overlay on v1 failed a cluster serving v1: %v\n%s", err, out)
+	} else if !strings.Contains(out, "serves csidriverconfigs.ate.dev as: v1\n") {
+		t.Errorf("a passing check does not say what the cluster serves:\n%s", out)
+	}
+	if out, err := run("ate.dev/v1alpha1", "v1alpha1 v1 "); err != nil {
+		t.Errorf("a cluster serving both versions failed: %v\n%s", err, out)
+	}
+	if out, err := run("ate.dev/v1", ""); err == nil || !strings.Contains(out, "no csidriverconfigs.ate.dev CRD") {
+		t.Errorf("a cluster without the CRD: err=%v\n%s", err, out)
+	}
+	if out, err := run("storage.k8s.io/v1", "v1 "); err == nil || !strings.Contains(out, "could not read the CSIDriverConfig apiVersion") {
+		t.Errorf("an overlay whose CSIDriverConfig is not on ate.dev: err=%v\n%s", err, out)
+	}
+}
