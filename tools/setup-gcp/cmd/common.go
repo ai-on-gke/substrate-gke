@@ -59,6 +59,11 @@ type Config struct {
 	// NodeGSAName is the name of the service account the nodes of a new
 	// cluster run as (NODE_GSA_NAME).
 	NodeGSAName string
+	// SeparateSystemNodes adds the system node pools to a new cluster (see
+	// systemNodePools).
+	SeparateSystemNodes    bool
+	SystemInfraMachineType string
+	PostgresMachineType    string
 
 	BucketName           string
 	AteletSnapshotAccess bool

@@ -100,16 +100,8 @@ func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateCl
 		LinuxNodeConfig: &containerpb.LinuxNodeConfig{
 			Sysctls: maps.Clone(requiredNodeSysctls),
 		},
-		// The node service account holds only what nodes need (see
-		// ensureNodeServiceAccount), so the broad scope GKE recommends with a
-		// custom service account grants nothing beyond its IAM roles.
-		ServiceAccount: nodeGSAEmail(cfg),
-		OauthScopes:    []string{"https://www.googleapis.com/auth/cloud-platform"},
-		ShieldedInstanceConfig: &containerpb.ShieldedInstanceConfig{
-			EnableSecureBoot:          true,
-			EnableIntegrityMonitoring: true,
-		},
 	}
+	hardenNodeConfig(cfg, nodeConfig)
 	if cfg.EnableNestedVirtualization {
 		nodeConfig.AdvancedMachineFeatures = &containerpb.AdvancedMachineFeatures{
 			EnableNestedVirtualization: proto.Bool(true),
@@ -130,18 +122,22 @@ func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateCl
 			ProvisionedThroughput: cfg.BootDiskProvisionedThroughputMBps,
 		}
 	}
+	pools := []*containerpb.NodePool{{
+		Name:             "substrate-node-pool",
+		InitialNodeCount: 2,
+		Config:           nodeConfig,
+	}}
+	// A regional cluster gets its system pools afterwards, in one zone (see
+	// addRegionalSystemPools).
+	if !regional(cfg) {
+		pools = append(pools, systemNodePools(cfg)...)
+	}
 	req := &containerpb.CreateClusterRequest{
 		Parent: parent,
 		Cluster: &containerpb.Cluster{
 			Name:                  cfg.ClusterName,
 			InitialClusterVersion: cfg.ClusterVersion,
-			NodePools: []*containerpb.NodePool{
-				{
-					Name:             "substrate-node-pool",
-					InitialNodeCount: 2,
-					Config:           nodeConfig,
-				},
-			},
+			NodePools:             pools,
 			EnableK8SBetaApis: &containerpb.K8SBetaAPIConfig{
 				EnabledApis: requiredBetaAPIs,
 			},
@@ -285,14 +281,20 @@ func kubernetesMinor(version string) (int, bool) {
 	return n, true
 }
 
-func createClusterInternal(ctx context.Context, cfg *Config, client *container.ClusterManagerClient, parent string) error {
+func createClusterInternal(ctx context.Context, cfg *Config, client *container.ClusterManagerClient, parent, clusterName string) error {
 	slog.Info("Cluster does not exist. Creating...", slog.String("cluster", cfg.ClusterName))
 	req := buildCreateClusterRequest(parent, cfg)
 	op, err := client.CreateCluster(ctx, req)
 	if err != nil {
 		return fmt.Errorf("create cluster: %w", err)
 	}
-	return waitContainerOperation(ctx, client, op.Name, cfg)
+	if err := waitContainerOperation(ctx, client, op.Name, cfg); err != nil {
+		return err
+	}
+	if regional(cfg) {
+		return addRegionalSystemPools(ctx, cfg, client, clusterName)
+	}
+	return nil
 }
 
 func createClusterIdempotent(ctx context.Context, cfg *Config) error {
@@ -326,7 +328,7 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 		if err := validateClusterVersion(cfg); err != nil {
 			return err
 		}
-		return createClusterInternal(ctx, cfg, client, parent)
+		return createClusterInternal(ctx, cfg, client, parent, clusterName)
 	}
 
 	slog.Info("Cluster exists. Checking attributes...", slog.String("cluster", cfg.ClusterName))
@@ -461,6 +463,8 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 			slog.String("node_service_account", nodeGSAEmail(cfg)),
 			slog.String("remedy", "add a node pool with --service-account="+nodeGSAEmail(cfg)+" --shielded-secure-boot --shielded-integrity-monitoring, move workloads to it, and delete the old pool"))
 	}
+
+	warnMissingSystemPools(cfg, cluster)
 
 	if !nodeSysctlsConfigured(cluster) {
 		slog.Warn("Cluster has no node pool with high-density node sysctls; create cluster only sets them on a cluster it creates",
@@ -646,6 +650,7 @@ func init() {
 	clusterCmd.Flags().StringVar(&cfg.Subnetwork, "subnetwork", getEnv("SUBNETWORK", "default"), "VPC subnetwork name [env: SUBNETWORK]")
 	clusterCmd.Flags().StringVar(&cfg.MachineType, "machine-type", resolveMachineTypeDefault(), "Machine type for the node pool [env: NODE_MACHINE_TYPE]")
 	addNodeGSANameFlag(clusterCmd)
+	addSystemNodeFlags(clusterCmd)
 	clusterCmd.Flags().BoolVar(&cfg.EnableDataplaneV2, "enable-dataplane-v2", getEnv("ENABLE_DATAPLANE_V2", true), "Enable Dataplane V2 [env: ENABLE_DATAPLANE_V2]")
 	clusterCmd.Flags().BoolVar(&cfg.EnableNestedVirtualization, "enable-nested-virtualization", getEnv("ENABLE_NESTED_VIRTUALIZATION", true), "Create the node pool with nested virtualization, exposing /dev/kvm for micro-VM workers; needs a machine type that supports it. Turn off with --enable-nested-virtualization=false [env: ENABLE_NESTED_VIRTUALIZATION]")
 	clusterCmd.Flags().Int32Var(&cfg.BootDiskSizeGB, "boot-disk-size", getEnv("BOOT_DISK_SIZE_GB", int32(0)), "Boot disk size in GB for the node pool; 0 = GKE default (100 GB) [env: BOOT_DISK_SIZE_GB]")

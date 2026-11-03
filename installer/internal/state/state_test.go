@@ -272,3 +272,14 @@ func TestBuildRepositoryFollowsRegionAndRespectsOverrides(t *testing.T) {
 		t.Fatalf("override changed: %q", got)
 	}
 }
+
+// An exported SEPARATE_SYSTEM_NODES=false turns system node separation off,
+// as it does for setup-gcp; anything else leaves the default on.
+func TestNewSetupReadsSeparateSystemNodes(t *testing.T) {
+	for v, shared := range map[string]bool{"": false, "true": false, "false": true, "0": true, " FALSE ": true, "nope": false} {
+		t.Setenv("SEPARATE_SYSTEM_NODES", v)
+		if got := NewSetup().SharedSystemNodes; got != shared {
+			t.Errorf("SEPARATE_SYSTEM_NODES=%q: SharedSystemNodes = %v, want %v", v, got, shared)
+		}
+	}
+}

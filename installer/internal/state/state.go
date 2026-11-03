@@ -21,7 +21,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
@@ -323,6 +325,12 @@ type Setup struct {
 	ClusterVersion string
 	ReleaseChannel string
 
+	// SharedSystemNodes turns off system node separation: a cluster the
+	// install creates gets no ate-system-infra and ate-postgres node pools,
+	// and Substrate's system components run on the worker nodes. Separation
+	// is the default, so it is the zero value.
+	SharedSystemNodes bool
+
 	BucketName                 string
 	KoDockerRepo               string
 	ArtifactRegistryRepository string
@@ -360,7 +368,17 @@ func NewSetup() *Setup {
 		SandboxClass:   SandboxGVisor,
 		AutoscaleMin:   1,
 		AutoscaleMax:   5,
+		// An exported SEPARATE_SYSTEM_NODES=false turns separation off, as it
+		// does for setup-gcp, and prefills the Advanced field to match.
+		SharedSystemNodes: exportedFalse("SEPARATE_SYSTEM_NODES"),
 	}
+}
+
+// exportedFalse reports whether the environment variable is set to a value
+// strconv.ParseBool reads as false.
+func exportedFalse(name string) bool {
+	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(name)))
+	return err == nil && !v
 }
 
 // MicroVM reports whether this install sets up the micro-VM sandbox class.

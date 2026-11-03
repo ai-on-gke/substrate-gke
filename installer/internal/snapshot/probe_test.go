@@ -178,7 +178,7 @@ func TestCheckInstalled(t *testing.T) {
 	// The probe must not rewrite the user's kubeconfig just for browsing
 	// clusters, and must not swallow a failing DaemonSet query into a
 	// bare-namespace answer; only the best-effort version report may fail.
-	if !strings.Contains(script, `KUBECONFIG=$(mktemp)`) {
+	if !strings.Contains(script, `export KUBECONFIG="$kubeconfig_dir/config"`) {
 		t.Errorf("probe does not isolate its kubeconfig:\n%s", script)
 	}
 	if strings.Count(script, "|| true") != 1 || !strings.Contains(script, buildQuery) {
