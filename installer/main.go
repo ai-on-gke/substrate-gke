@@ -322,25 +322,35 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		teardown = b.TeardownCommand(st, b.Root)
 	}
 
-	// Two teardown depths: delete only the control plane (keep the cluster),
-	// or delete everything this install created and stop the charges. The
-	// cleanup invocation carries the wizard's own answers so it can be run
-	// from a fresh clone weeks later.
+	// Three teardown depths: delete only the control plane (keep the
+	// cluster); delete the cluster and what only it uses; or delete the
+	// project-wide resources as well. The cleanup invocations carry the
+	// wizard's own answers so they can be run from a fresh clone weeks later.
+	//
+	// The cluster-scoped form leads. The dashboards and the transfer and node
+	// service accounts are shared by every Substrate cluster in the project,
+	// and the installer cannot tell whether another one still depends on
+	// them — the provision step finding them already there is one sign — so
+	// the project-wide form is a second, explicit option.
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	accounts := "snapshot transfer service account"
+	resources := "snapshot and asset buckets, and the IAM bindings on them"
+	if st.CreatesArtifactRepository() {
+		resources = "snapshot and asset buckets, the IAM bindings on them, and the image repository"
+	}
+	note("Delete this cluster and what only it uses — the cluster, its", resources+":")
+	command(b.CleanupCommand(st, true))
 	// A Filestore run that failed may still have created the account and
 	// its project role (#143), so it is named for a failed run too.
+	accounts := "the snapshot transfer and node service accounts"
 	if st.FilestoreCSIDeployed || st.FilestoreCSIFailed {
-		accounts = "snapshot transfer and Filestore CSI service accounts"
+		accounts = "the snapshot transfer, Filestore CSI and node service accounts"
 	}
-	resources := "snapshot and asset buckets, " + accounts + ", IAM bindings, and dashboards"
-	if st.CreatesArtifactRepository() {
-		resources = "snapshot and asset buckets, " + accounts + ", IAM bindings, dashboards, and the image repository"
-	}
-	note("Delete everything this install created in GCP — the cluster, the", resources+":")
-	command(b.CleanupCommand(st))
+	note("To also remove the project-wide resources every Substrate cluster in "+st.ProjectID+" shares —",
+		"the dashboards and "+accounts+" — only if no",
+		"other cluster uses them:")
+	command(b.CleanupCommand(st, false))
 
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
 	// install leaves a written copy behind.
