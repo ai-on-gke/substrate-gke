@@ -467,6 +467,11 @@ func TestInstallMicroVMDepsKeepsTheControlPlaneSettings(t *testing.T) {
 // kind-local one. Both are the script's inputs rather than its defaults, so
 // an inherited ARCH or ATE_INSTALL_KIND from the operator's shell would
 // silently produce a broken install.
+//
+// The upload itself must not use gcloud's parallel composite uploads: on a
+// workstation with context-aware access enabled their worker processes fail
+// on the client certificate file, and the step dies after the download with
+// the SandboxConfig never applied (#111).
 func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
 	st := testSetup(t)
 	st.SandboxClass = state.SandboxMicroVM
@@ -474,7 +479,11 @@ func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
 
 	for _, spec := range []execx.Spec{b.InstallMicroVMDeps(st), b.DeployDemo(st, "counter")} {
-		for _, want := range []string{"ARCH=amd64", "ATE_INSTALL_KIND=false"} {
+		for _, want := range []string{
+			"ARCH=amd64",
+			"ATE_INSTALL_KIND=false",
+			"CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False",
+		} {
 			if !slices.Contains(spec.Env, want) {
 				t.Errorf("%s: env missing %q:\n%v", spec.Label, want, spec.Env)
 			}
