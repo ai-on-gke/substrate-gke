@@ -371,6 +371,8 @@ GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repo
 
 Every command's full output is written to a timestamped log under `<user cache dir>/substrate-gke/logs/`. Press `v` in the wizard for a scrollable log viewer; failures show the extracted cause and the log path.
 
+That log is the record to keep: the wizard is an interactive terminal program, and started with its input or output piped or redirected (`go run . | tee log`, a CI step) it exits with a message instead of running. Driving it without a terminal is [#107](https://github.com/ai-on-gke/substrate-gke/issues/107).
+
 ## Upgrading an installed cluster
 
 > [!CAUTION]

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
@@ -131,6 +132,14 @@ func main() {
 		}
 		fmt.Println("\nAll good — run the installer.")
 		return
+	}
+
+	// Everything from here on is the wizard, a Bubble Tea program. Piped or
+	// redirected (`go run . | tee log`, a CI step) it never learns its window
+	// size and repaints "loading…" forever, so refuse up front and say why.
+	if msg := needsTerminal(os.Stdin, os.Stdout); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(2)
 	}
 
 	// Bootstrap runs setup-gcp from this repository, and the deploy adds
@@ -334,6 +343,31 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// full, where it can be copied.
 	section("Reaching actors through the ingress router")
 	note(b.RouterNote(st))
+}
+
+// needsTerminal returns the refusal to print when the wizard cannot run
+// because stdin or stdout is not a terminal, or "" when both are. The
+// message names the log the installer writes, since a log is what piping
+// the wizard through tee was after, and the issue that tracks a mode for
+// automation, which this check is not a substitute for.
+func needsTerminal(stdin, stdout *os.File) string {
+	in, out := term.IsTerminal(stdin.Fd()), term.IsTerminal(stdout.Fd())
+	if in && out {
+		return ""
+	}
+	which := "input and output are"
+	switch {
+	case in:
+		which = "output is"
+	case out:
+		which = "input is"
+	}
+	msg := "The installer is an interactive terminal program, but its " + which + " not a terminal. " +
+		"Run it directly in a terminal rather than piping or redirecting it."
+	if dir, err := execx.DefaultLogDir(); err == nil {
+		msg += " To keep a record of a run, use the log it writes under " + dir + " (see README, Logs)."
+	}
+	return msg + " For automation see https://github.com/ai-on-gke/substrate-gke/issues/107."
 }
 
 // absPath returns path made absolute, or path itself if that fails.
