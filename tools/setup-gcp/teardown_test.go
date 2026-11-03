@@ -28,14 +28,16 @@ import (
 // stderr. Calls matching no rule succeed silently. Every call is logged.
 // Fields are separated by ASCII unit separators (0x1f) rather than tabs:
 // `read` collapses runs of whitespace separators, which would shift an empty
-// stdout field's neighbour into it.
+// stdout field's neighbour into it. The file holds one rule per line, so a
+// line break inside a field travels as a record separator (0x1e); that is how
+// a rule reproduces gcloud's multi-line errors.
 const fakeGcloud = `#!/usr/bin/env bash
 echo "gcloud $*" >> "$CALLS"
 args="$*"
 while IFS=$'\x1f' read -r pat code out err; do
   if [[ -n "$pat" && "$args" == *"$pat"* ]]; then
-    [ -n "$out" ] && printf '%s\n' "$out"
-    [ -n "$err" ] && printf '%s\n' "$err" >&2
+    [ -n "$out" ] && printf '%s\n' "${out//$'\x1e'/$'\n'}"
+    [ -n "$err" ] && printf '%s\n' "${err//$'\x1e'/$'\n'}" >&2
     exit "$code"
   fi
 done < "$RULES"
@@ -79,7 +81,11 @@ func runTeardown(t *testing.T, cwd string, vars map[string]string, rules []rule,
 	}
 	var lines []string
 	for _, r := range rules {
-		lines = append(lines, strings.Join([]string{r.pattern, r.code, r.stdout, r.stderr}, "\x1f"))
+		fields := []string{r.pattern, r.code, r.stdout, r.stderr}
+		for i, f := range fields {
+			fields[i] = strings.ReplaceAll(f, "\n", "\x1e")
+		}
+		lines = append(lines, strings.Join(fields, "\x1f"))
 	}
 	rulesFile := filepath.Join(dir, "rules")
 	if err := os.WriteFile(rulesFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
@@ -126,10 +132,29 @@ const (
 	bindingNotPresent = "ERROR: Policy binding with the specified principal, role, and condition not found!"
 )
 
+// How gcloud (583.0.0) reports deleting a cluster that is not in the given
+// location: the code=404 is on the line after "ERROR:", in the Python
+// representation of the failed request's arguments (its \n is literal).
+const clusterNotFound = "ERROR: (gcloud.container.clusters.delete) Some requests did not succeed:\n" +
+	` - args: ["ResponseError: code=404, message=Not found: projects/acme/zones/us-west1-c/clusters/substrate-test. This command is authenticated as deployer@acme.iam.gserviceaccount.com which is the active account specified by the [core/account] property.\nNo cluster named 'substrate-test' in acme."]` + "\n" +
+	"   exit_code: 1"
+
+// How IAM reports deleting a service account that is gone: a deleted account
+// can be undeleted for 30 days, and for one IAM answers with
+// PERMISSION_DENIED "(or it may not exist)" rather than NOT_FOUND. A caller
+// who lacks iam.serviceAccounts.delete on an existing account gets the same
+// words.
+const serviceAccountDenied = "ERROR: (gcloud.iam.service-accounts.delete) PERMISSION_DENIED: Permission 'iam.serviceAccounts.delete' denied on resource (or it may not exist). This command is authenticated as deployer@acme.iam.gserviceaccount.com which is the active account specified by the [core/account] property.\n" +
+	"- '@type': type.googleapis.com/google.rpc.ErrorInfo\n" +
+	"  domain: iam.googleapis.com\n" +
+	"  metadata:\n" +
+	"    permission: iam.serviceAccounts.delete\n" +
+	"  reason: IAM_PERMISSION_DENIED"
+
 // notFoundRules make every deletion fail the way gcloud reports a resource
 // that is already gone, as on a re-run after a partial teardown.
 var notFoundRules = []rule{
-	{"container clusters delete", "1", "", "ERROR: (gcloud.container.clusters.delete) ResponseError: code=404, message=Not found: projects/acme/zones/us-west1-c/clusters/substrate-test."},
+	{"container clusters delete", "1", "", clusterNotFound},
 	{"container clusters list", "0", "", ""},
 	{"storage buckets describe", "1", "", bucketNotFound},
 	{"projects remove-iam-policy-binding", "1", "", bindingNotPresent},
@@ -146,6 +171,79 @@ func TestTeardownToleratesAlreadyDeletedResources(t *testing.T) {
 	}
 	if !strings.Contains(run.calls, "iam service-accounts delete ate-snapshot-transfer@acme.iam.gserviceaccount.com") {
 		t.Errorf("--all did not delete the snapshot transfer service account; calls:\n%s", run.calls)
+	}
+}
+
+// A service account deleted by an earlier run answers its delete with
+// PERMISSION_DENIED "(or it may not exist)". Teardown then lists the
+// project's accounts: absent means deleted; present means the delete really
+// was denied, which fails the step and says so; a denied listing warns and
+// counts the account as deleted, as a denied cluster listing does.
+func TestTeardownTellsADeletedServiceAccountFromADeniedDelete(t *testing.T) {
+	tests := []struct {
+		name       string
+		list       rule
+		wantExit   bool
+		wantOutput string
+	}{
+		{"deleted", rule{"iam service-accounts list", "0", "", ""}, false, "(already deleted)"},
+		{"exists", rule{"iam service-accounts list", "0", "ate-gke-node@acme.iam.gserviceaccount.com", ""}, true, "exists; deleting it was denied"},
+		{"list denied", rule{"iam service-accounts list", "1", "", "ERROR: (gcloud.iam.service-accounts.list) PERMISSION_DENIED: Permission 'iam.serviceAccounts.list' denied on resource 'projects/acme'."}, false, "WARNING: could not verify"},
+		{"list failed", rule{"iam service-accounts list", "1", "", "ERROR: (gcloud.iam.service-accounts.list) UNAVAILABLE: The service is currently unavailable."}, true, "FAILED: delete node service account"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := []rule{{"iam service-accounts delete", "1", "", serviceAccountDenied}, tt.list}
+			run := runTeardown(t, "", teardownEnv, rules, "--delete-node-service-account")
+			if failed := run.exitCode != 0; failed != tt.wantExit {
+				t.Errorf("teardown exit code %d, want failure = %v:\n%s", run.exitCode, tt.wantExit, run.output)
+			}
+			if !strings.Contains(run.output, tt.wantOutput) {
+				t.Errorf("teardown output lacks %q:\n%s", tt.wantOutput, run.output)
+			}
+			if !strings.Contains(run.calls, "iam service-accounts list --project=acme --filter=email=ate-gke-node@acme.iam.gserviceaccount.com") {
+				t.Errorf("teardown did not list the project's service accounts; calls:\n%s", run.calls)
+			}
+			if tt.wantExit == strings.Contains(run.output, "(already deleted)") {
+				t.Errorf("teardown reported the account deleted = %v, want %v:\n%s", !tt.wantExit, tt.wantExit, run.output)
+			}
+		})
+	}
+}
+
+// A PERMISSION_DENIED without "(or it may not exist)" is a plain denial, and
+// must not trigger the listing or count as deleted.
+func TestTeardownReportsADeniedServiceAccountDelete(t *testing.T) {
+	rules := []rule{{"iam service-accounts delete", "1", "", "ERROR: (gcloud.iam.service-accounts.delete) PERMISSION_DENIED: Permission 'iam.serviceAccounts.delete' denied on resource 'projects/acme/serviceAccounts/ate-gke-node@acme.iam.gserviceaccount.com'."}}
+	run := runTeardown(t, "", teardownEnv, rules, "--delete-node-service-account")
+	if run.exitCode == 0 || strings.Contains(run.output, "(already deleted)") {
+		t.Errorf("teardown exit %d after a denied delete:\n%s", run.exitCode, run.output)
+	}
+	if strings.Contains(run.calls, "iam service-accounts list") {
+		t.Errorf("teardown listed service accounts after a plain denial; calls:\n%s", run.calls)
+	}
+}
+
+// Every remove-iam-policy-binding passes --format=none: gcloud otherwise
+// prints the whole updated policy, hundreds of lines naming every member of
+// a shared project, on each revoke.
+func TestTeardownRevokesWithoutPrintingThePolicy(t *testing.T) {
+	run := runTeardown(t, "", teardownEnv, nil, "--all")
+	if run.exitCode != 0 {
+		t.Fatalf("teardown --all exited %d, want 0:\n%s", run.exitCode, run.output)
+	}
+	revokes := 0
+	for _, call := range strings.Split(run.calls, "\n") {
+		if !strings.Contains(call, "remove-iam-policy-binding") {
+			continue
+		}
+		revokes++
+		if !strings.Contains(call, " --format=none") {
+			t.Errorf("revoke prints the policy: %s", call)
+		}
+	}
+	if revokes == 0 {
+		t.Fatalf("--all ran no remove-iam-policy-binding; calls:\n%s", run.calls)
 	}
 }
 
@@ -277,7 +375,7 @@ func TestTeardownReportsAClusterInAnotherLocation(t *testing.T) {
 }
 
 // teardownTools are the external commands teardown.sh runs besides gcloud.
-var teardownTools = []string{"bash", "cat", "grep", "mktemp", "rm", "tee", "tr"}
+var teardownTools = []string{"bash", "cat", "grep", "mktemp", "rm", "sed", "tee", "tr"}
 
 // Review question: does a missing gcloud read as "already deleted"? The
 // shell's own "gcloud: command not found" went through the same log as
@@ -325,17 +423,23 @@ func TestTeardownFailsWithoutGcloud(t *testing.T) {
 	}
 }
 
-// Only gcloud's own "ERROR: ..." lines can mean a resource is already gone.
-// A "not found" from anything else, such as a gcloud wrapper whose Python is
-// missing, is a failure.
+// Only what gcloud prints from its own "ERROR: ..." line on can mean a
+// resource is already gone. A "not found" from anything else, such as a
+// gcloud wrapper whose Python is missing, or printed before the ERROR line,
+// is a failure.
 func TestTeardownOnlyTrustsGcloudErrorLines(t *testing.T) {
-	rules := []rule{{"storage buckets delete", "1", "", "/usr/lib/google-cloud-sdk/bin/gcloud: line 192: exec: python3: not found"}}
-	run := runTeardown(t, "", teardownEnv, rules, "--delete-snapshot-bucket")
-	if run.exitCode == 0 {
-		t.Errorf("teardown exited 0 after a non-gcloud \"not found\":\n%s", run.output)
-	}
-	if !strings.Contains(run.output, "FAILED: delete snapshot bucket") {
-		t.Errorf("teardown did not report the bucket delete as failed:\n%s", run.output)
+	for _, stderr := range []string{
+		"/usr/lib/google-cloud-sdk/bin/gcloud: line 192: exec: python3: not found",
+		"WARNING: config file not found; using defaults.\nERROR: (gcloud.storage.buckets.delete) HTTPError 403: deployer@acme.iam.gserviceaccount.com does not have storage.buckets.delete access to the Google Cloud Storage bucket.",
+	} {
+		rules := []rule{{"storage buckets delete", "1", "", stderr}}
+		run := runTeardown(t, "", teardownEnv, rules, "--delete-snapshot-bucket")
+		if run.exitCode == 0 {
+			t.Errorf("teardown exited 0 after %q:\n%s", stderr, run.output)
+		}
+		if !strings.Contains(run.output, "FAILED: delete snapshot bucket") {
+			t.Errorf("teardown did not report the bucket delete as failed after %q:\n%s", stderr, run.output)
+		}
 	}
 }
 
