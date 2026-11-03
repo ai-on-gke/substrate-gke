@@ -13,22 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Runs `make test` for one Go module in a network namespace with only
-# loopback, so a test that reaches outside the machine fails. Needs sudo,
-# which GitHub-hosted runners have.
+# Runs one Go module's tests in a network namespace with only loopback, so a
+# test that reaches outside the machine fails. Needs sudo, which
+# GitHub-hosted runners have.
+#
+# installer/internal/ui is left out: its wizard walks wait on real
+# cursor-blink and spinner timers and take about 8.5 minutes (#103).
 #
 # Usage: .github/workflows/test-offline.sh <module>
 
 set -euo pipefail
 
 module="$1"
+cd "${module}"
 
 # Download modules and build the test binaries while the network is up.
-(cd "${module}" && go mod download && go test -run '^$' ./... >/dev/null)
+go mod download
+mapfile -t pkgs < <(go list ./... | grep -v '/installer/internal/ui$')
+go test -run '^$' "${pkgs[@]}" >/dev/null
 
 sudo unshare --net -- bash -c '
   set -euo pipefail
   ip link set lo up
-  exec sudo -u "$1" env PATH="$2" HOME="$3" GOTOOLCHAIN=local GOPROXY=off \
-    make test MODULES="$4"
-' _ "$(id -un)" "${PATH}" "${HOME}" "${module}"
+  user="$1" path="$2" home="$3"
+  shift 3
+  exec sudo -u "${user}" env PATH="${path}" HOME="${home}" GOTOOLCHAIN=local GOPROXY=off \
+    go test "$@"
+' _ "$(id -un)" "${PATH}" "${HOME}" "${pkgs[@]}"
