@@ -222,6 +222,13 @@ re-staged from the new tree:
   context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
   hack/install-microvm-deps.sh --install`.
 
+Both upload with `gcloud storage cp`. Run them with
+`CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False` in the environment, as the
+installer does: on a workstation with gcloud's context-aware access enabled, parallel
+composite uploads fail with `[SSL] PEM lib` and `Temporary components were not uploaded
+correctly`, leaving half the assets in the bucket and the `SandboxConfig` unapplied
+(#111).
+
 Full teardown (`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all
 `SandboxConfig` resources automatically. To drop micro-VM without tearing anything else
 down, delete the `microvm` `SandboxConfig` (`kubectl delete sandboxconfig microvm` from

@@ -1247,11 +1247,11 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 	}
 }
 
-// microVMEnv is base (env or controlPlaneEnv) plus the two settings
-// upstream's micro-VM script reads that no other step needs. ate-setup's port
-// of the script
-// (agent-substrate/substrate#2092) ignores ARCH, since it stages both amd64
-// and arm64 on GKE, and reads ATE_INSTALL_KIND the same way.
+// microVMEnv is base (env or controlPlaneEnv) plus the settings upstream's
+// micro-VM tooling reads that no other step needs: two the script itself
+// reads, and one for the gcloud it uploads with. ate-setup's port of the
+// script (agent-substrate/substrate#2092) ignores ARCH, since it stages both
+// amd64 and arm64 on GKE, and reads ATE_INSTALL_KIND the same way.
 //
 // ARCH is pinned rather than left to the script's own resolution, which reads
 // KO_DEFAULTPLATFORMS and falls back to the workstation's `go env GOARCH`.
@@ -1273,8 +1273,26 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // `kubectl apply`, after the assets were assembled and uploaded. Blank, both
 // use that KUBECONFIG's current context — install-ate.sh re-fetches the same
 // credentials into it first, which is redundant but harmless.
+//
+// CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False is for the `gcloud
+// storage cp` both paths stage the assets with (the script's
+// hack/microvm-assets/stage-to-gcs.sh; ate-setup shells out to the same
+// command). The assets are large enough for gcloud to split each upload into
+// components sent by worker processes, and on a workstation with
+// context-aware access enabled (context_aware/use_client_certificate = true)
+// those workers fail with `[SSL] PEM lib` and `Temporary components were not
+// uploaded correctly`: each reads the per-invocation client certificate file
+// that the parent gcloud writes and removes. The step then fails after the
+// download, with half the assets and the components left in the bucket and
+// the SandboxConfig never applied (#111). gcloud storage cp has no flag for
+// this; the property is the only switch, and the sequential upload it
+// selects costs nothing noticeable for four objects.
 func microVMEnv(base []string) []string {
-	return append(base, "ARCH="+targetArch, "ATE_INSTALL_KIND=false")
+	return append(base,
+		"ARCH="+targetArch,
+		"ATE_INSTALL_KIND=false",
+		"CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False",
+	)
 }
 
 // legacyMicroVMScript is upstream's shell micro-VM installer. Its presence in
