@@ -31,7 +31,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Tool | Notes |
 |---|---|
 | `gcloud` | Authenticated, with [application-default credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) |
-| Go | Version checked automatically — run `make substrate-pin-check` if unsure |
+| Go | 1.21 or later to run the installer, which fetches the toolchain `installer/go.mod` names (`GOTOOLCHAIN=auto`, Go's default). The version Substrate needs is checked automatically — run `make substrate-pin-check` if unsure |
 | `git` | — |
 | `kubectl` | — |
 | `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin`, or the `google-cloud-cli-gke-gcloud-auth-plugin` package when gcloud came from apt or dnf |
@@ -72,7 +72,7 @@ A terminal wizard walks the steps below, running the real command it shows and s
 |---|---|---|
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images from a registry you name, or build your own from a commit (the pin by default) — see [Where the images come from](#where-the-images-come-from) |
-| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
+| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. When Docker is needed, checks the image registry here too: one you named, or the default regional one guessed from the zone, whose failures are advisory because provision checks the final host again once the cluster is known |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel, and turn off the separate system node pools). New clusters get only a DNS-based control plane endpoint and require `container.clusters.connect` in IAM in addition to Kubernetes RBAC. Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, the node service account, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
@@ -115,12 +115,12 @@ A terminal wizard walks the steps below, running the real command it shows and s
 
 ## Sandbox runtimes
 
-Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
+Substrate runs each actor inside a sandbox, and step 10 chooses which kind.
 
 | | gVisor | Micro-VM |
 |---|---|---|
 | Isolation | syscall interception in userspace | hardware virtualization (kata + cloud-hypervisor) |
-| Installed by | the control-plane step, always | step 9, on request |
+| Installed by | the control-plane step, always | step 10, on request |
 | Node requirement | none | **`/dev/kvm` on the node** |
 
 **gVisor** is the default and needs nothing extra: `ate-setup` applies the
@@ -369,7 +369,7 @@ GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repo
 
 ## Logs
 
-Every command's full output is written to a timestamped log under `<user cache dir>/substrate-gke/logs/`. Press `v` in the wizard for a scrollable log viewer; failures show the extracted cause and the log path.
+Every command's full output is written to a timestamped log under `<user cache dir>/substrate-gke/logs/` (`~/.cache` on Linux, `~/Library/Caches` on macOS; the temp dir when no cache dir resolves). Press `v` in the wizard for a scrollable log viewer; failures show the extracted cause and the log path.
 
 ## Upgrading an installed cluster
 
@@ -378,7 +378,7 @@ Every command's full output is written to a timestamped log under `<user cache d
 
 From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md) moves a cluster to a later patch release or to the next minor release.
 
-The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster, reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, installs the installed release's `kubectl ate`, and creates the snapshot transfer service account new releases use. It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree and sets `NEW_RELEASE` (or `VERSION` for a build from source), and follow the runbook from step 1. **Nothing on the cluster changes until you do.**
+The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster, reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, installs the installed release's `kubectl ate`, and runs `setup-gcp create iam`, which creates the snapshot transfer service account new releases use and re-applies the node service account and bucket grants (it only adds bindings). It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree and sets `NEW_RELEASE` (or `VERSION` for a build from source), and follow the runbook from step 1. **Nothing on the cluster changes until you do.**
 
 ate-setup writes that record on every deploy, under `ATE_RECORD_DIR` or by default at `<user cache dir>/ate-setup/installs/gke_<project>_<location>_<cluster>.yaml`. On a machine without it, write one from the settings the cluster was installed with ([operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/operator-install.md) lists them).
 
