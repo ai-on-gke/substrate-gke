@@ -37,8 +37,13 @@ You need two checkouts:
    monitoring dashboards:
 
    ```bash
-   go -C tools/setup-gcp run . bootstrap
+   go -C tools/setup-gcp run . bootstrap --create-repository
    ```
+
+   `--create-repository` creates the Artifact Registry repository that the
+   environment file's `KO_DOCKER_REPO` names, and lets the nodes pull from
+   it. Step 4 pushes there when it builds the images from source. Leave the
+   flag off if you install published images.
 
    On a fresh project this also creates the Workload Identity IAM grants that
    ate-api-server and atelet depend on. See
@@ -127,7 +132,8 @@ go run ./cmd/ate-setup delete ate-system
 
 To delete the GCP resources, run `teardown.sh` from the directory that holds
 `.ate-dev-env.sh` (it sources that file unless `NO_DEV_ENV=1` is set), or
-export the same variables first:
+export the same variables first. It needs `PROJECT_NUMBER` as well, which
+the environment file from step 1 sets:
 
 ```bash
 <substrate-gke checkout>/tools/setup-gcp/teardown.sh [--all|--cluster-scoped]
