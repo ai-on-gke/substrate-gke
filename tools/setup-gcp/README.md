@@ -228,7 +228,7 @@ one of the options below.
   ```yaml
   # systemconfig.yaml
   linuxConfig:
-    sysctls:
+    sysctl:
       net.ipv4.neigh.default.gc_thresh1: '4096'
       net.ipv4.neigh.default.gc_thresh2: '16384'
       net.ipv4.neigh.default.gc_thresh3: '32768'
@@ -271,6 +271,71 @@ one of the options below.
             sysctl -w net.ipv4.neigh.default.gc_thresh3=32768
             sysctl -w fs.inotify.max_user_instances=65536
             sysctl -w fs.inotify.max_user_watches=1048576
+            sleep infinity
+  ```
+
+**Disk I/O scheduler for microVM node pools:** COS boot disks default to the
+`bfq` I/O scheduler. Keep it on pools that run gVisor, including
+`substrate-node-pool`: with `none`, snapshot writeback can stall atelet's small
+checkpoint writes. Switch to `none` only on
+[microVM-only](../../README.md#sandbox-runtimes) pools at high density, such as
+bare metal: when many VMs start and restore at once, `bfq`'s per-process idling
+can starve their short I/O streams until virtiofsd sockets time out.
+
+* **When creating or updating such a pool**, add
+  [`diskIoScheduler`](https://cloud.google.com/kubernetes-engine/docs/how-to/node-system-config#disk-io-scheduler-options)
+  to its system config next to the sysctls above (requires `gcloud` 576.0.0+):
+
+  ```yaml
+  # systemconfig.yaml for a high-density microVM node pool
+  linuxConfig:
+    sysctl:
+      net.ipv4.neigh.default.gc_thresh1: '4096'
+      net.ipv4.neigh.default.gc_thresh2: '16384'
+      net.ipv4.neigh.default.gc_thresh3: '32768'
+      fs.inotify.max_user_instances: '65536'
+      fs.inotify.max_user_watches: '1048576'
+    diskIoScheduler:
+      nodeSystemIoScheduler: 'none'
+  ```
+
+* **On an already-running pool (without rolling/recreating nodes)**, apply a
+  privileged `DaemonSet` scoped to that pool (`MICROVM_POOL`) to tune existing
+  disks in place:
+
+  ```yaml
+  apiVersion: apps/v1
+  kind: DaemonSet
+  metadata:
+    name: substrate-io-scheduler
+    namespace: kube-system
+  spec:
+    selector:
+      matchLabels:
+        app: substrate-io-scheduler
+    template:
+      metadata:
+        labels:
+          app: substrate-io-scheduler
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-nodepool: MICROVM_POOL
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: io-scheduler
+          image: busybox:1.36
+          securityContext:
+            privileged: true
+          command:
+          - sh
+          - -ce
+          - |
+            for q in /sys/block/nvme*/queue /sys/block/sd*/queue; do
+              if [ -f "$q/scheduler" ]; then
+                echo none > "$q/scheduler"
+              fi
+            done
             sleep infinity
   ```
 
