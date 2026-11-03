@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
@@ -2310,5 +2311,61 @@ func TestFilestoreAPICheckComparesTheOverlayWithTheCluster(t *testing.T) {
 	}
 	if out, err := run("storage.k8s.io/v1", "v1 "); err == nil || !strings.Contains(out, "could not read the CSIDriverConfig apiVersion") {
 		t.Errorf("an overlay whose CSIDriverConfig is not on ate.dev: err=%v\n%s", err, out)
+	}
+}
+
+// ListInstalls offers the records ate-setup wrote, newest first: by when
+// each says it was written, else by the file's time. A record without a
+// gcp block is read off its file name; a file that is no record is left
+// out, and so is a directory nothing was recorded in.
+func TestListInstallsOrdersRecordsNewestFirst(t *testing.T) {
+	records := t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
+	dir := filepath.Join(records, "installs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string, mtime time.Time) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !mtime.IsZero() {
+			if err := os.Chtimes(path, mtime, mtime); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write("gke_acme_us-west1-c_alpha.yaml", "cluster:\n  substrateVersion: v1.0.0\n  writtenAt: \"2026-10-01T10:00:00Z\"\n  writtenBy: ate-setup go.ate.dev/substrate.Version=(devel) commit=unknown\n    darwin/arm64\ngcp:\n  clusterLocation: us-west1-c\n  clusterName: alpha\n  projectID: acme\nkind: SubstrateInstall\n", time.Time{})
+	write("gke_acme_us-east4-a_zeta.yaml", "cluster:\n  writtenAt: \"2026-11-01T10:00:00Z\"\ngcp:\n  clusterLocation: us-east4-a\n  clusterName: zeta\n  projectID: acme\nimages:\n  repo: registry.example.com/substrate\n", time.Time{})
+	// Neither a gcp block nor writtenAt: the file's name and time stand in.
+	write("gke_other_europe-west4_byname.yaml", "kind: SubstrateInstall\n", time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC))
+	write("notes.yaml", "kind: Notes\n", time.Time{})
+	write("gke_acme_us-west1-c_alpha.txt", "", time.Time{})
+	if err := os.Mkdir(filepath.Join(dir, "gke_a_b_c.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ListInstalls()
+	var names []string
+	for _, in := range got {
+		names = append(names, in.ClusterName)
+	}
+	if want := []string{"zeta", "byname", "alpha"}; !slices.Equal(names, want) {
+		t.Fatalf("ListInstalls = %v, want %v", names, want)
+	}
+	if in := got[2]; in.ProjectID != "acme" || in.Location != "us-west1-c" || in.Version != "v1.0.0" ||
+		!in.WrittenAt.Equal(time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)) || in.Path != filepath.Join(dir, "gke_acme_us-west1-c_alpha.yaml") {
+		t.Errorf("alpha's record misread: %+v", in)
+	}
+	if in := got[1]; in.ProjectID != "other" || in.Location != "europe-west4" || in.Version != "" ||
+		!in.WrittenAt.Equal(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("a record without a gcp block should be read off its name and time: %+v", in)
+	}
+
+	t.Setenv("ATE_RECORD_DIR", filepath.Join(records, "missing"))
+	if got := ListInstalls(); got != nil {
+		t.Errorf("a directory nothing was recorded in should list nothing: %+v", got)
 	}
 }
