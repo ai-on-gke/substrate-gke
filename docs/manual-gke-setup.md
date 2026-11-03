@@ -56,22 +56,51 @@ You need two checkouts:
 
    ```bash
    go run ./cmd/ate-setup deploy ate-system --credential-provider='{"name":"k8s.io"}' \
-     --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-system/sa/atenet-client
+     --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-demo-counter/sa/default,spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default
    ```
 
    From Substrate v0.6.0, ate-setup refuses to deploy on GKE without
    `SNAPSHOT_LOCATION` and `SNAPSHOT_TRANSFER_GSA_NAME`; the environment file
-   sets both. `--ingress-allowed-spiffe-ids` lists the clients the router lets
-   reach actors, and `--credential-provider` selects the egress credential
-   provider. See upstream's
-   [operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/operator-install.md)
-   for both.
+   sets both. `--credential-provider` selects the egress credential provider.
+   `--ingress-allowed-spiffe-ids` lists the clients the router lets reach
+   actors, and each deploy replaces the list. The IDs above are the counter
+   demos' driver pods, which call their actors through the router. Replace
+   them with your own clients' IDs
+   (`spiffe://cluster.local/ns/<namespace>/sa/<service-account>`) if you skip
+   the demos. See upstream's
+   [operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/guides/operator-install.md)
+   for both flags.
+
+   **Sandbox classes.** From Substrate v1.0.0, `deploy ate-system` installs
+   both the `gvisor` and `microvm` SandboxConfigs by default. For `microvm`
+   it downloads the guest assets for amd64 and arm64 and uploads them with
+   `gcloud` to `gs://${BUCKET_NAME}-assets`, which `bootstrap` creates with
+   read access for atelet. If the cluster runs only gVisor actors, add
+   `--sandbox-classes=gvisor` to skip that. To add micro-VM later, run
+   `go run ./cmd/ate-setup deploy sandboxconfig --sandbox-classes=gvisor,microvm`
+   with the same flags as above. Every ate-setup deploy replaces the install
+   record that upgrades start from, so pass the settings the install used.
+   Substrate v1.0.0-rc.1 and earlier have no `--sandbox-classes` flag; stage
+   micro-VM there with `hack/install-microvm-deps.sh --install`.
+
+   **Images.** ate-setup builds the images from the checkout with `ko` and
+   pushes them to `KO_DOCKER_REPO`. To install a published release instead,
+   add `--image-repo ghcr.io/agent-substrate/substrate --image-tag <release>`,
+   with the checkout at that release's commit.
 
 5. Deploy a sample application, also from the Substrate checkout:
 
    ```bash
    go run ./cmd/ate-setup deploy demo counter
    ```
+
+   On a cluster with a KVM-capable node pool (the environment file's
+   `ENABLE_NESTED_VIRTUALIZATION=true` gives a new cluster one) and the
+   `microvm` SandboxConfig, `deploy demo counter-microvm` runs the same demo
+   in a micro-VM. Releases don't publish demo images, so with
+   `--image-repo ghcr.io/agent-substrate/substrate` the demos fail to pull
+   theirs. Run `deploy demo` without `--image-repo`, so ate-setup builds the
+   demo image with `ko`.
 
 ## Individual steps
 
