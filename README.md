@@ -311,6 +311,13 @@ The images step chooses between two ways of getting the Substrate control-plane 
 > or build from source to run the demo. The GKE release registry
 > (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated.
 
+> [!TIP]
+> If you want to avoid pulling the published images directly from `ghcr.io`, you
+> can put an Artifact Registry [remote repository](https://cloud.google.com/artifact-registry/docs/repositories/remote-overview)
+> in front of it and give that repository's path as the pre-built registry. See
+> [Create remote repositories](https://cloud.google.com/artifact-registry/docs/repositories/remote-repo)
+> for setup.
+
 For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
 > [!IMPORTANT]
