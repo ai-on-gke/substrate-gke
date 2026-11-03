@@ -23,6 +23,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
@@ -433,7 +435,7 @@ func (s *sandboxScreen) Update(msg tea.Msg) tea.Cmd {
 
 func (s *sandboxScreen) View(w int) string {
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Choose your sandbox runtime") + "\n")
+	b.WriteString(theme.Title.Render(state.Sandbox.Title()) + "\n")
 	b.WriteString(theme.Subtle.Render(
 		"gVisor is installed with the control plane and needs nothing here.\n"+
 			"Micro-VM is opt-in: its sandbox binaries are staged to the snapshot\nbucket and a cluster-wide SandboxConfig is applied.") + "\n\n")
@@ -587,7 +589,7 @@ func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
 
 func (s *filestoreScreen) View(w int) string {
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Install Filestore CSI driver") + "\n")
+	b.WriteString(theme.Title.Render(state.FilestoreCSI.Title()) + "\n")
 	st := s.deps.Setup
 	skip := "[2] Skip — I'll configure storage drivers later"
 	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
@@ -1028,6 +1030,13 @@ func (s *completeScreen) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// routerAuthDoc is what a terminal shows for the hyperlink to the router's
+// documentation. Short enough not to wrap in the panel at 80 columns:
+// wrapped, a hyperlink is re-opened on every line and freeze shows the text
+// alone, so a long label only looks worse. A terminal without hyperlinks
+// shows the label with nothing behind it, which the remark after it covers.
+const routerAuthDoc = "router README § client authentication"
+
 func (s *completeScreen) View(w int) string {
 	st := s.deps.Setup
 	var b strings.Builder
@@ -1038,18 +1047,27 @@ func (s *completeScreen) View(w int) string {
 	}
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")
 
-	summary := fmt.Sprintf(
-		"project    %s\ncluster    %s (%s)%s\nsandbox    %s\nbucket     gs://%s\nimages     %s\nfilestore  %s\nautoscale  %s\ndemo       %s",
-		st.ProjectID,
-		st.ClusterName, st.Zone, map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew],
-		SandboxSummary(st),
-		st.BucketName,
-		st.ImageSummary(),
-		map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed],
-		map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled],
-		DemoSummary(st),
-	)
-	b.WriteString(theme.Panel.Width(min(w-4, 76)).Render(summary) + "\n")
+	rows := [][2]string{
+		{"project", st.ProjectID},
+		{"cluster", st.ClusterName + " (" + st.Zone + ")" + map[bool]string{true: "  · created by this run", false: ""}[st.ClusterIsNew]},
+		{"sandbox", SandboxSummary(st)},
+		{"bucket", "gs://" + st.BucketName},
+		{"images", st.ImageSummary()},
+		{"filestore", map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed]},
+		{"autoscale", map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled]},
+		{"demo", DemoSummary(st)},
+	}
+	// Each row hangs under its own value: a bucket name wider than the panel
+	// was wrapping back into the key column. The key column is ten wide —
+	// the widest key is nine — because the eleventh column is the one the
+	// longest default bucket name ("gs://" plus maxBucketNameLength) needs
+	// to stay on one line at 110 columns.
+	panelW := min(w-4, 76)
+	lines := make([]string, len(rows))
+	for i, r := range rows {
+		lines[i] = hangingIndent(fmt.Sprintf("%-10s", r[0]), r[1], panelW-2)
+	}
+	b.WriteString(theme.Panel.Width(panelW).Render(strings.Join(lines, "\n")) + "\n")
 
 	if s.comp != nil {
 		b.WriteString("\n" + s.comp.view(w) + "\n")
@@ -1057,10 +1075,26 @@ func (s *completeScreen) View(w int) string {
 		b.WriteString("\n" + theme.Subtle.Render("Press [y] to run `kubectl get pods -n ate-system` and see it live.") + "\n")
 	}
 
+	panelWidth := min(w-4, 92)
+	textW := max(panelWidth-4, 20)
+	// Commands break at their flags with continuations, as the guard's
+	// cleanup command does, so a copied one still runs. One the panel cannot
+	// hold even so — the managed kubectl-ate install carries a URL and a
+	// commit, each a word wider than the panel at 80 columns — is not
+	// shown broken; the exit summary prints every command in full.
+	command := func(cmd string) string {
+		lines := shellLines(cmd, textW)
+		for _, l := range lines {
+			if lipgloss.Width(l) > textW {
+				return theme.Subtle.Render("(printed in full when you exit)")
+			}
+		}
+		return theme.CommandLine.Render(strings.Join(lines, "\n"))
+	}
 	lead, demo := s.deps.Builder.NextSteps(st)
 	next := theme.Title.Render("Next steps")
 	if lead != "" {
-		next += "\n" + theme.CommandLine.Render(lead)
+		next += "\n" + command(lead)
 	}
 	if st.DemoDeployed {
 		intro := "then, to try the " + DemoName(st) + " demo:"
@@ -1069,14 +1103,16 @@ func (s *completeScreen) View(w int) string {
 		}
 		next += "\n" + theme.Subtle.Render(intro)
 		for _, cmd := range demo {
-			next += "\n" + theme.CommandLine.Render(cmd)
+			next += "\n" + command(cmd)
 		}
 	}
-	panelWidth := min(w-4, 92)
-	if note := s.deps.Builder.RouterNote(st); note != "" {
-		// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
-		next += "\n" + theme.Subtle.Width(max(panelWidth-4, 20)).Render(note)
-	}
+	// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
+	next += "\n" + theme.Subtle.Width(textW).Render(s.deps.Builder.RouterNoteLead(st))
+	// The link on a line of its own, as a terminal hyperlink: the full URL
+	// is longer than the panel and, wrapped, split at every slash and hyphen
+	// into something no terminal could open. The exit summary prints it in
+	// full.
+	next += "\n" + theme.Subtle.Render(termenv.Hyperlink(s.deps.Builder.RouterAuthURL(), routerAuthDoc)) + theme.Fainted.Render(" (full link printed on exit)")
 	b.WriteString("\n" + theme.AccentPanel.Width(panelWidth).Render(next))
 	return b.String()
 }

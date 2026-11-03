@@ -35,7 +35,13 @@ detect.
 
 ## Adding or changing a screen
 
-Add a `press(...)` sequence to walk to the screen and a `shot(out, "name",
-app)` call in `main.go`, then reference `docs/screenshots/name.svg` from the
-README. If a screen is taller than the 110×26 default frame, send a bigger
-`tea.WindowSizeMsg` first, as the `complete` shot does.
+Add a `w.press(...)` sequence to walk to the screen and a `w.shot("name",
+step, marker)` call in `main.go`, then reference `docs/screenshots/name.svg`
+from the README. `step` is the wizard step the screen belongs to and
+`marker`, for a panel within a step, text it shows and the step's other
+screens do not; `shot` fails when either is wrong, so a wizard change that
+stalls the walk fails `make screenshots` — and `go test`, which runs the
+walk — instead of writing the wrong screen five times. Frames are 110
+columns wide and as tall as the screen needs: `shot` measures the screen and
+leaves one blank row above the key bar, so there is no height to tune when a
+panel grows.

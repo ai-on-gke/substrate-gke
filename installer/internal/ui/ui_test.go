@@ -1916,12 +1916,20 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	if !strings.Contains(view, "already runs Substrate") || !strings.Contains(view, "substrate-71e7623") {
 		t.Errorf("view missing installed version warning:\n%s", view)
 	}
-	// The panel wraps its text to fit, so the phrase may span a line break.
-	if !strings.Contains(flat(view), "Upgrade an installed cluster") {
-		t.Errorf("view missing upgrade track recommendation:\n%s", view)
+	// The panel wraps its text to fit, so the phrase may span a line break;
+	// flattened from the screen alone, since in the whole view the sidebar's
+	// rows would fall between the halves.
+	if panel := flat(scr.View(87)); !strings.Contains(panel, "Upgrade an installed cluster") {
+		t.Errorf("view missing upgrade track recommendation:\n%s", panel)
 	}
-	if !strings.Contains(view, "cleanup-gcp") {
-		t.Errorf("view missing cleanup-gcp recommendation:\n%s", view)
+	// The cleanup command itself is printed when the wizard exits on the
+	// guard, where it can be copied without the panel's borders; the panel
+	// says so and the exit notes carry it.
+	if !strings.Contains(flat(view), "prints the command for the full GCP cleanup") {
+		t.Errorf("view missing the pointer to the cleanup command:\n%s", view)
+	}
+	if notes := app.ExitNotes(); len(notes) != 1 || !strings.Contains(notes[0].Command, "cleanup-gcp") {
+		t.Errorf("exit notes on the guard = %+v, want the cleanup-gcp command", notes)
 	}
 
 	// Pressing esc returns to cluster list
@@ -3559,21 +3567,82 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 // quoted values at their hyphens and indented the continuation, so the copied
 // command no longer ran; it is broken at flags instead, with continuations.
 func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
-	command := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "")
-	for _, width := range []int{36, 50, 80, 200} {
-		lines := shellLines(command, width)
-		for _, line := range lines {
-			// A single flag wider than the panel is allowed its own line.
-			if lipgloss.Width(line) > width && strings.Count(line, "--") > 1 {
-				t.Errorf("width %d: line %q is wider than the panel", width, line)
+	cleanup := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "")
+	// The completion screen's Next steps at 80 columns (39 columns of
+	// text): the head of the second command is wider than the panel, and
+	// the first carries a comment. Before, the panel re-wrapped the head and
+	// a copied first line ran without -a's value.
+	install := "go install ./cmd/kubectl-ate    # run inside your substrate checkout"
+	create := "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter"
+	// The managed tree's install clones upstream into a temp dir first; its
+	// URL and commit are single words wider than 39 columns, which is
+	// allowed, but nothing else may be: a unit that fit only without the
+	// continuation indent used to come out two columns too wide.
+	managed := snapshot.NewBuilder(t.TempDir(), true).KubectlAteInstall()
+	for _, tc := range []struct {
+		command string
+		widths  []int
+	}{
+		{cleanup, []int{36, 50, 80, 200}},
+		{install, []int{39, 69}},
+		{create, []int{39, 69}},
+		{managed, []int{39, 69}},
+	} {
+		for _, width := range tc.widths {
+			lines := shellLines(tc.command, width)
+			for _, line := range lines {
+				// A single word wider than the panel is allowed its own line.
+				if lipgloss.Width(line) > width && len(strings.Fields(strings.TrimSuffix(line, " \\"))) > 1 {
+					t.Errorf("width %d: line %q is wider than the panel", width, line)
+				}
+				if strings.Count(line, "'")%2 != 0 {
+					t.Errorf("width %d: line %q breaks inside a quoted value", width, line)
+				}
+				if strings.HasSuffix(strings.TrimSuffix(line, " \\"), " -a") {
+					t.Errorf("width %d: line %q separates -a from its value", width, line)
+				}
 			}
-			if strings.Count(line, "'")%2 != 0 {
-				t.Errorf("width %d: line %q breaks inside a quoted value", width, line)
+			want := tc.command
+			if i := strings.Index(tc.command, " #"); i >= 0 {
+				// The comment moves to a line of its own, above the command.
+				if lines[0] != strings.TrimSpace(tc.command[i:]) {
+					t.Errorf("width %d: first line %q, want the comment on its own", width, lines[0])
+				}
+				lines, want = lines[1:], strings.TrimSpace(tc.command[:i])
+			}
+			joined := strings.Join(lines, "\n")
+			if got := strings.Join(strings.Fields(strings.ReplaceAll(joined, " \\\n", " ")), " "); got != want {
+				t.Errorf("width %d: rejoined command = %q, want %q", width, got, want)
 			}
 		}
-		joined := strings.Join(lines, "\n")
-		if got := strings.Join(strings.Fields(strings.ReplaceAll(joined, " \\\n", " ")), " "); got != command {
-			t.Errorf("width %d: rejoined command = %q, want %q", width, got, command)
+	}
+}
+
+// The guard and the teardown prompt behind it are clamped from the bottom
+// at ordinary terminal sizes, and what used to be clamped away was the part
+// that mattered: at 110×26 the guard's second remedy and at 80×24 every
+// remedy, and the teardown prompt's "type the name" line and input, so the
+// name was typed blind. Both have to show within the rows those sizes
+// leave; the teardown prompt is the destructive dialog, so its name prompt
+// and the list of what goes must survive too.
+func TestGuardRemediesSurviveSmallTerminals(t *testing.T) {
+	for _, size := range [][2]int{{110, 26}, {80, 24}} {
+		app := testApp(t)
+		press := pressToCluster(t, app)
+		pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		press("5", "enter") // substrate-installed: the reinstall guard
+		view := flat(app.View())
+		for _, want := range []string{"Supported paths forward", "Upgrade it", "[t] deletes Substrate on this cluster"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("at %dx%d the guard lost %q:\n%s", size[0], size[1], want, app.View())
+			}
+		}
+		press("t") // the teardown prompt
+		view = flat(app.View())
+		for _, want := range []string{"Type substrate-installed to confirm", "every actor", "ActorTemplate, atespace, and WorkerPool", "database volume"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("at %dx%d the teardown prompt lost %q:\n%s", size[0], size[1], want, app.View())
+			}
 		}
 	}
 }
@@ -3597,6 +3666,41 @@ func TestHintBarFitsTheGuardAt80Columns(t *testing.T) {
 		if !strings.Contains(bar, k) {
 			t.Errorf("hint bar lost %s: %q", k, bar)
 		}
+	}
+}
+
+// The reinstall guard is a panel about one cluster, like the readiness
+// confirmation: while it is open the list shrinks to that cluster's row so
+// the panel gets the terminal's height, and the panel does not repeat the
+// bottom bar's keys with its own wording. Exiting on it leaves the cleanup
+// command in the terminal, where it can be copied without panel borders.
+func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("5", "enter") // substrate-installed: the reinstall guard
+	scr := app.cur.(*clusterScreen)
+	if scr.mode != "installed" {
+		t.Fatalf("mode = %q, want installed", scr.mode)
+	}
+	view := flat(scr.View(110))
+	for _, other := range []string{"substrate-poc", "legacy-prod", "Create a new cluster"} {
+		if strings.Contains(view, other) {
+			t.Errorf("the guard still lists %s:\n%s", other, view)
+		}
+	}
+	if !strings.Contains(view, "[5] substrate-installed") {
+		t.Errorf("the guard lost its own cluster's row:\n%s", view)
+	}
+	if strings.Contains(view, "tear down here") {
+		t.Errorf("the guard panel repeats the keys:\n%s", view)
+	}
+	notes := app.ExitNotes()
+	if len(notes) != 1 || !strings.Contains(notes[0].Command, "--cluster 'substrate-installed'") || !strings.Contains(notes[0].Command, "--location 'us-west1-c'") {
+		t.Errorf("exit notes on the guard = %+v, want the cleanup command", notes)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the list
+	if notes := app.ExitNotes(); len(notes) != 0 {
+		t.Errorf("exit notes off the guard = %+v, want none", notes)
 	}
 }
 

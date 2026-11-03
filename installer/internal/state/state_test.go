@@ -15,8 +15,10 @@
 package state
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 )
@@ -280,6 +282,27 @@ func TestNewSetupReadsSeparateSystemNodes(t *testing.T) {
 		t.Setenv("SEPARATE_SYSTEM_NODES", v)
 		if got := NewSetup().SharedSystemNodes; got != shared {
 			t.Errorf("SEPARATE_SYSTEM_NODES=%q: SharedSystemNodes = %v, want %v", v, got, shared)
+		}
+	}
+}
+
+// A step title wider than the rail wraps onto a second line, where "driver"
+// or "runtime" read as steps of their own. The rail is 30 columns; a step's
+// prefix (" ○ 10. ") takes six of them, seven from step 10, in every order
+// the step appears in.
+func TestStepTitlesFitTheRail(t *testing.T) {
+	for _, order := range [][]Step{Order, DemoOrder, UpgradeOrder} {
+		m := NewMachine()
+		m.SetOrder(order)
+		for _, s := range order {
+			n, numbered := m.Position(s)
+			if !numbered {
+				continue
+			}
+			limit := 30 - utf8.RuneCountInString(" ○ "+strconv.Itoa(n)+". ")
+			if w := utf8.RuneCountInString(s.Title()); w > limit {
+				t.Errorf("step %d %q is %d columns, the rail fits %d", n, s.Title(), w, limit)
+			}
 		}
 	}
 }

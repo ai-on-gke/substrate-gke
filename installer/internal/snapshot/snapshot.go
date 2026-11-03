@@ -427,9 +427,21 @@ func (b *Builder) hasCounterDriver() bool {
 // RouterNote explains how to reach actors through the Envoy router, which
 // admits only allowlisted clients.
 func (b *Builder) RouterNote(st *state.Setup) string {
+	return routerNoteBody(st) + b.RouterAuthURL() + " and the substrate-gke README."
+}
+
+// RouterNoteLead is RouterNote up to the link, for a screen that shows the
+// link on a line of its own: wrapped into a panel, the URL broke at every
+// slash and hyphen and could not be clicked.
+func (b *Builder) RouterNoteLead(st *state.Setup) string {
+	return routerNoteBody(st) + "the substrate-gke README and upstream's router documentation:"
+}
+
+// routerNoteBody is what RouterNote and RouterNoteLead share, up to where
+// one names the URL and the other says where to find it.
+func routerNoteBody(st *state.Setup) string {
 	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
-		IngressAllowlistSummary(st) + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
-		" and the substrate-gke README."
+		IngressAllowlistSummary(st) + "). To call actors from your own workloads, see "
 }
 
 // RouterAuthURL is upstream's documentation of ingress client authentication
