@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 )
 
 // dockerTimeout bounds each docker probe. A hung daemon would otherwise hold
@@ -309,6 +311,13 @@ func askHelper(ctx context.Context, helper string, keys []string, path, host, fi
 func credential(ctx context.Context, bin, key string) error {
 	ctx, cancel := context.WithTimeout(ctx, dockerTimeout)
 	defer cancel()
+	// The gcloud helper is gcloud, and the gcr one asks gcloud for its
+	// token; neither may overlap another gcloud (see execx.LockGcloud).
+	release, err := execx.LockGcloud(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	cmd := exec.CommandContext(ctx, bin, "get")
 	cmd.Stdin = strings.NewReader(key)
 	out, err := cmd.CombinedOutput()

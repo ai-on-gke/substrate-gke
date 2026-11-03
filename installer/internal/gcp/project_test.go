@@ -668,3 +668,82 @@ func TestEnableServiceSpec(t *testing.T) {
 		t.Error("a dry run needs something to replay")
 	}
 }
+
+// fakeGcloudOverlapDetector puts a gcloud on PATH that records whether two of
+// it ever ran at once: each marks itself busy with an atomic mkdir, and one
+// that finds the mark already there writes the overlap file.
+func fakeGcloudOverlapDetector(t *testing.T) (overlap string) {
+	t.Helper()
+	dir := t.TempDir()
+	overlap = filepath.Join(dir, "overlap")
+	script := "#!/bin/sh\n" +
+		"mkdir '" + filepath.Join(dir, "busy") + "' 2>/dev/null || touch '" + overlap + "'\n" +
+		"sleep 0.1\n" +
+		"rmdir '" + filepath.Join(dir, "busy") + "'\n" +
+		"echo 42\n"
+	if err := os.WriteFile(filepath.Join(dir, "gcloud"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return overlap
+}
+
+// gcloud crashes when two of it run at once on a machine with context-aware
+// client certificates (see execx.LockGcloud), and the project step starts
+// `projects describe` and the token fetch together. Every run, the token
+// fetch included, takes its turn.
+func TestRunSerializesGcloud(t *testing.T) {
+	overlap := fakeGcloudOverlapDetector(t)
+	c := &Client{}
+	errs := make(chan error, 4)
+	for i := 0; i < 3; i++ {
+		go func() { _, err := c.ProjectNumber(context.Background(), "acme"); errs <- err }()
+	}
+	go func() { _, err := c.accessToken(context.Background()); errs <- err }()
+	for i := 0; i < 4; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent run: %v", err)
+		}
+	}
+	if _, err := os.Stat(overlap); err == nil {
+		t.Error("two gcloud processes ran at once")
+	}
+}
+
+// A run waiting its turn gives up when its own context ends, not after
+// cmdTimeout on top: with the network down the submit's deadline, not a
+// queue, decides how long the user waits.
+func TestRunWaitingForGcloudHonoursContext(t *testing.T) {
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "started")
+	script := "#!/bin/sh\ntouch '" + mark + "'\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "gcloud"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := &Client{}
+	defer c.Close() // kills the holder
+	go c.ProjectNumber(context.Background(), "acme")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(mark); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake gcloud never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.ProjectNumber(ctx, "acme")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("queued run = %v, want its context's deadline", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("queued run took %v to give up", d)
+	}
+}

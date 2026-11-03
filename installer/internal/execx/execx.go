@@ -94,6 +94,49 @@ func Clean(line string) string {
 
 func clean(line string) string { return Clean(line) }
 
+// gcloudSlot admits one gcloud process at a time, installer-wide. gcloud
+// cannot run concurrently with itself when its config sets
+// context_aware/use_client_certificate: every invocation writes the client
+// certificate to a single file under the gcloud config directory on startup
+// and deletes it on exit, so the first of two to finish pulls the file from
+// under the other, which crashes with FileNotFoundError while building its
+// TLS context. Four parallel invocations by hand crash every time;
+// serialized, never.
+//
+// The installer starts gcloud from several goroutines at once: the project
+// step's `projects describe` and token warm-up, and the cluster screen's
+// background probes. So every gcloud child it starts holds this slot: the
+// gcp.Client's runs through LockGcloud, and every Real command for its whole
+// run, since each either is gcloud or runs kubectl, whose
+// gke-gcloud-auth-plugin execs `gcloud config config-helper` for a token.
+// Only the processes queue; the REST calls beside them stay concurrent.
+//
+// A channel rather than a sync.Mutex so a waiter can give up when its ctx
+// ends. Blocked senders are served in order, so a foreground command queues
+// fairly behind the background probes started before it.
+var gcloudSlot = make(chan struct{}, 1)
+
+// slotGrace bounds how long a cancelled command keeps the slot. CommandContext
+// kills only the shell; a gcloud or kubectl it spawned lives on holding our
+// pipes, and a retry must not wait on a long one. A stray gcloud is gone in
+// a few seconds, so the retry still cannot overlap it.
+const slotGrace = 5 * time.Second
+
+// LockGcloud takes the gcloud slot and returns the call that frees it, safe to
+// make more than once. It gives up with ctx's error when ctx ends first.
+func LockGcloud(ctx context.Context) (release func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case gcloudSlot <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-gcloudSlot }) }, nil
+}
+
 // Real executes commands with os/exec.
 type Real struct {
 	Log *Logger
@@ -153,6 +196,15 @@ func (r *Real) Start(ctx context.Context, spec Spec) <-chan Event {
 			}
 		}
 
+		// One gcloud at a time, see gcloudSlot. Taken after the drain wait
+		// above so the slot is not held idle, and before the START record
+		// so the log shows commands in the order they ran.
+		release, err := LockGcloud(ctx)
+		if err != nil {
+			ch <- Event{Done: true, Err: err}
+			return
+		}
+
 		start := time.Now()
 		if r != nil && r.Log != nil {
 			r.Log.LogCommandStart(spec)
@@ -164,6 +216,7 @@ func (r *Real) Start(ctx context.Context, spec Spec) <-chan Event {
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
+			release()
 			if r != nil && r.Log != nil {
 				r.Log.LogCommandEnd(spec, err, time.Since(start))
 			}
@@ -172,6 +225,7 @@ func (r *Real) Start(ctx context.Context, spec Spec) <-chan Event {
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
+			release()
 			if r != nil && r.Log != nil {
 				r.Log.LogCommandEnd(spec, err, time.Since(start))
 			}
@@ -179,12 +233,28 @@ func (r *Real) Start(ctx context.Context, spec Spec) <-chan Event {
 			return
 		}
 		if err := cmd.Start(); err != nil {
+			release()
 			if r != nil && r.Log != nil {
 				r.Log.LogCommandEnd(spec, err, time.Since(start))
 			}
 			ch <- Event{Done: true, Err: err}
 			return
 		}
+		// Free the slot once the process has exited and its END record is
+		// written, or slotGrace after ctx cancelled it, whichever is first:
+		// the pipe drain below waits on the command's children too.
+		exited := make(chan struct{})
+		go func() {
+			select {
+			case <-exited:
+			case <-ctx.Done():
+				select {
+				case <-exited:
+				case <-time.After(slotGrace):
+				}
+			}
+			release()
+		}()
 
 		var wg sync.WaitGroup
 		scan := func(rd io.Reader, isStderr bool) {
@@ -224,6 +294,7 @@ func (r *Real) Start(ctx context.Context, spec Spec) <-chan Event {
 		if r != nil && r.Log != nil {
 			r.Log.LogCommandEnd(spec, waitErr, time.Since(start))
 		}
+		close(exited)
 		select {
 		case ch <- Event{Done: true, Err: waitErr}:
 		case <-ctx.Done():
