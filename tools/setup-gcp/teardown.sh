@@ -62,11 +62,14 @@ trap 'rm -rf "${scratch}"' EXIT
 # binding does not exist, which is the state teardown wants. These are the
 # forms gcloud uses: GKE's code=404/Not found, Cloud Storage's "not found: 404",
 # "HTTPError 404" and "matched no objects", IAM's "binding ... not found!", and
-# Monitoring's NOT_FOUND. Only lines gcloud itself prints as "ERROR: ..."
-# count, so other text in the log, such as the shell's "command not found",
-# is not read as a deleted resource.
+# Monitoring's NOT_FOUND. Only what gcloud itself prints from its "ERROR: ..."
+# line on counts, so other text in the log, such as the shell's "command not
+# found", is not read as a deleted resource. The whole block from that line
+# counts, not just the line: `container clusters delete` prints "Some requests
+# did not succeed:" and puts the code=404 on the next line.
 already_gone() {
-  grep -qiE '^ERROR: .*(not found|NOT_FOUND|code=404|HTTPError 404|matched no objects)' "$1"
+  sed -n '/^ERROR: /,$p' "$1" |
+    grep -qiE 'not found|NOT_FOUND|code=404|HTTPError 404|matched no objects'
 }
 
 # bucket_gone BUCKET reports whether gs://BUCKET no longer exists. The bucket
@@ -113,6 +116,53 @@ gcloud_step() {
   fi
 }
 
+# service_account_gone EMAIL LOG reports whether a failed delete of the
+# service account EMAIL, whose output is in LOG, failed because the account is
+# gone. IAM answers a delete of an account that does not exist, or that was
+# deleted in the last 30 days and can still be undeleted, with
+# PERMISSION_DENIED "(or it may not exist)" rather than NOT_FOUND: the same
+# words as for a caller who lacks the permission on an existing account, and
+# describe gets the same answer for a deleted account. Listing the project's
+# accounts, which omits deleted ones, tells the two apart.
+service_account_gone() {
+  local email="$1" log="$2" listed
+  grep -q 'PERMISSION_DENIED: .*(or it may not exist)' "${log}" || return 1
+  if ! listed=$(gcloud iam service-accounts list \
+      --project="${PROJECT_ID}" \
+      --filter="email=${email}" \
+      --format="value(email)" 2>"${scratch}/list-err"); then
+    cat "${scratch}/list-err" >&2
+    # As for the cluster below: a caller allowed to delete accounts but not
+    # to list them must not fail every re-run, so warn instead.
+    if grep -q 'PERMISSION_DENIED' "${scratch}/list-err"; then
+      echo "WARNING: could not verify that ${email} is deleted (listing service accounts was denied); treating it as deleted. If it still exists, deleting it was denied." >&2
+      return 0
+    fi
+    return 1
+  fi
+  if [ -n "${listed}" ]; then
+    echo "Service account ${email} exists; deleting it was denied." >&2
+    return 1
+  fi
+  return 0
+}
+
+# delete_service_account STEP EMAIL deletes the service account EMAIL, as
+# gcloud_step would, with service_account_gone as a second reading of the
+# error.
+delete_service_account() {
+  local step="$1" email="$2" log="${scratch}/last"
+  if gcloud iam service-accounts delete "${email}" \
+      --project="${PROJECT_ID}" --quiet 2>&1 | tee "${log}"; then
+    return 0
+  fi
+  if already_gone "${log}" || service_account_gone "${email}" "${log}"; then
+    echo "(already deleted)"
+  else
+    failed+=("${step}")
+  fi
+}
+
 # --- Helper Functions ---
 
 # transfer_service_account prints the snapshot transfer service account's
@@ -148,6 +198,10 @@ function usage() {
 
 # --- Teardown Functions ---
 
+# The remove-iam-policy-binding steps pass --format=none: without it gcloud
+# prints the whole updated policy, hundreds of lines for a shared project,
+# naming every member. Its "Updated IAM policy" line still shows.
+
 # Revoke GKE Node Permissions (Reverse of grant_gke_node_permissions)
 revoke_gke_node_permissions() {
   require PROJECT_ID PROJECT_NUMBER
@@ -159,7 +213,8 @@ revoke_gke_node_permissions() {
       --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
       --role="${role}" \
       --condition=None \
-      --quiet
+      --quiet \
+      --format=none
   done
 }
 
@@ -175,7 +230,8 @@ revoke_atelet_permissions() {
       --member="${member}" \
       --role="${role}" \
       --condition=None \
-      --quiet
+      --quiet \
+      --format=none
   done
 }
 
@@ -227,7 +283,8 @@ delete_iam_policy_bindings() {
           storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
           --member="${wi}/${subject}" \
           --role="${role}" \
-          --quiet
+          --quiet \
+          --format=none
       done
     done
     local transfer
@@ -237,7 +294,8 @@ delete_iam_policy_bindings() {
         storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
         --member="${transfer}" \
         --role="${role}" \
-        --quiet
+        --quiet \
+        --format=none
     done
   fi
   if bucket_gone "${asset_bucket}"; then
@@ -247,7 +305,8 @@ delete_iam_policy_bindings() {
       storage buckets remove-iam-policy-binding "gs://${asset_bucket}" \
       --member="${wi}/atelet" \
       --role=roles/storage.objectViewer \
-      --quiet
+      --quiet \
+      --format=none
   fi
 }
 
@@ -256,9 +315,7 @@ delete_iam_policy_bindings() {
 delete_transfer_service_account() {
   require PROJECT_ID
   echo "Deleting the snapshot transfer service account..."
-  gcloud_step "delete transfer service account" \
-    iam service-accounts delete "$(transfer_service_account)" \
-    --project="${PROJECT_ID}" --quiet
+  delete_service_account "delete transfer service account" "$(transfer_service_account)"
 }
 
 # Delete the GKE node service account (Reverse of ensureNodeServiceAccount).
@@ -275,10 +332,9 @@ delete_node_service_account() {
     --member="serviceAccount:$(node_service_account)" \
     --role=roles/container.defaultNodeServiceAccount \
     --condition=None \
-    --quiet
-  gcloud_step "delete node service account" \
-    iam service-accounts delete "$(node_service_account)" \
-    --project="${PROJECT_ID}" --quiet
+    --quiet \
+    --format=none
+  delete_service_account "delete node service account" "$(node_service_account)"
 }
 
 # Delete the snapshot and microVM asset buckets (Reverse of create_buckets)

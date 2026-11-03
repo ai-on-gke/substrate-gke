@@ -604,8 +604,13 @@ script exits 1 with a `FAILED:` line per step. A cluster that is not found in
 since GKE answers a wrong location with the same NOT_FOUND as a deleted
 cluster. Checking other locations needs `container.clusters.list`; without
 it, teardown prints a warning and treats the cluster as deleted, so check
-`CLUSTER_LOCATION` if you see that warning. The bucket steps first check
-whether each bucket exists and skip it if it does not.
+`CLUSTER_LOCATION` if you see that warning. IAM answers the deletion of a
+service account that is already gone with `PERMISSION_DENIED ... (or it may
+not exist)`, the same words as a denied deletion of an existing account; the
+service account steps then list the project's accounts (which omits deleted
+ones) to tell the two apart, and warn in the same way when the listing is
+denied. The bucket steps first check whether each bucket exists and skip it
+if it does not.
 
 Image repositories are kept by default, including with `--all`. Add
 `--delete-repository` to delete one, setting `GCE_REGION` and optionally
