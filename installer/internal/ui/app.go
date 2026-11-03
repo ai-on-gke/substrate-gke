@@ -333,6 +333,9 @@ func (a *App) runSlash(name string) tea.Cmd {
 	case "help", "h":
 		a.over = overlayHelp
 	case "back", "b":
+		if p, ok := a.cur.(execCompProvider); ok && p.logComp() != nil && p.logComp().running() {
+			return nil
+		}
 		return goBack
 	case "skip", "s":
 		// Only the optional steps may be skipped. Sandbox is one of them:

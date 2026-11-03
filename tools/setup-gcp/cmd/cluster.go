@@ -185,7 +185,8 @@ func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateCl
 // its KVM nodes in a second pool added by hand is a normal arrangement.
 func nestedVirtualizationEnabled(cluster *containerpb.Cluster) bool {
 	for _, pool := range cluster.GetNodePools() {
-		if pool.GetConfig().GetAdvancedMachineFeatures().GetEnableNestedVirtualization() {
+		cfg := pool.GetConfig()
+		if cfg.GetAdvancedMachineFeatures().GetEnableNestedVirtualization() || strings.HasSuffix(cfg.GetMachineType(), "-metal") {
 			return true
 		}
 	}

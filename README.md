@@ -127,9 +127,9 @@ Substrate runs each actor inside a sandbox, and step 4 chooses which kind.
 cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
-guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
+guest kernel and the guest rootfs — are fetched from GCS at boot
 rather than baked into the worker image. Step 5 refuses an existing cluster without a
-KVM-capable node pool, and step 8 (`Turn on Substrate`) stages those five assets and
+KVM-capable node pool, and step 8 (`Turn on Substrate`) stages those four assets and
 applies a cluster-wide `SandboxConfig` named `microvm` that points at them. How it
 stages them depends on the Substrate tree (Micro-VM needs Substrate v0.2.0 or later):
 
@@ -182,8 +182,9 @@ upstream's `demos/counter/counter-microvm.yaml.tmpl` and
 > ```
 >
 > You need at least one pool with `enableNestedVirtualization: True`. Note that `e2`
-> machine types cannot do nested virtualization at all — use `n1`, `n2`, `n2d`, or a
-> bare-metal (`-metal`) machine type.
+> machine types cannot do nested virtualization at all — use a machine series that
+> supports it (e.g. N2, N4, C3; see the [restrictions](https://cloud.google.com/compute/docs/instances/nested-virtualization/overview#restrictions)),
+> or a bare-metal (`-metal`) machine type.
 >
 > **If you taint that pool** to reserve it, use `ate.dev/sandboxClass=microvm:NoSchedule`.
 > That is the only toleration micro-VM worker pods carry, so a pool tainted with any other
