@@ -31,7 +31,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Tool | Notes |
 |---|---|
 | `gcloud` | Authenticated, with [application-default credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) |
-| Go | 1.21 or later to run the installer, which fetches the toolchain `installer/go.mod` names (`GOTOOLCHAIN=auto`, Go's default). The version Substrate needs is checked automatically — run `make substrate-pin-check` if unsure |
+| Go | 1.27.3 or later: the pinned Substrate release's `go.mod` names that toolchain for `go run ./cmd/ate-setup` (the installer itself builds with 1.26.4). An older Go works only when `GOTOOLCHAIN=auto` can download the newer one. Checked automatically — run `make substrate-pin-check` if unsure |
 | `git` | — |
 | `kubectl` | — |
 | `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin`, or the `google-cloud-cli-gke-gcloud-auth-plugin` package when gcloud came from apt or dnf |
