@@ -131,7 +131,7 @@ guest kernel, the guest rootfs and the base kata config — are fetched from GCS
 rather than baked into the worker image. Step 5 refuses an existing cluster without a
 KVM-capable node pool, and step 8 (`Turn on Substrate`) stages those five assets and
 applies a cluster-wide `SandboxConfig` named `microvm` that points at them. How it
-stages them depends on the Substrate tree:
+stages them depends on the Substrate tree (Micro-VM needs Substrate v0.2.0 or later):
 
 - **Up to v1.0.0-rc.1** (the current pin): upstream's `hack/install-microvm-deps.sh
   --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
