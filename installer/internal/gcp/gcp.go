@@ -190,7 +190,24 @@ type NodePool struct {
 	Name        string
 	MachineType string
 	Autoscaled  bool
+	// WorkloadType is the pool's ate.dev/workloadType node label: the marker
+	// setup-gcp puts on the fixed-size pools it creates for Substrate's
+	// system components (ate-system-infra) and bundled PostgreSQL
+	// (ate-postgres), which ate-setup pins those workloads to by the same
+	// label and taint. Worker pools never carry it.
+	WorkloadType string
 }
+
+// workloadTypeLabel is the node label setup-gcp and ate-setup agree on for
+// the system pools; see tools/setup-gcp/cmd/systempools.go.
+const workloadTypeLabel = "ate.dev/workloadType"
+
+// System reports whether the pool is one of Substrate's pinned system pools,
+// which the installer must not resize or autoscale. It goes by the label
+// rather than the pool name because setup-gcp has labeled these pools since
+// it first created them, so a user pool that happens to share a name stays
+// eligible and a renamed system pool stays protected.
+func (p NodePool) System() bool { return p.WorkloadType != "" }
 
 // Client shells out to gcloud. With DryRun set it returns canned data so the
 // wizard can be exercised without a GCP project.
@@ -579,7 +596,8 @@ func ParseNodePools(data []byte) ([]NodePool, error) {
 	var raw []struct {
 		Name   string `json:"name"`
 		Config struct {
-			MachineType string `json:"machineType"`
+			MachineType string            `json:"machineType"`
+			Labels      map[string]string `json:"labels"`
 		} `json:"config"`
 		Autoscaling struct {
 			Enabled bool `json:"enabled"`
@@ -591,9 +609,10 @@ func ParseNodePools(data []byte) ([]NodePool, error) {
 	pools := make([]NodePool, 0, len(raw))
 	for _, r := range raw {
 		pools = append(pools, NodePool{
-			Name:        r.Name,
-			MachineType: r.Config.MachineType,
-			Autoscaled:  r.Autoscaling.Enabled,
+			Name:         r.Name,
+			MachineType:  r.Config.MachineType,
+			Autoscaled:   r.Autoscaling.Enabled,
+			WorkloadType: r.Config.Labels[workloadTypeLabel],
 		})
 	}
 	return pools, nil

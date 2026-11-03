@@ -3065,6 +3065,78 @@ func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	}
 }
 
+// TestAutoscalingStepSkipsSystemPools: the pools setup-gcp creates for
+// Substrate's system components and bundled PostgreSQL (labeled
+// ate.dev/workloadType) are listed so the user sees why, but never offered:
+// the cursor cannot reach them. With no other pool the step says so and
+// leaves only the skip row.
+func TestAutoscalingStepSkipsSystemPools(t *testing.T) {
+	app := testApp(t)
+	system := []gcp.NodePool{
+		{Name: "ate-postgres", MachineType: "e2-standard-4", WorkloadType: "ate-postgres"},
+		{Name: "ate-system-infra", MachineType: "e2-standard-4", WorkloadType: "ate-system-infra"},
+	}
+	worker := gcp.NodePool{Name: "substrate-node-pool", MachineType: "c3-standard-4"}
+
+	scr := newAutoscalingScreen(app.deps)
+	scr.Update(poolsMsg{owner: scr, pools: append(slices.Clone(system), worker)})
+	out := scr.View(100)
+	for _, want := range []string{
+		"[1] Enable autoscaling on substrate-node-pool  (c3-standard-4)",
+		"ate-postgres  (e2-standard-4) — system pool, managed by setup-gcp",
+		"ate-system-infra  (e2-standard-4) — system pool, managed by setup-gcp",
+		"[2] Skip — keep a fixed node count",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("autoscaling view should contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Enable autoscaling on ate-") || strings.Contains(out, "No node pool here is eligible") {
+		t.Errorf("system pools must not be offered:\n%s", out)
+	}
+	// The worker pool is preselected; down goes to skip and no further, so
+	// the two system pools are never under the cursor.
+	if scr.cursor != 0 {
+		t.Fatalf("cursor should start on the worker pool, got %d", scr.cursor)
+	}
+	scr.Update(key("j"))
+	scr.Update(key("j"))
+	if scr.cursor != 1 {
+		t.Fatalf("cursor should stop on the skip row (1), got %d", scr.cursor)
+	}
+	scr.Update(key("k"))
+	scr.Update(key("enter"))
+	if scr.mode != "bounds" || app.deps.Setup.NodePool != "substrate-node-pool" {
+		t.Fatalf("enter on the worker pool should open bounds for it: mode=%s pool=%s", scr.mode, app.deps.Setup.NodePool)
+	}
+
+	// Only system pools: nothing to choose, and enter skips the step.
+	scr = newAutoscalingScreen(app.deps)
+	scr.Update(poolsMsg{owner: scr, pools: system})
+	out = scr.View(100)
+	for _, want := range []string{
+		"No node pool here is eligible for autoscaling.",
+		"ate-postgres  (e2-standard-4) — system pool, managed by setup-gcp",
+		"[1] Skip — keep a fixed node count",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("autoscaling view with only system pools should contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Enable autoscaling on") {
+		t.Errorf("nothing should be offered with only system pools:\n%s", out)
+	}
+	if scr.cursor != 0 {
+		t.Fatalf("cursor should be on the skip row, got %d", scr.cursor)
+	}
+	if msgs := runCmd(scr.Update(key("enter"))); len(msgs) != 1 || msgs[0] != navNext {
+		t.Fatalf("enter with only system pools should skip the step, got %v", msgs)
+	}
+	if app.deps.Setup.AutoscaleEnabled {
+		t.Error("skipping must not record autoscaling as enabled")
+	}
+}
+
 func TestSandboxStepSkipFailureAndNoKVMConfirmation(t *testing.T) {
 	jumpToSandbox := func(app *App) {
 		app.deps.Setup.DemoMode = true
