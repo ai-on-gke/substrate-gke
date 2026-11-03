@@ -314,7 +314,9 @@ The images step chooses between two ways of getting the Substrate control-plane 
 > [!TIP]
 > If you want to avoid pulling the published images directly from `ghcr.io`, you
 > can put an Artifact Registry [remote repository](https://cloud.google.com/artifact-registry/docs/repositories/remote-overview)
-> in front of it and give that repository's path as the pre-built registry. See
+> in front of it and give
+> `<region>-docker.pkg.dev/<project>/<repo>/agent-substrate/substrate` as the
+> pre-built registry. See
 > [Create remote repositories](https://cloud.google.com/artifact-registry/docs/repositories/remote-repo)
 > for setup.
 
