@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -22,10 +23,86 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/ui"
 )
+
+// With mainArgsEnv set, the test binary runs the installer's main instead
+// of the tests, so a test can start the real program with its output piped
+// and see what a user piping it through tee would see.
+const mainArgsEnv = "SUBSTRATE_GKE_INSTALLER_TEST_MAIN_ARGS"
+
+func TestMain(m *testing.M) {
+	if args, ok := os.LookupEnv(mainArgsEnv); ok {
+		os.Args = append(os.Args[:1], strings.Fields(args)...)
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// Piped or redirected, Bubble Tea never gets a window size and the wizard
+// repaints "loading…" forever. It must fail at once and say why, and point
+// at the log file as the record a tee capture was meant to be.
+func TestWizardRefusesToRunWithoutATerminal(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), mainArgsEnv+"=--dry-run")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("piped wizard: err %v, want exit status 2\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("piped wizard wrote to stdout, which should carry nothing but the wizard:\n%s", stdout.String())
+	}
+	logDir, err := execx.DefaultLogDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"interactive terminal program", "not a terminal", logDir, "issues/107"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal is missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// The refusal names the stream that is wrong, so a user who piped only
+// stdout is not told to fix stdin.
+func TestNeedsTerminalNamesTheStream(t *testing.T) {
+	pipe, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipe.Close()
+	defer w.Close()
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		t.Skip("no controlling terminal:", err)
+	}
+	defer tty.Close()
+
+	if got := needsTerminal(tty, tty); got != "" {
+		t.Errorf("needsTerminal(tty, tty) = %q, want no refusal", got)
+	}
+	if got := needsTerminal(tty, w); !strings.Contains(got, "its output is not a terminal") {
+		t.Errorf("piped stdout: %q", got)
+	}
+	if got := needsTerminal(pipe, tty); !strings.Contains(got, "its input is not a terminal") {
+		t.Errorf("piped stdin: %q", got)
+	}
+	if got := needsTerminal(pipe, w); !strings.Contains(got, "its input and output are not a terminal") {
+		t.Errorf("both piped: %q", got)
+	}
+}
 
 // After a managed install the tree is gone, so the summary must not tell the
 // user to cd into it.
