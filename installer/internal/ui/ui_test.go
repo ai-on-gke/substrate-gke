@@ -1896,18 +1896,21 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, version: "substrate-71e7623", calls: &calls}
 	press := pressToCluster(t, app)
 	// The list load already background-probed the four substrate-ready
-	// clusters (substrate-ga is ready through v1); legacy-prod is not ready,
-	// so selecting it probes fresh.
+	// clusters (substrate-ga is ready through v1). substrate-poc's verdict is
+	// dropped so that selecting it probes fresh — the path a cluster whose
+	// background probe failed takes. (A cluster below the floor is rejected
+	// before any probe, so only a ready one can reach the guard.)
 	if calls != 4 {
 		t.Fatalf("background probes on load = %d, want 4", calls)
 	}
+	scr := app.cur.(*clusterScreen)
+	delete(scr.probed, "substrate-poc/us-west1-c")
 
-	press("2", "enter") // pick legacy-prod (us-central1)
+	press("1", "enter") // pick substrate-poc (us-west1-c)
 	// Must NOT advance to Provision! Must stay at Cluster and enter "installed" mode
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("wizard should remain on Cluster step when installed, got: %v", app.mach.Current())
 	}
-	scr := app.cur.(*clusterScreen)
 	if scr.mode != "installed" {
 		t.Fatalf("clusterScreen mode = %q, want %q", scr.mode, "installed")
 	}
@@ -1938,7 +1941,7 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 		t.Errorf("after esc: mode = %q, want list", scr.mode)
 	}
 	// An aborted selection must leave nothing behind: neither the rejected
-	// cluster's name and zone nor a bucket derived from them.
+	// cluster's name nor a bucket derived from it.
 	st := app.deps.Setup
 	if st.ClusterName != "substrate-test" || st.Zone != "us-west1-c" || st.BucketName != "" {
 		t.Errorf("aborted selection leaked into Setup: cluster=%q zone=%q bucket=%q",
@@ -1962,6 +1965,98 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	press("r")
 	if scr.mode != "installed" || calls != 6 {
 		t.Errorf("re-probe: mode=%q probes=%d, want installed after 6 probes", scr.mode, calls)
+	}
+}
+
+// specLabelRunner records the label of every spec it is asked to run.
+type specLabelRunner struct {
+	inner  execx.Runner
+	labels *[]string
+}
+
+func (r specLabelRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	*r.labels = append(*r.labels, spec.Label)
+	return r.inner.Start(ctx, spec)
+}
+
+// A cluster below the floor that already runs Substrate gets the rejection,
+// not the reinstall guard. The guard's remedy — [t], type the name, tear
+// Substrate down, install here — would end at the rejection anyway, after
+// the teardown: the destructive step before the dead end. Seen on a 1.36
+// control plane and on a 1.37 control plane with a 1.36 pool, both running
+// Substrate. The probe does not run on such a cluster — nothing it could
+// find changes the answer — and a verdict already cached is not consulted
+// either.
+func TestUnsupportedInstalledClusterIsRejectedBeforeTheGuard(t *testing.T) {
+	for _, tc := range []struct{ row, name, location string }{
+		{"2", "legacy-prod", "us-central1"}, // 1.33 control plane
+		{"3", "ml-staging", "us-central1"},  // 1.37 control plane, 1.36 pools
+	} {
+		for _, cached := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cached=%v", tc.name, cached), func(t *testing.T) {
+				app := testApp(t)
+				calls := 0
+				var labels []string
+				app.deps.Runner = specLabelRunner{labels: &labels, inner: installedClusterRunner{
+					inner: execx.DryRun{Delay: time.Millisecond}, version: "v0.6.0-41", calls: &calls}}
+				press := pressToCluster(t, app)
+				scr := app.cur.(*clusterScreen)
+				if cached {
+					scr.probed[tc.name+"/"+tc.location] = snapshot.InstalledProbe{Installed: true, Atelet: true, Version: "v0.6.0-41"}
+				}
+				probes := calls
+
+				press(tc.row, "enter")
+				if scr.mode != "confirm" {
+					t.Fatalf("%s running Substrate: mode = %q, want the rejection", tc.name, scr.mode)
+				}
+				if calls != probes {
+					t.Errorf("the install probe ran on a cluster below the floor (%d probes, had %d)", calls, probes)
+				}
+				view := flat(app.View())
+				floor := gcp.MinSupportedRelease.String()
+				if !strings.Contains(view, tc.name+" is below "+floor) {
+					t.Errorf("rejection missing from the view:\n%s", view)
+				}
+				if strings.Contains(view, "already runs Substrate") || strings.Contains(view, "[t]") {
+					t.Errorf("the rejection reads like the guard, teardown offer included:\n%s", view)
+				}
+				if hints := scr.Hints(); len(hints) != 1 || hints[0].Key != "esc" {
+					t.Errorf("hints on the rejection = %+v, want only esc", hints)
+				}
+
+				// The guard's path from here: [t], the cluster's name, enter.
+				// None of it may reach a teardown.
+				press("t")
+				if scr.mode == "teardown-confirm" {
+					t.Fatal("[t] on the rejection opened the teardown prompt")
+				}
+				for _, r := range tc.name {
+					press(string(r))
+				}
+				press("enter")
+				if scr.mode == "teardown-confirm" || scr.mode == "teardown" {
+					t.Errorf("after [t], the name and enter: mode = %q", scr.mode)
+				}
+				if slices.Contains(labels, "ate-setup delete ate-system") {
+					t.Errorf("a teardown ran on a cluster below the floor: %v", labels)
+				}
+				if app.mach.Current() != state.Cluster {
+					t.Errorf("left the cluster step: %v", app.mach.Current())
+				}
+
+				// Typed by name on the create row, it is the same cluster
+				// and gets the same rejection.
+				pump(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+				scr.cursor = len(scr.clusters)
+				press("enter")
+				scr.nameInput.SetValue(tc.name)
+				press("enter")
+				if scr.mode != "confirm" || calls != probes {
+					t.Errorf("typed %s: mode = %q, probes = %d (had %d), want the rejection without a probe", tc.name, scr.mode, calls, probes)
+				}
+			})
+		}
 	}
 }
 
@@ -2702,7 +2797,7 @@ func TestTypedInstalledClusterNameIsStillGuarded(t *testing.T) {
 	if scr.mode != "name" {
 		t.Fatalf("mode = %q, want name", scr.mode)
 	}
-	scr.nameInput.SetValue("legacy-prod")
+	scr.nameInput.SetValue("substrate-poc")
 	press("enter")
 	if app.mach.Current() != state.Cluster || scr.mode != "installed" {
 		t.Fatalf("typed installed cluster: step=%v mode=%q, want Cluster/installed", app.mach.Current(), scr.mode)

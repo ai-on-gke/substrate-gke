@@ -1329,8 +1329,13 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 }
 
 // probe checks the selection for an existing install, from cache when the
-// cluster was already probed this visit.
+// cluster was already probed this visit. A cluster below the floor is not
+// probed at all: nothing the probe could learn changes the answer, and the
+// guard it would open offers a teardown whose only sequel is the rejection.
 func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
+	if !c.SubstrateReady() {
+		return s.decide(c, snapshot.InstalledProbe{})
+	}
 	if res, ok := s.probed[c.Name+"/"+c.Location]; ok {
 		return s.decide(c, res)
 	}
@@ -1339,20 +1344,25 @@ func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
 	return s.comp.start()
 }
 
-// decide routes a probe result: a running install is blocked, a bare
-// ate-system namespace (an interrupted install — upstream's deploy is
-// documented safe to re-run) asks, and a clean cluster continues through the
-// version check.
+// decide routes a probe result: a cluster below the floor is rejected
+// whatever the probe found, a running install is blocked, a bare ate-system
+// namespace (an interrupted install — upstream's deploy is documented safe
+// to re-run) asks, and a clean cluster is chosen.
+//
+// The floor comes first because the guard's remedy — tear Substrate down and
+// install here — is refused on a cluster below the floor, so a teardown there
+// is the destructive step before the dead end. Seen on a 1.36 control plane
+// and on a 1.37 control plane with a 1.36 pool, both running Substrate.
 func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.Cmd {
 	switch {
+	case !c.SubstrateReady():
+		s.mode = "confirm"
+		return nil
 	case res.Partial():
 		s.mode = "partial"
 		return nil
 	case res.Installed:
 		s.mode, s.installedVersion = "installed", res.Version
-		return nil
-	case !c.SubstrateReady():
-		s.mode = "confirm"
 		return nil
 	}
 	return s.choose(c)
