@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,6 +67,41 @@ type Release struct{ Major, Minor int }
 // version and resolves it to the newest patch it serves, so it is also safe to
 // print into a command.
 func (r Release) String() string { return fmt.Sprintf("%d.%d", r.Major, r.Minor) }
+
+// clusterNameRE is GKE's rule for a cluster name, as its rejection quotes
+// it: a lowercase letter, then lowercase letters, digits and hyphens, not
+// ending with a hyphen. The length cap is separate (MaxClusterNameLength).
+// tools/setup-gcp/cmd/cluster.go has the same pair; a change to one is a
+// change to both.
+var clusterNameRE = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+// MaxClusterNameLength is the longest cluster name GKE accepts.
+const MaxClusterNameLength = 40
+
+// ValidClusterName reports why GKE would reject name as a cluster name, or
+// nil. The cluster screen asks as the name is typed, so the create fails on
+// the form rather than minutes later in bootstrap, and each message names
+// the one rule the name broke.
+func ValidClusterName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("a cluster name is required")
+	case len(name) > MaxClusterNameLength:
+		return fmt.Errorf("cluster name %q is %d characters; GKE allows at most %d", name, len(name), MaxClusterNameLength)
+	case clusterNameRE.MatchString(name):
+		return nil
+	case name[0] < 'a' || name[0] > 'z':
+		return fmt.Errorf("cluster name %q must start with a lowercase letter", name)
+	case strings.HasSuffix(name, "-"):
+		return fmt.Errorf("cluster name %q must not end with a hyphen", name)
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("cluster name %q contains %q: only lowercase letters, digits and hyphens are allowed", name, r)
+		}
+	}
+	return fmt.Errorf("cluster name %q is not a valid GKE cluster name", name)
+}
 
 // Cluster is one GKE cluster as listed by gcloud.
 type Cluster struct {

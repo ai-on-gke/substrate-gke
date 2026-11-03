@@ -645,6 +645,56 @@ func TestBootDiskMatches(t *testing.T) {
 	}
 }
 
+// validateClusterName is GKE's rule — [a-z]([-a-z0-9]*[a-z0-9])?, at most 40
+// characters — applied before the create is sent, each rejection naming the
+// one rule the name broke. The installer's gcp.ValidClusterName is the same
+// rule with the same wording.
+func TestValidateClusterName(t *testing.T) {
+	tests := []struct {
+		name    string
+		cluster string
+		wantErr string
+	}{
+		{name: "default", cluster: "substrate-poc"},
+		{name: "one letter", cluster: "a"},
+		{name: "digits and hyphens", cluster: "c3-standard-4"},
+		{name: "forty characters", cluster: strings.Repeat("a", 40)},
+		{name: "surrounding space is trimmed", cluster: " substrate-poc "},
+		{name: "empty", cluster: "", wantErr: "a cluster name is required"},
+		{name: "only spaces", cluster: "  ", wantErr: "a cluster name is required"},
+		{name: "forty-one characters", cluster: strings.Repeat("a", 41), wantErr: "is 41 characters; GKE allows at most 40"},
+		{name: "leading digit", cluster: "1cluster", wantErr: "must start with a lowercase letter"},
+		{name: "leading hyphen", cluster: "-cluster", wantErr: "must start with a lowercase letter"},
+		{name: "leading capital", cluster: "Cluster", wantErr: "must start with a lowercase letter"},
+		{name: "trailing hyphen", cluster: "cluster-", wantErr: "must not end with a hyphen"},
+		{name: "underscore", cluster: "my_cluster", wantErr: `contains '_': only lowercase letters, digits and hyphens are allowed`},
+		{name: "capital inside", cluster: "myCluster", wantErr: `contains 'C': only lowercase letters, digits and hyphens are allowed`},
+		{name: "dot", cluster: "my.cluster", wantErr: `contains '.': only lowercase letters, digits and hyphens are allowed`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{ClusterName: tt.cluster}
+			err := validateClusterName(&cfg)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("got error %q, want containing %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.ClusterName != strings.TrimSpace(tt.cluster) {
+				t.Errorf("ClusterName = %q, want trimmed %q", cfg.ClusterName, strings.TrimSpace(tt.cluster))
+			}
+		})
+	}
+}
+
 func TestValidateClusterLocation(t *testing.T) {
 	tests := []struct {
 		name    string
