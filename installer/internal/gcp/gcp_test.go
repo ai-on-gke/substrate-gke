@@ -202,13 +202,15 @@ func TestParseNodePools(t *testing.T) {
 	data := `[
 	  {"name": "substrate-node-pool", "config": {"machineType": "c3-standard-4"},
 	   "autoscaling": {"enabled": true}},
-	  {"name": "default-pool", "config": {"machineType": "e2-medium"}, "autoscaling": {}}
+	  {"name": "default-pool", "config": {"machineType": "e2-medium"}, "autoscaling": {}},
+	  {"name": "ate-postgres", "config": {"machineType": "e2-standard-4",
+	   "labels": {"ate.dev/workloadType": "ate-postgres"}}, "autoscaling": {}}
 	]`
 	pools, err := ParseNodePools([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pools) != 2 {
+	if len(pools) != 3 {
 		t.Fatalf("got %d pools", len(pools))
 	}
 	if pools[0].Name != "substrate-node-pool" || !pools[0].Autoscaled || pools[0].MachineType != "c3-standard-4" {
@@ -216,6 +218,12 @@ func TestParseNodePools(t *testing.T) {
 	}
 	if pools[1].Autoscaled {
 		t.Error("default-pool should not report autoscaling")
+	}
+	if pools[0].System() || pools[1].System() {
+		t.Error("pools without the ate.dev/workloadType label must not be system pools")
+	}
+	if pools[2].WorkloadType != "ate-postgres" || !pools[2].System() {
+		t.Errorf("ate-postgres should be a system pool: %+v", pools[2])
 	}
 }
 

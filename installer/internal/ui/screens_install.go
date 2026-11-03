@@ -637,8 +637,12 @@ type poolsMsg struct {
 type autoscalingScreen struct {
 	deps *Deps
 	// mode: "loading", "choose", "bounds", "exec"
-	mode   string
+	mode string
+	// pools are the pools the user may autoscale; system are the ones
+	// setup-gcp created for Substrate's system components and PostgreSQL,
+	// listed greyed out so the user sees why they are not offered.
 	pools  []gcp.NodePool
+	system []gcp.NodePool
 	err    error
 	cursor int
 	minIn  textinput.Model
@@ -698,8 +702,19 @@ func (s *autoscalingScreen) Update(msg tea.Msg) tea.Cmd {
 		if m.owner != s {
 			return nil
 		}
-		s.pools, s.err = m.pools, m.err
+		s.pools, s.system, s.err = nil, nil, m.err
 		s.mode = "choose"
+		// setup-gcp's system pools are one fixed node each, pinned by label
+		// and taint: autoscaling ate-postgres lets the autoscaler move the
+		// database's only node, and ate-system-infra the control plane's.
+		// Keep them out of the cursor's reach.
+		for _, p := range m.pools {
+			if p.System() {
+				s.system = append(s.system, p)
+			} else {
+				s.pools = append(s.pools, p)
+			}
+		}
 		// Preselect the pool setup-gcp creates.
 		for i, p := range s.pools {
 			if p.Name == s.deps.Setup.NodePool {
@@ -827,6 +842,12 @@ func (s *autoscalingScreen) View(w int) string {
 			} else {
 				b.WriteString(theme.Subtle.Render("  "+row) + "\n")
 			}
+		}
+		if len(s.pools) == 0 {
+			b.WriteString(theme.Warning.Render("  No node pool here is eligible for autoscaling.") + "\n")
+		}
+		for _, p := range s.system {
+			b.WriteString(theme.Subtle.Render(fmt.Sprintf("    %s  (%s) — system pool, managed by setup-gcp", p.Name, p.MachineType)) + "\n")
 		}
 		skipRow := fmt.Sprintf("[%d] Skip — keep a fixed node count", len(s.pools)+1)
 		if s.cursor == len(s.pools) {
