@@ -166,7 +166,7 @@ create can only fail.
 > is safe to apply to a serving cluster. Node auto-repair, preemption and OOM
 > kills reach the same path and cannot be configured away, so treat the setting
 > as removing the scheduled risk rather than all of it. Change versions through
-> the [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md), which has you suspend
+> the [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/guides/upgrade.md), which has you suspend
 > every actor on a node at your own pace before the node moves.
 
 ```bash
