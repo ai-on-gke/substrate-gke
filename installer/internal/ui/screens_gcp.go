@@ -1856,7 +1856,6 @@ func (s *clusterScreen) needsKVM(c gcp.Cluster) bool { return s.deps.Setup.Micro
 
 func (s *clusterScreen) selectedOnly() bool { return s.mode == "confirm" || s.mode == "no-kvm" }
 
-// recheckFailed keeps a failed reload's error for the no-kvm panel.
 func (s *clusterScreen) recheckFailed(err error) bool {
 	if s.mode != "no-kvm" || err == nil {
 		return false

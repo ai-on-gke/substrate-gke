@@ -239,7 +239,6 @@ func (s *controlPlaneScreen) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-// startStage starts staging once the deploy has succeeded, at most once.
 func (s *controlPlaneScreen) startStage() tea.Cmd {
 	if !s.comp.ok() || s.stage == nil || s.stage.started {
 		return nil
@@ -314,7 +313,6 @@ func (s *controlPlaneScreen) View(w int) string {
 	return b.String()
 }
 
-// viewRun collapses the finished deploy to one line once staging starts.
 func (s *controlPlaneScreen) viewRun(w int) string {
 	if !s.staging() {
 		return s.comp.view(w)

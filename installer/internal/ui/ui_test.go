@@ -3030,7 +3030,6 @@ func TestDemoSummary(t *testing.T) {
 	}
 }
 
-// Turn on Substrate stages Micro-VM, then the demo deploys counter-microvm.
 func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	app := testApp(t)
 	app.deps.Setup.DemoMode = true
@@ -3089,7 +3088,6 @@ func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	}
 }
 
-// microVMClusterScreen opens the cluster step with Micro-VM chosen.
 func microVMClusterScreen(t *testing.T, kvmReady bool) (*App, *clusterScreen) {
 	t.Helper()
 	app := testApp(t)
@@ -3106,7 +3104,6 @@ func microVMClusterScreen(t *testing.T, kvmReady bool) (*App, *clusterScreen) {
 	return app, scr
 }
 
-// microVMTestCluster is a ready, regional cluster with or without a KVM pool.
 func microVMTestCluster(kvmReady bool) gcp.Cluster {
 	return gcp.Cluster{
 		Name:          "plain-gvisor-cluster",
@@ -3166,7 +3163,6 @@ func TestClusterScreenBlocksClusterWithoutKVMForMicroVM(t *testing.T) {
 	}
 }
 
-// labelRunner records the label of every spec it starts.
 type labelRunner struct {
 	inner  execx.Runner
 	labels *[]string
@@ -3250,7 +3246,6 @@ func TestClusterScreenRecheckContinuesOnceKVMPoolExists(t *testing.T) {
 	}
 }
 
-// controlPlaneWithStage opens Turn on Substrate with the deploy done.
 func controlPlaneWithStage(t *testing.T, stage *execComp) *App {
 	t.Helper()
 	app := testApp(t)
@@ -3267,7 +3262,6 @@ func controlPlaneWithStage(t *testing.T, stage *execComp) *App {
 	return app
 }
 
-// failedStage returns a failed staging run that a retry can rerun.
 func failedStage(app *App) *execComp {
 	c := newExecComp(app.deps.Runner, app.deps.Builder.InstallMicroVMDeps(app.deps.Setup), steps.MicroVMDeps(app.deps.Builder.FetchLabel()), "")
 	c.started, c.finished, c.failed = true, true, fmt.Errorf("staging failed")
