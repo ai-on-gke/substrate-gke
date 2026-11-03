@@ -4422,3 +4422,32 @@ func TestFilestoreSkippedAfterAFailureIsReportedAsFailed(t *testing.T) {
 		t.Errorf("FilestoreSummary of a step never run = %q", got)
 	}
 }
+
+// The upgrade hand-over outgrew one panel line once it exported the
+// kubeconfig. Wider than the panel it breaks at its && joins, every line but
+// the last ending in the && that continues it, so the lines paste as the one
+// command; narrower, it stays whole.
+func TestHandOverLinesBreakAtTheJoins(t *testing.T) {
+	line := "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig && export NEW_RELEASE=v0.6.1 && unset VERSION"
+	if got := handOverLines(line, 120); got != line {
+		t.Errorf("a line that fits was changed:\n%s", got)
+	}
+	got := handOverLines(line, 72)
+	if want := "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig &&\n  export NEW_RELEASE=v0.6.1 && unset VERSION"; got != want {
+		t.Errorf("at 72 columns got\n%s\nwant\n%s", got, want)
+	}
+	for width := 30; width <= 120; width++ {
+		lines := strings.Split(handOverLines(line, width), "\n")
+		for i, l := range lines {
+			if lipgloss.Width(l) > width && strings.Contains(l, " && ") {
+				t.Errorf("width %d: line %d is %d wide and could have been broken: %q", width, i, lipgloss.Width(l), l)
+			}
+			if i < len(lines)-1 && !strings.HasSuffix(l, " &&") {
+				t.Errorf("width %d: line %d does not continue with &&: %q", width, i, l)
+			}
+		}
+		if joined := strings.ReplaceAll(strings.Join(lines, "\n"), " &&\n  ", " && "); joined != line {
+			t.Errorf("width %d: the lines do not paste back to the command:\n%s", width, joined)
+		}
+	}
+}

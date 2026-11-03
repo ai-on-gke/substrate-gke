@@ -212,6 +212,9 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 		"CLUSTER_NAME=" + ShellQuote("substrate-test"),
 		"CLUSTER_LOCATION=" + ShellQuote("us-west1-c"),
 		"NO_DEV_ENV=1 go run ./cmd/ate-setup delete ate-system",
+		// ate-setup fetches its credentials into the installer's kubeconfig,
+		// as the install did, never into the pasting shell's.
+		"KUBECONFIG=" + ShellQuote(KubeconfigPath("acme", "substrate-test", "us-west1-c")),
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("teardown command missing %q:\n%s", want, cmd)
@@ -241,7 +244,7 @@ func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 		// teardown must outlast it, or the immediate re-probe reads (and
 		// caches) the half-deleted install as still installed.
 		"kubectl wait --for=delete namespace/ate-system",
-		`export KUBECONFIG="$kubeconfig_dir/config"`,
+		"export KUBECONFIG=" + ShellQuote(KubeconfigPath("acme", "prod cluster", "us-west1-c")),
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("delete script missing %q:\n%s", want, script)
@@ -1151,13 +1154,14 @@ func TestFindSetupGCP(t *testing.T) {
 // The completion screen's verify runs in a log panel that wraps lines at
 // its width, so the listing has to be the default columns: -o wide's node
 // names and IPs made every row wrap mid-field even at 110 columns.
+// The listing is the last line of a script that first points kubectl at the
+// installer's kubeconfig, and the display is that line, the command the user
+// would type.
 func TestVerifyListsDefaultColumns(t *testing.T) {
 	b := NewBuilder(t.TempDir(), true)
 	spec := b.Verify(testSetup(t))
-	if slices.Contains(spec.Argv, "-o") || slices.Contains(spec.Argv, "wide") {
-		t.Errorf("verify must not widen the listing: %v", spec.Argv)
-	}
-	if got := strings.Join(spec.Argv, " "); got != spec.Display {
+	lines := strings.Split(spec.Argv[len(spec.Argv)-1], "\n")
+	if got := lines[len(lines)-1]; strings.Contains(got, "wide") || got != spec.Display {
 		t.Errorf("verify runs %q but displays %q", got, spec.Display)
 	}
 }
@@ -1346,6 +1350,13 @@ func TestDeploySpecs(t *testing.T) {
 	}
 	if !slices.Contains(filestore.Env, "PROJECT_ID=acme") {
 		t.Errorf("filestore env missing project ID: %v", filestore.Env)
+	}
+
+	// Verify is a script now, so it can be pointed at the installed cluster;
+	// the display stays the command the user would type.
+	verify := b.Verify(st)
+	if verify.Argv[0] != "bash" || !strings.HasSuffix(verify.Argv[2], "\nkubectl get pods -n ate-system") || verify.Display != "kubectl get pods -n ate-system" {
+		t.Errorf("verify argv = %v, display %q", verify.Argv, verify.Display)
 	}
 }
 
@@ -1707,12 +1718,13 @@ func TestRunbookURLNamesTheNewCommit(t *testing.T) {
 }
 
 // runPrepare runs PrepareUpgrade's script with home as HOME, and with gcloud
-// and go stubbed: go records its arguments in ~/go-args.
+// and go stubbed: gcloud writes the kubeconfig it was pointed at, as
+// get-credentials would, and go records its arguments in ~/go-args.
 func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	for name, body := range map[string]string{
-		"gcloud": "#!/bin/sh\n",
+		"gcloud": "#!/bin/sh\nif [ -n \"${KUBECONFIG:-}\" ]; then : > \"$KUBECONFIG\"; fi\n",
 		"go":     "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/go-args\"\n",
 	} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
@@ -1729,8 +1741,13 @@ func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
 // set-up moves new.yaml to the new registry and tag, and the hand-over sets
 // the release the runbook builds worker images from and clears any VERSION
 // that would override the tag; a rollback needs nothing from the shell.
+//
+// The set-up also fetches the cluster's credentials into ~/ate-upgrade, and
+// the hand-over points the shell's kubectl and ate-setup at that file: the
+// runbook's own block would `kubectl config use-context` instead, moving
+// the user's current context for the whole upgrade.
 func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
-	records, home := t.TempDir(), t.TempDir()
+	records, home, old, next := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	t.Setenv("ATE_RECORD_DIR", records)
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	st := testSetup(t)
@@ -1746,7 +1763,11 @@ func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	if err := os.WriteFile(record, []byte("images:\n  repo: registry.example.com/old\n  tag: v0.6.0\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runPrepare(t, b.PrepareUpgrade(st, "/trees/old", "/trees/new"), home); err != nil {
+	prepare := b.PrepareUpgrade(st, old, next)
+	if script := prepare.Argv[len(prepare.Argv)-1]; !strings.Contains(script, `KUBECONFIG="$stage/kubeconfig" gcloud container clusters get-credentials `+ShellQuote(st.ClusterName)) {
+		t.Errorf("set-up fetches credentials somewhere other than the staged ~/ate-upgrade:\n%s", script)
+	}
+	if out, err := runPrepare(t, prepare, home); err != nil {
 		t.Fatalf("set-up: %v\n%s", err, out)
 	}
 	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "new.yaml")); !strings.Contains(string(got), "  repo: "+testImageRepo+"\n  tag: v0.6.1\n") {
@@ -1755,8 +1776,20 @@ func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "old.yaml")); !strings.Contains(string(got), "  repo: registry.example.com/old\n  tag: v0.6.0\n") {
 		t.Errorf("old.yaml should stay the record:\n%s", got)
 	}
-	if line := b.UpgradeShellLine(st); line != "cd ~/ate-upgrade/new && export NEW_RELEASE=v0.6.1 && unset VERSION" {
+	kubeconfig := filepath.Join(home, "ate-upgrade", "kubeconfig")
+	if _, err := os.Stat(kubeconfig); err != nil {
+		t.Errorf("the credentials should land in ~/ate-upgrade with the rest: %v", err)
+	}
+	line := b.UpgradeShellLine(st)
+	if line != "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig && export NEW_RELEASE=v0.6.1 && unset VERSION" {
 		t.Errorf("pre-built hand-over line: %s", line)
+	}
+	// Pasted into a shell, the line has to resolve ~ in the export too.
+	paste := exec.Command("bash", "-c", line+"\nprintf '%s' \"$KUBECONFIG\"")
+	paste.Env = append(os.Environ(), "HOME="+home)
+	out, err := paste.Output()
+	if err != nil || string(out) != kubeconfig {
+		t.Errorf("the hand-over line points kubectl at %q, %v; want %q", out, err, kubeconfig)
 	}
 	if summary := b.UpgradeSummary(st); strings.Contains(summary, "export VERSION") {
 		t.Errorf("a pre-built hand-over should not export a version:\n%s", summary)
@@ -2019,9 +2052,11 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 	root := fakeCheckout(t)
 	b := NewBuilder(root, false)
 
+	// The lead points the shell at the cluster: the install left the user's
+	// kubeconfig alone, so the kubectl commands after it need it.
 	lead, demo := b.NextSteps(st)
 	joined := strings.Join(demo, "\n")
-	if lead != "" || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
+	if lead != KubeconfigExport(st) || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
 		t.Errorf("Envoy without a driver: lead %q, demo %v", lead, demo)
 	}
 	if note := b.RouterNote(st); !strings.Contains(note, "allowlist") || !strings.Contains(note, b.RouterAuthURL()) {
@@ -2031,7 +2066,7 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, CounterDriverDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if lead, demo = b.NextSteps(st); lead != "" || !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter -l app=counter-driver -f"}) {
+	if lead, demo = b.NextSteps(st); lead != KubeconfigExport(st) || !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter -l app=counter-driver -f"}) {
 		t.Errorf("Envoy with the driver: lead %q, demo %v", lead, demo)
 	}
 	st.SandboxClass, st.MicroVMDeployed = state.SandboxMicroVM, true
@@ -2120,7 +2155,9 @@ func TestCordonCheckScript(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			write("gcloud", "exit 0\n")
+			// The check inherits the step's KUBECONFIG; it has no
+			// credentials of its own to fetch.
+			write("gcloud", "echo \"unexpected gcloud $*\" >&2; exit 1\n")
 			kubectl := "case \"$*\" in\n"
 			for label, out := range tc.nodes {
 				kubectl += fmt.Sprintf("  *workloadType=%s*) echo %s ;;\n", label, out)
@@ -2183,7 +2220,9 @@ func TestPlacementCheckScript(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			write("gcloud", "exit 0\n")
+			// The check inherits the step's KUBECONFIG; it has no
+			// credentials of its own to fetch.
+			write("gcloud", "echo \"unexpected gcloud $*\" >&2; exit 1\n")
 			kubectl := "case \"$*\" in\n"
 			kubectl += fmt.Sprintf("  'get pods -n ate-system -l app=ate-api-server '*) printf %%s %s ;;\n", ShellQuote(tc.pods))
 			for node, label := range tc.labels {
@@ -2262,7 +2301,11 @@ func TestFilestoreScriptChecksTheAPIBeforeChangingAnything(t *testing.T) {
 		}
 		last = i
 	}
-	if strings.Index(script, "gcloud") < strings.Index(script, "kubectl get crd") {
+	// The one gcloud ahead of the check is the get-credentials that writes
+	// the installer's own kubeconfig; it touches nothing on the cluster.
+	st := testSetup(t)
+	before := strings.Replace(script[:strings.Index(script, "kubectl get crd")], getCredentials(st.ProjectID, st.ClusterName, st.Zone), "", 1)
+	if strings.Contains(before, "gcloud") {
 		t.Errorf("gcloud runs before the API check:\n%s", script)
 	}
 }
@@ -2465,5 +2508,75 @@ func TestListInstallsOrdersRecordsNewestFirst(t *testing.T) {
 	t.Setenv("ATE_RECORD_DIR", filepath.Join(records, "missing"))
 	if got := ListInstalls(); got != nil {
 		t.Errorf("a directory nothing was recorded in should list nothing: %+v", got)
+	}
+}
+
+// Every step that reaches the cluster does so through the installer's own
+// kubeconfig for it, exported before anything that could read or write a
+// kubeconfig — kubectl, ate-setup, or a script that runs them — so the user's
+// ~/.kube/config is never written and their current context never moves.
+// It is one file for every step and for the pasted teardown, not a throwaway
+// per step: ate-setup records the KUBECONFIG it ran with, and the upgrade
+// runbook's --config reads that record back long after the step is gone.
+func TestClusterStepsUseTheInstallersKubeconfig(t *testing.T) {
+	st := testSetup(t)
+	micro := testSetup(t)
+	micro.SandboxClass, micro.MicroVMDeployed = state.SandboxMicroVM, true
+	b := NewBuilder(fakeCheckout(t), false)
+
+	path := KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone)
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Named for the context gcloud writes, which also names ate-setup's record.
+	if want := filepath.Join(cache, "substrate-gke", "kubeconfig", "gke_acme_us-west1-c_substrate-test.yaml"); path != want {
+		t.Errorf("KubeconfigPath = %s, want %s", path, want)
+	}
+	export := "export KUBECONFIG=" + ShellQuote(path)
+	for _, spec := range []execx.Spec{
+		b.DeployAteSystem(st),
+		b.DeployDemo(st, "counter"),
+		b.InstallMicroVMDeps(micro),
+		b.DeployDemo(micro, "counter"),
+		b.DeployFilestoreCSI(st),
+		b.Verify(st),
+		b.DeleteAteSystem(st.ProjectID, st.ClusterName, st.Zone),
+	} {
+		script := spec.Argv[len(spec.Argv)-1]
+		at := strings.Index(script, export)
+		if at < 0 {
+			t.Errorf("%s: does not export the installer's kubeconfig:\n%s", spec.Label, script)
+			continue
+		}
+		for _, reach := range []string{"kubectl", "ate-setup", "deploy.sh", "install-ate.sh", legacyMicroVMScript} {
+			if i := strings.Index(script, reach); i >= 0 && i < at {
+				t.Errorf("%s: %q runs before the kubeconfig export:\n%s", spec.Label, reach, script)
+			}
+		}
+		if strings.Contains(script, "kubeconfig_dir") {
+			t.Errorf("%s: fetches credentials into a throwaway kubeconfig, which ate-setup would record:\n%s", spec.Label, script)
+		}
+		if err := exec.Command("bash", "-n", "-c", script).Run(); err != nil {
+			t.Errorf("%s: script is not valid shell: %v\n%s", spec.Label, err, script)
+		}
+	}
+	// The pasted teardown sets it on the command alone, so the pasting shell
+	// keeps whatever kubeconfig it had.
+	for name, cmd := range map[string]string{
+		"teardown":          b.TeardownCommand(st, ""),
+		"explicit teardown": b.TeardownCommand(st, "/tmp/substrate"),
+	} {
+		if !strings.Contains(cmd, "KUBECONFIG="+ShellQuote(path)+" PROJECT_ID=") || strings.Contains(cmd, "export") {
+			t.Errorf("%s does not name the installer's kubeconfig for ate-setup alone:\n%s", name, cmd)
+		}
+	}
+	// What the completion screen and the exit summary hand the user: the
+	// same file, and the gcloud alternative that writes their own.
+	if lead, _ := b.NextSteps(st); lead != export {
+		t.Errorf("next steps lead = %q, want %q", lead, export)
+	}
+	if got, want := GetCredentialsCommand(st), "gcloud container clusters get-credentials 'substrate-test' --location 'us-west1-c' --project 'acme'"; got != want {
+		t.Errorf("GetCredentialsCommand = %q, want %q", got, want)
 	}
 }

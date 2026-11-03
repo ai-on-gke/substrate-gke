@@ -317,8 +317,14 @@ func (b *Builder) inEphemeralTree(command string) string {
 // take an exported one over CLUSTER_NAME and delete from that cluster. It
 // carries no image flags: deleting removes what the manifests name and never
 // resolves an image reference, so a pre-built install tears down identically.
+//
+// KUBECONFIG names the installer's kubeconfig for the cluster (see
+// KubeconfigPath): ate-setup fetches the credentials it needs into it, as it
+// did for the install, instead of into the user's ~/.kube/config. Set on the
+// command rather than exported, it leaves the pasting shell as it was.
 func (b *Builder) TeardownCommand(st *state.Setup, root string) string {
-	env := fmt.Sprintf("PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s KUBECTL_CONTEXT= NO_DEV_ENV=1",
+	env := fmt.Sprintf("KUBECONFIG=%s PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s KUBECTL_CONTEXT= NO_DEV_ENV=1",
+		ShellQuote(KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone)),
 		ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone))
 	del := env + " go run ./cmd/ate-setup delete ate-system"
 	if root != "" {
@@ -341,7 +347,7 @@ func (b *Builder) TeardownCommand(st *state.Setup, root string) string {
 func (b *Builder) DeleteAteSystem(projectID, cluster, location string) execx.Spec {
 	env := fmt.Sprintf("PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s KUBECTL_CONTEXT= NO_DEV_ENV=1",
 		ShellQuote(projectID), ShellQuote(cluster), ShellQuote(location))
-	lines := credentialLines(projectID, cluster, location)
+	lines := kubeconfigLines(projectID, cluster, location)
 	lines = append(lines,
 		env+" go run ./cmd/ate-setup delete ate-system",
 		"kubectl wait --for=delete namespace/ate-system --timeout=180s",
@@ -402,15 +408,19 @@ func (b *Builder) NextSteps(st *state.Setup) (lead string, demo []string) {
 		demoTemplate = "counter-microvm"
 	}
 
+	// The install never touched the user's kubeconfig, so the kubectl
+	// commands below need pointing at the cluster first: the lead is the
+	// line that does it.
+	lead = KubeconfigExport(st)
 	if b.hasCounterDriver() {
-		return "", []string{"kubectl logs -n " + demoAtespace + " -l app=counter-driver -f"}
+		return lead, []string{"kubectl logs -n " + demoAtespace + " -l app=counter-driver -f"}
 	}
 
 	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
 	if b.Managed {
 		installAte = b.KubectlAteInstall()
 	}
-	return "", []string{installAte, "kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate}
+	return lead, []string{installAte, "kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate}
 }
 
 // CounterDriverDir is the counter demo's driver, an in-cluster client of the
@@ -616,7 +626,7 @@ func HasEnvoyDockerfile(root string) bool {
 // and skips fetching them for CLUSTER_NAME, so the install would land in
 // whatever cluster that context names instead of the one the wizard chose.
 // The shell scripts pass it to kubectl/ko as --context, where it names a
-// context the throwaway KUBECONFIG from credentialLines does not have.
+// context the installer's KUBECONFIG (see kubeconfigLines) does not have.
 // Empty means "use the current context" to both. exec.Cmd keeps the last
 // duplicate, so this overrides the inherited value.
 //
@@ -751,22 +761,24 @@ const externalPostgresCheck = `[ -n "${ATE_API_POSTGRES_READ_WRITE_CONNECTION_ST
 // database is external. A cluster the user brought has neither, unless they
 // added them with the commands bootstrap printed.
 //
-// The check runs in a child shell, so its throwaway KUBECONFIG goes with it
-// and ate-setup fetches its own credentials as before. It exits
-// systemPoolsAbsent when a pool is missing; any other failure (gcloud,
-// kubectl, the API server) stops the deploy rather than read as "no pools"
-// and quietly install the system components onto the worker nodes.
+// The check runs in a child shell so that its exit status can be read under
+// set -e; it inherits the KUBECONFIG the step exported (see kubeconfigLines)
+// and so reaches the cluster the step installs into. It exits
+// systemPoolsAbsent when a pool is missing; any other failure (kubectl, the
+// API server) stops the deploy rather than read as "no pools" and quietly
+// install the system components onto the worker nodes.
 func cordonLines(st *state.Setup) string {
 	lines := []string{"export ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS=false"}
 	if st.SharedSystemNodes {
 		return strings.Join(append(lines, "echo "+ShellQuote(SharedSystemNodesLine)), "\n") + "\n"
 	}
-	check := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone),
+	check := []string{
 		`system=$(kubectl get nodes -l ate.dev/workloadType=ate-system-infra -o name)`,
 		fmt.Sprintf(`[ -n "$system" ] || exit %d`, systemPoolsAbsent),
-		externalPostgresCheck+` && exit 0`,
+		externalPostgresCheck + ` && exit 0`,
 		`postgres=$(kubectl get nodes -l ate.dev/workloadType=ate-postgres -o name)`,
-		fmt.Sprintf(`[ -n "$postgres" ] || exit %d`, systemPoolsAbsent))
+		fmt.Sprintf(`[ -n "$postgres" ] || exit %d`, systemPoolsAbsent),
+	}
 	return strings.Join(append(lines,
 		"pools=0",
 		"bash -euo pipefail -c "+ShellQuote(strings.Join(check, "\n"))+" || pools=$?",
@@ -787,12 +799,12 @@ const PlacementLine = "ate-api-server is running on the ate-system-infra nodes"
 // the step naming the node when one does not, rather than report a
 // separation that did not happen. Terminating pods from an earlier,
 // uncordoned rollout are skipped. Like cordonLines' check, it runs in a child
-// shell with its own throwaway KUBECONFIG.
+// shell that inherits the step's KUBECONFIG.
 func placementLines(st *state.Setup) string {
 	if st.SharedSystemNodes {
 		return ""
 	}
-	check := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone),
+	check := []string{
 		`nodes=$(kubectl get pods -n ate-system -l app=ate-api-server -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.spec.nodeName}}{{"\n"}}{{end}}{{end}}')`,
 		`[ -n "$nodes" ] || { echo "No scheduled ate-api-server pod to check the placement of" >&2; exit 1; }`,
 		`for node in $nodes; do`,
@@ -802,7 +814,8 @@ func placementLines(st *state.Setup) string {
 		`    exit 1`,
 		`  fi`,
 		`done`,
-		"echo "+ShellQuote(PlacementLine))
+		"echo " + ShellQuote(PlacementLine),
+	}
 	return "\n" + strings.Join([]string{
 		`if [ "$ATE_INSTALL_CORDON_SYSTEM_INFRA_COMPONENTS" = true ]; then`,
 		"  bash -euo pipefail -c " + ShellQuote(strings.Join(check, "\n")),
@@ -971,9 +984,11 @@ func (b *Builder) withOverlay(command string) string {
 
 // DeployAteSystem installs the Substrate control plane with the upstream
 // cmd/ate-setup. ate-setup fetches cluster credentials itself from
-// PROJECT_ID/CLUSTER_NAME/CLUSTER_LOCATION, and ko builds and pushes the
-// control-plane images from the checkout's source. Before ate-setup runs,
-// deploy/gke is added to the tree if the tree needs it (see overlayCommand).
+// PROJECT_ID/CLUSTER_NAME/CLUSTER_LOCATION — into the installer's own
+// kubeconfig, which the step exports first (see kubeconfigLines) — and ko
+// builds and pushes the control-plane images from the checkout's source.
+// Before ate-setup runs, deploy/gke is added to the tree if the tree needs
+// it (see overlayCommand).
 func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	display, argv := imageArgs(st)
 	sim := append(b.fetchSimLines(),
@@ -999,8 +1014,9 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
-		Argv:    b.inTree(b.withOverlay(cordonLines(st) + "go run ./cmd/ate-setup deploy ate-system" + argv + placementLines(st))),
-		Env:     append(b.controlPlaneEnv(st), sandboxClassesEnv(state.SandboxGVisor)),
+		Argv: b.inTree(strings.Join(kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone), "\n") + "\n" +
+			b.withOverlay(cordonLines(st)+"go run ./cmd/ate-setup deploy ate-system"+argv+placementLines(st))),
+		Env: append(b.controlPlaneEnv(st), sandboxClassesEnv(state.SandboxGVisor)),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -1207,7 +1223,7 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 				")",
 			}
 		}
-		lines := append(credentialLines(st.ProjectID, st.ClusterName, st.Zone), restoreDemoTemplates...)
+		lines := append(kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone), restoreDemoTemplates...)
 		// Display is fixed before the tree is inspected, so each branch says
 		// which one ran: that line is how the log tells them apart.
 		lines = append(lines,
@@ -1236,10 +1252,12 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 			),
 		}
 	}
+	lines := append(kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone),
+		"go run ./cmd/ate-setup deploy demo "+ShellQuote(name)+argv)
 	return execx.Spec{
 		Label:   "ate-setup deploy demo " + name,
 		Display: "go run ./cmd/ate-setup deploy demo " + name + display,
-		Argv:    b.inTree("go run ./cmd/ate-setup deploy demo " + ShellQuote(name) + argv),
+		Argv:    b.inTree(strings.Join(lines, "\n")),
 		Env:     b.env(st),
 		SimLines: append(b.fetchSimLines(),
 			"[step]: deploy_demo_"+name,
@@ -1271,7 +1289,7 @@ func (b *Builder) DeployDemo(st *state.Setup, name string) execx.Spec {
 // The KUBECTL_CONTEXT that env blanks matters most here: with one set,
 // install-microvm-deps.sh skips its up-front context check and install-ate.sh
 // skips its own get-credentials, so an inherited dev-env context (absent from
-// the throwaway KUBECONFIG credentialLines writes) would fail only at
+// the installer's KUBECONFIG, see kubeconfigLines) would fail only at
 // `kubectl apply`, after the assets were assembled and uploaded. Blank, both
 // use that KUBECONFIG's current context — install-ate.sh re-fetches the same
 // credentials into it first, which is redundant but harmless.
@@ -1327,11 +1345,12 @@ const microVMATESetup = "go run ./cmd/ate-setup deploy sandboxconfig"
 // Upstream's tooling is driven rather than reimplemented in Go: it pins the
 // staged assets' sha256 digests into the SandboxConfig at apply time.
 //
-// Credentials are fetched into a throwaway KUBECONFIG the same way the probes
-// do. Both paths refuse to run without a resolvable context — deliberately,
-// since they would otherwise discover the problem only after assembling and
-// uploading everything — and an install must target the cluster the wizard
-// chose, never whatever context happens to be ambient.
+// Credentials are fetched into the installer's KUBECONFIG the same way the
+// control-plane step does. Both paths refuse to run without a resolvable
+// context — deliberately, since they would otherwise discover the problem
+// only after assembling and uploading everything — and an install must
+// target the cluster the wizard chose, never whatever context happens to be
+// ambient.
 //
 // Every ate-setup deploy replaces the install record the upgrade flow reads,
 // so the ate-setup branch passes the control-plane step's settings and image
@@ -1343,7 +1362,7 @@ const microVMATESetup = "go run ./cmd/ate-setup deploy sandboxconfig"
 // no longer need them.
 func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 	display, argv := imageArgs(st)
-	lines := credentialLines(st.ProjectID, st.ClusterName, st.Zone)
+	lines := kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone)
 	// Display is fixed before the tree is inspected, so each branch says
 	// which one ran: that line is how the log tells them apart.
 	lines = append(lines,
@@ -1476,27 +1495,28 @@ echo "roles/file.editor is granted to ${FILESTORE_GSA}."`
 // its Substrate overlay deploy script (deploy/kubernetes/overlays/substrate/deploy.sh).
 // It automatically disables the managed GKE Filestore CSI Driver addon if enabled
 // to prevent conflicts with the Substrate overlay. It needs no Substrate
-// checkout of its own.
+// checkout of its own. The check and deploy.sh run kubectl against the
+// current context, so the step points them at the installer's kubeconfig
+// for the cluster first (see kubeconfigLines).
 //
-// The script does nothing it cannot take back until filestoreAPICheck has
-// passed: the clone and the check come first, the addon update and deploy.sh
-// (which grants IAM before it applies) after. The clone is of HEAD, not a
-// pin: no revision of the overlay serves ate.dev/v1 yet, so a pin would only
-// fix the failure in place, while HEAD picks up the upstream fix when it
-// lands and the check keeps the step honest until then. After deploy.sh,
-// filestoreGrantCheck makes sure the role it may have failed to grant is
-// there.
+// Past that export, the script does nothing it cannot take back until
+// filestoreAPICheck has passed: the clone and the check come first, the
+// addon update and deploy.sh (which grants IAM before it applies) after.
+// The clone is of HEAD, not a pin: no revision of the overlay serves
+// ate.dev/v1 yet, so a pin would only fix the failure in place, while HEAD
+// picks up the upstream fix when it lands and the check keeps the step
+// honest until then. After deploy.sh, filestoreGrantCheck makes sure the
+// role it may have failed to grant is there.
 func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 	// Wizard answers reach this script as text, so they are quoted for the
 	// same reason the fetch preamble quotes its paths.
 	project, cluster, zone := ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone)
 	deployCmd := fmt.Sprintf("./deploy.sh --project-id %s", project)
 
-	script := strings.Join([]string{
-		"set -euo pipefail",
+	script := strings.Join(append(append([]string{"set -euo pipefail"}, kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone)...),
 		`TMP_DIR=$(mktemp -d)`,
 		`trap 'rm -rf "${TMP_DIR}"' EXIT`,
-		`git clone --depth 1 ` + FilestoreOverlayRepo + ` "${TMP_DIR}/gcp-filestore-csi-driver"`,
+		`git clone --depth 1 `+FilestoreOverlayRepo+` "${TMP_DIR}/gcp-filestore-csi-driver"`,
 		`cd "${TMP_DIR}/gcp-filestore-csi-driver/deploy/kubernetes/overlays/substrate"`,
 		filestoreAPICheck,
 		fmt.Sprintf(`FILESTORE_ADDON=$(gcloud container clusters describe %s --project=%s --location=%s --format="value(addonsConfig.gcpFilestoreCsiDriverConfig.enabled)" 2>/dev/null || true)`, cluster, project, zone),
@@ -1504,13 +1524,13 @@ func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 		`    echo "Disabling managed GKE Filestore CSI Driver addon..."`,
 		fmt.Sprintf(`    gcloud container clusters update %s --project=%s --location=%s --update-addons=GcpFilestoreCsiDriver=DISABLED`, cluster, project, zone),
 		`else`,
-		`    echo "` + FilestoreAddonOffLine + `"`,
+		`    echo "`+FilestoreAddonOffLine+`"`,
 		`fi`,
 		deployCmd,
 		fmt.Sprintf(`FILESTORE_PROJECT=%s`, project),
 		fmt.Sprintf(`FILESTORE_GSA=%s@%s.iam.gserviceaccount.com`, FilestoreServiceAccount, project),
 		filestoreGrantCheck,
-	}, "\n")
+	), "\n")
 
 	return execx.Spec{
 		Label:   "deploy filestore csi driver",
@@ -1578,15 +1598,19 @@ func (b *Builder) EnableAutoscaling(st *state.Setup) execx.Spec {
 	}
 }
 
-// Verify lists the control-plane pods so the user sees Substrate running.
+// Verify lists the control-plane pods so the user sees Substrate running. It
+// reads the cluster the wizard installed into, through the installer's
+// kubeconfig, not whatever context the user's shell has current.
 // The default columns, not -o wide: the output lands in the completion
 // screen's log panel, which wraps lines at its width, and the wide form's
 // node names and IPs made every row wrap mid-field even at 110 columns.
 func (b *Builder) Verify(st *state.Setup) execx.Spec {
+	lines := append([]string{"set -euo pipefail"}, kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone)...)
+	lines = append(lines, "kubectl get pods -n ate-system")
 	return execx.Spec{
 		Label:   "verify ate-system",
 		Display: "kubectl get pods -n ate-system",
-		Argv:    []string{"kubectl", "get", "pods", "-n", "ate-system"},
+		Argv:    []string{"bash", "-c", strings.Join(lines, "\n")},
 		SimLines: []string{
 			"NAME                              READY   STATUS    RESTARTS   AGE",
 			"ate-api-server-6f4d9c-x2lkq       1/1     Running   0          2m",

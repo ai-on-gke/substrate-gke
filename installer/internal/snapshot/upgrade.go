@@ -122,8 +122,7 @@ func RecordPath(st *state.Setup) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	context := "gke_" + st.ProjectID + "_" + st.Zone + "_" + st.ClusterName
-	return filepath.Join(dir, context+".yaml"), nil
+	return filepath.Join(dir, kubeContext(st.ProjectID, st.ClusterName, st.Zone)+".yaml"), nil
 }
 
 // recordDir is the directory ate-setup writes its install records in.
@@ -348,12 +347,22 @@ func CheckImageSource(st *state.Setup) error {
 // UpgradeHome is the directory upstream's runbook works in.
 const UpgradeHome = "~/ate-upgrade"
 
+// UpgradeKubeconfig is the kubeconfig the runbook's shell works from: the
+// cluster's credentials, fetched by PrepareUpgrade into UpgradeHome, where
+// they last exactly as long as the upgrade does. The runbook's own block
+// has `kubectl config use-context` instead, which would move the user's
+// current context for the whole upgrade; UpgradeShellLine exports this
+// file in its place, and the user's ~/.kube/config is never written.
+const UpgradeKubeconfig = UpgradeHome + "/kubeconfig"
+
 // PrepareUpgrade is the runbook's "Before you start" done for the cluster,
 // from the trees already fetched and ate-setup's record of the cluster, plus
 // the GKE preparation the runbook leaves out. It refuses to replace an
 // ~/ate-upgrade left from an earlier upgrade, which may still hold what that
 // upgrade's rollback needs, and lays the directory out last, whole, so a
-// failed run leaves nothing to delete before a retry.
+// failed run leaves nothing to delete before a retry. The credentials go
+// into the staged directory too (see UpgradeKubeconfig), so a failed run
+// leaves no kubeconfig behind either.
 func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) execx.Spec {
 	record, err := RecordPath(st)
 	if err != nil {
@@ -369,7 +378,9 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 		// The upgrade track never asks for the bucket; the record names it.
 		`bucket=$(sed -n 's/^  bucketName: //p' "$record")`,
 		`[ -n "$bucket" ] || { echo "$record names no snapshot bucket (storage.bucketName). Add the bucket the cluster was installed with, then retry." >&2; exit 1; }`,
-		fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s",
+		`stage=$(mktemp -d "$up.XXXXXX")`,
+		`trap 'rm -rf "$stage"' EXIT`,
+		fmt.Sprintf(`KUBECONFIG="$stage/kubeconfig" gcloud container clusters get-credentials %s --location %s --project %s`,
 			ShellQuote(st.ClusterName), ShellQuote(st.Zone), ShellQuote(st.ProjectID)),
 		fmt.Sprintf(`echo "Installing kubectl-ate from substrate@%s"`, shorten(st.InstalledCommit)),
 		"go -C " + ShellQuote(installedDir) + " install ./cmd/kubectl-ate",
@@ -378,8 +389,6 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 		// for an older release too.
 		fmt.Sprintf(`SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket "$bucket"`,
 			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID)),
-		`stage=$(mktemp -d "$up.XXXXXX")`,
-		`trap 'rm -rf "$stage"' EXIT`,
 		`cp "$record" "$stage/old.yaml"`,
 		`cp "$record" "$stage/new.yaml"`,
 	}
@@ -392,7 +401,7 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 		`ln -s `+ShellQuote(installedDir)+` "$stage/old"`,
 		`ln -s `+ShellQuote(nextDir)+` "$stage/new"`,
 		`mv "$stage" "$up"`,
-		`echo "Set up $up: old.yaml and new.yaml from $record, old and new linked to the two trees"`,
+		`echo "Set up $up: old.yaml and new.yaml from $record, old and new linked to the two trees, kubeconfig for the cluster"`,
 	)
 	return execx.Spec{
 		Label:            "prepare ~/ate-upgrade",
@@ -404,13 +413,14 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 			fmt.Sprintf("kubeconfig entry generated for %s.", st.ClusterName),
 			fmt.Sprintf("Installing kubectl-ate from substrate@%s", shorten(st.InstalledCommit)),
 			"Creating the snapshot transfer service account",
-			fmt.Sprintf("Set up %s: old.yaml and new.yaml from %s, old and new linked to the two trees", UpgradeHome, record),
+			fmt.Sprintf("Set up %s: old.yaml and new.yaml from %s, old and new linked to the two trees, kubeconfig for the cluster", UpgradeHome, record),
 		},
 	}
 }
 
 // UpgradeShellLine is what PrepareUpgrade cannot do for the shell the runbook
-// runs from: move it to the new tree and set the variables the runbook reads.
+// runs from: move it to the new tree, point its kubectl and ate-setup at the
+// cluster (see UpgradeKubeconfig), and set the variables the runbook reads.
 // The runbook's step 3 builds a pre-built worker image from NEW_RELEASE. A
 // build from source takes its version from VERSION, which the record does not
 // keep; pre-built images take it from the tag in new.yaml, unless a VERSION
@@ -418,9 +428,9 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 func (b *Builder) UpgradeShellLine(st *state.Setup) string {
 	next := versionWord(b.SubstrateVersion(st))
 	if st.Prebuilt() {
-		return fmt.Sprintf("cd %s/new && export NEW_RELEASE=%s && unset VERSION", UpgradeHome, next)
+		return fmt.Sprintf("cd %s/new && export KUBECONFIG=%s && export NEW_RELEASE=%s && unset VERSION", UpgradeHome, UpgradeKubeconfig, next)
 	}
-	return fmt.Sprintf("cd %s/new && export VERSION=%s", UpgradeHome, next)
+	return fmt.Sprintf("cd %s/new && export KUBECONFIG=%s && export VERSION=%s", UpgradeHome, UpgradeKubeconfig, next)
 }
 
 // versionWord renders a version as a shell word for a line the user pastes.

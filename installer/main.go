@@ -322,6 +322,18 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		teardown = b.TeardownCommand(st, b.Root)
 	}
 
+	// The install fetched its credentials into a kubeconfig of its own and
+	// left the user's alone, so a shell has to be pointed at the cluster
+	// before any kubectl below works. The export keeps it that way; the
+	// gcloud alternative is for a user who would rather have the cluster in
+	// their own kubeconfig, and says what that does to their context.
+	section("Reaching the cluster")
+	note("The installer kept its credentials in a kubeconfig of its own; ~/.kube/config",
+		"and your current context are as they were. To point a shell at the cluster:")
+	command(snapshot.KubeconfigExport(st))
+	note("Or add the cluster to your own kubeconfig, which also makes it your current context:")
+	command(snapshot.GetCredentialsCommand(st))
+
 	// Delete only the control plane (keep the cluster), or delete the
 	// install from GCP in one of two ways — cluster-scoped, or the complete
 	// teardown — which snapshot.CleanupLeads words as alternatives, the
@@ -340,13 +352,11 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	command(b.CleanupCommand(st, false))
 
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
-	// install leaves a written copy behind.
+	// install leaves a written copy behind. The panel's lead is the export
+	// line, already printed above.
 	if st.DemoDeployed {
 		section("Next steps — try the " + ui.DemoName(st) + " demo")
-		lead, demo := b.NextSteps(st)
-		if lead != "" {
-			command(lead)
-		}
+		_, demo := b.NextSteps(st)
 		for _, cmd := range demo {
 			command(cmd)
 		}
