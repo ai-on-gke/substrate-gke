@@ -290,9 +290,15 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// unquoted.
 	section("Source tree")
 	teardown := b.TeardownCommand(st, "")
+	// Why the tree was fetched depends on the image source: a pre-built
+	// install builds nothing and used it for its deploy manifests only.
+	fetchedFor := "to build your images"
+	if st.Prebuilt() {
+		fetchedFor = "for its deploy manifests"
+	}
 	switch {
 	case b.Managed && cleaned:
-		note("The substrate tree was fetched to build your images and has been removed;",
+		note("The substrate tree was fetched "+fetchedFor+" and has been removed;",
 			"re-running the installer fetches it again. Develop against your own clone.")
 	case b.Managed:
 		note("The substrate tree, if fetched, is cached at "+b.Root+";",

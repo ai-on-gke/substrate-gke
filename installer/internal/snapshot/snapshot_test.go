@@ -1120,6 +1120,12 @@ func TestFindSetupGCP(t *testing.T) {
 	if _, err := FindSetupGCP("", t.TempDir()); err == nil {
 		t.Error("search outside a checkout must fail")
 	}
+	// A binary run from its own directory searches from the same place
+	// twice; the message names it once.
+	outside := t.TempDir()
+	if _, err := FindSetupGCP("", outside, outside); err == nil || strings.Count(err.Error(), outside) != 1 {
+		t.Errorf("FindSetupGCP(%q, %q) = %v; want an error naming the directory once", outside, outside, err)
+	}
 
 	// This repository's own copy must pass the check, from this package's
 	// directory just as from installer/.
@@ -1129,6 +1135,20 @@ func TestFindSetupGCP(t *testing.T) {
 	}
 	if got, err := FindSetupGCP("", "."); err != nil || got != real {
 		t.Errorf("FindSetupGCP from this repository = %q, %v; want %q", got, err, real)
+	}
+}
+
+// The completion screen's verify runs in a log panel that wraps lines at
+// its width, so the listing has to be the default columns: -o wide's node
+// names and IPs made every row wrap mid-field even at 110 columns.
+func TestVerifyListsDefaultColumns(t *testing.T) {
+	b := NewBuilder(t.TempDir(), true)
+	spec := b.Verify(testSetup(t))
+	if slices.Contains(spec.Argv, "-o") || slices.Contains(spec.Argv, "wide") {
+		t.Errorf("verify must not widen the listing: %v", spec.Argv)
+	}
+	if got := strings.Join(spec.Argv, " "); got != spec.Display {
+		t.Errorf("verify runs %q but displays %q", got, spec.Display)
 	}
 }
 

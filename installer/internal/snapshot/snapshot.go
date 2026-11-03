@@ -1444,11 +1444,14 @@ func (b *Builder) EnableAutoscaling(st *state.Setup) execx.Spec {
 }
 
 // Verify lists the control-plane pods so the user sees Substrate running.
+// The default columns, not -o wide: the output lands in the completion
+// screen's log panel, which wraps lines at its width, and the wide form's
+// node names and IPs made every row wrap mid-field even at 110 columns.
 func (b *Builder) Verify(st *state.Setup) execx.Spec {
 	return execx.Spec{
 		Label:   "verify ate-system",
 		Display: "kubectl get pods -n ate-system",
-		Argv:    []string{"kubectl", "get", "pods", "-n", "ate-system", "-o", "wide"},
+		Argv:    []string{"kubectl", "get", "pods", "-n", "ate-system"},
 		SimLines: []string{
 			"NAME                              READY   STATUS    RESTARTS   AGE",
 			"ate-api-server-6f4d9c-x2lkq       1/1     Running   0          2m",

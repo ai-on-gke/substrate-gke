@@ -426,6 +426,12 @@ func TestFindFailsClearly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), Dir) {
 		t.Errorf("Find outside a checkout = %v; want an error naming %s", err, Dir)
 	}
+	// A binary run from its own directory searches from the same place
+	// twice; the message names it once.
+	outside := t.TempDir()
+	if _, err := Find("", outside, outside); err == nil || strings.Count(err.Error(), outside) != 1 {
+		t.Errorf("Find(%q, %q) = %v; want an error naming the directory once", outside, outside, err)
+	}
 	if _, err := Find(t.TempDir()); err == nil {
 		t.Error("Find accepted an explicit directory without deploy/gke's layout")
 	}
