@@ -498,6 +498,10 @@ func NewBuilder(root string, managed bool) *Builder {
 	return &Builder{Root: root, Managed: managed, Version: version, repo: RepoURL, commit: Commit}
 }
 
+// SourceCommit is the commit the builder reads manifests from: Commit, or the
+// one UseSource last named.
+func (b *Builder) SourceCommit() string { return b.commit }
+
 // UseSource repoints the builder at the commit the user named in the images
 // step: a branch, a tag, or a commit of the upstream repository, which is the
 // only one either track reads.

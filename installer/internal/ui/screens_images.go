@@ -91,12 +91,18 @@ func newInput(value, placeholder string) textinput.Model {
 // the pin, which only fits images built from the pin.
 func (s *imagesScreen) enterRelease() tea.Cmd {
 	registry, tag := s.offeredImages()
+	// Like the registry and tag, a commit chosen on an earlier visit is kept;
+	// the pin would otherwise move the builder back to it on enter-through.
+	commit := snapshot.Commit
+	if s.deps.Setup.ImageRepo != "" {
+		commit = s.deps.Builder.SourceCommit()
+	}
 	s.mode, s.focus, s.errText, s.note = "release", 0, "", ""
 	s.labels = []string{"Image registry", "Image tag", "Commit the images were built from"}
 	s.fields = []textinput.Model{
 		newInput(registry, snapshot.ReleaseRepo),
 		newInput(tag, "the tag your images were published under"),
-		newInput(snapshot.Commit, snapshot.Commit),
+		newInput(commit, snapshot.Commit),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }

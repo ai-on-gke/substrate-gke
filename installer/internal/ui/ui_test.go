@@ -3596,15 +3596,18 @@ const mismatchWarning = "If these images were not built from it"
 // The images screen is rebuilt on every entry, so the pre-built track has to
 // start from what the run already holds: coming back after typing a mirror
 // must not offer the release again, or enter-through would install from it.
+// The same goes for the commit, which would move the builder back to the pin.
 func TestImagesScreenKeepsTheTypedRegistry(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
 	app := testApp(t)
 	st := app.deps.Setup
 	st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: commit})
 
 	scr := newImagesScreen(app.deps)
 	scr.enterRelease()
-	if scr.value(0) != testImageRepo || scr.value(1) != testImageTag {
-		t.Errorf("re-entered pre-built fields = %q, %q; want %s, %s", scr.value(0), scr.value(1), testImageRepo, testImageTag)
+	if scr.value(0) != testImageRepo || scr.value(1) != testImageTag || scr.value(2) != commit {
+		t.Errorf("re-entered pre-built fields = %q, %q, %q; want %s, %s, %s", scr.value(0), scr.value(1), scr.value(2), testImageRepo, testImageTag, commit)
 	}
 }
 
