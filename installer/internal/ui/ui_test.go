@@ -3811,3 +3811,83 @@ func TestSeparateSystemNodesField(t *testing.T) {
 		t.Errorf("field for shared nodes shows %q, want no", got)
 	}
 }
+
+// filestoreFailRunner fails the Filestore step the way the v1.0.0-rc.1 run
+// did (#114): the API check finds the overlay written against v1alpha1.
+type filestoreFailRunner struct{ inner execx.Runner }
+
+func (r filestoreFailRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	if spec.Label != "deploy filestore csi driver" {
+		return r.inner.Start(ctx, spec)
+	}
+	ch := make(chan execx.Event, 4)
+	ch <- execx.Event{Line: "Cloning into 'gcp-filestore-csi-driver'..."}
+	ch <- execx.Event{Line: snapshot.FilestoreAPICheckLine + " (ate.dev/v1alpha1)..."}
+	ch <- execx.Event{Line: "error: the Filestore overlay's CSIDriverConfig is written against ate.dev/v1alpha1, but this cluster serves csidriverconfigs.ate.dev as: v1", Stderr: true}
+	ch <- execx.Event{Done: true, Err: errors.New("exit status 1")}
+	close(ch)
+	return ch
+}
+
+// A Filestore run that fails and is skipped from the failure is not one that
+// was skipped outright: it may have changed things. The Setup records the
+// difference, the completion panel says "failed", and a later run that
+// succeeds clears it (#114).
+func TestFilestoreSkippedAfterAFailureIsReportedAsFailed(t *testing.T) {
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  filestoreFailRunner{inner: execx.DryRun{Delay: time.Millisecond}},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	deps.Setup.ProjectID, deps.Setup.ClusterName = "acme", "prod"
+	var scr *filestoreScreen
+	drive := func(first tea.Msg) {
+		queue := []tea.Msg{first}
+		for steps := 0; len(queue) > 0; steps++ {
+			if steps > 1000 {
+				t.Fatal("the Filestore screen did not converge")
+			}
+			msg := queue[0]
+			queue = append(queue[1:], runCmd(scr.Update(msg))...)
+		}
+	}
+
+	scr = newFilestoreScreen(deps)
+	drive(key("enter")) // [1] install
+	if scr.comp == nil || scr.comp.failed == nil {
+		t.Fatal("the run should have failed")
+	}
+	if deps.Setup.FilestoreCSIFailed || deps.Setup.FilestoreCSIDeployed {
+		t.Fatal("nothing is recorded before the user decides what to do about the failure")
+	}
+	if scr.Update(key("s")) == nil {
+		t.Fatal("[s] after a failure should move on")
+	}
+	if !deps.Setup.FilestoreCSIFailed || deps.Setup.FilestoreCSIDeployed {
+		t.Errorf("skip after failure: failed=%v deployed=%v", deps.Setup.FilestoreCSIFailed, deps.Setup.FilestoreCSIDeployed)
+	}
+	if got := FilestoreSummary(deps.Setup); !strings.HasPrefix(got, "failed") {
+		t.Errorf("FilestoreSummary = %q, want it to lead with failed", got)
+	}
+	if view := flat(newCompleteScreen(deps).View(120)); !strings.Contains(view, "filestore failed") || strings.Contains(view, "filestore skipped") {
+		t.Errorf("the completion panel should say the Filestore step failed:\n%s", view)
+	}
+
+	deps.Runner = execx.DryRun{Delay: time.Millisecond}
+	scr = newFilestoreScreen(deps)
+	drive(key("enter"))
+	if !scr.comp.ok() {
+		t.Fatalf("the dry-run install should succeed: %v", scr.comp.failed)
+	}
+	scr.Update(key("enter"))
+	if deps.Setup.FilestoreCSIFailed || !deps.Setup.FilestoreCSIDeployed {
+		t.Errorf("after a run that succeeded: failed=%v deployed=%v", deps.Setup.FilestoreCSIFailed, deps.Setup.FilestoreCSIDeployed)
+	}
+	if got := FilestoreSummary(deps.Setup); got != "installed" {
+		t.Errorf("FilestoreSummary after an install = %q", got)
+	}
+	if got := FilestoreSummary(state.NewSetup()); got != "skipped" {
+		t.Errorf("FilestoreSummary of a step never run = %q", got)
+	}
+}

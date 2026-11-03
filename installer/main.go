@@ -282,8 +282,13 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	if deps.LogPath != "" {
 		fmt.Printf("  log        %s\n", deps.LogPath)
 	}
-	if st.FilestoreCSIDeployed {
+	switch {
+	case st.FilestoreCSIDeployed:
 		fmt.Println("  filestore  CSI driver deployed (gcp-filestore-csi-driver)")
+	case st.FilestoreCSIFailed:
+		// Not "skipped": the run may have left an IAM grant or a partial
+		// namespace behind, and the log says which (see FilestoreSummary).
+		fmt.Println("  filestore  CSI driver install failed and was skipped; see the log, and check namespace gcp-filestore-csi-driver for a partial apply")
 	}
 	if st.AutoscaleEnabled {
 		fmt.Printf("  autoscale  %s, %d–%d nodes\n", st.NodePool, st.AutoscaleMin, st.AutoscaleMax)

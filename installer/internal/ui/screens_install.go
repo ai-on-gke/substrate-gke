@@ -548,7 +548,7 @@ func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
 			switch key.String() {
 			case "enter":
 				if s.comp.ok() {
-					s.deps.Setup.FilestoreCSIDeployed = true
+					s.deps.Setup.FilestoreCSIDeployed, s.deps.Setup.FilestoreCSIFailed = true, false
 					return goNext
 				}
 			case "r":
@@ -557,6 +557,10 @@ func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
 				}
 			case "s":
 				if s.comp.failed != nil {
+					// Skipped from a failure, not instead of a run: the
+					// summaries say "failed", since the run may have
+					// changed things.
+					s.deps.Setup.FilestoreCSIFailed = true
 					return goNext
 				}
 			}
@@ -581,6 +585,7 @@ func (s *filestoreScreen) Update(msg tea.Msg) tea.Cmd {
 		if s.cursor == 1 {
 			return goNext
 		}
+		s.deps.Setup.FilestoreCSIDeployed, s.deps.Setup.FilestoreCSIFailed = false, false
 		s.comp = newExecComp(s.deps.Runner, s.deps.Builder.DeployFilestoreCSI(s.deps.Setup), steps.FilestoreCSI(), s.deps.LogPath)
 		return s.comp.start()
 	}
@@ -973,6 +978,21 @@ func SandboxSummary(st *state.Setup) string {
 	}
 }
 
+// FilestoreSummary describes what the optional Filestore step did. A run
+// that failed and was skipped from the failure is reported as failed, not
+// skipped: it may have left an IAM grant or a half-applied
+// gcp-filestore-csi-driver namespace behind, which a skip never does.
+func FilestoreSummary(st *state.Setup) string {
+	switch {
+	case st.FilestoreCSIDeployed:
+		return "installed"
+	case st.FilestoreCSIFailed:
+		return "failed  · skipped after the error; see the log"
+	default:
+		return "skipped"
+	}
+}
+
 // DemoName returns the counter demo variant that applies to this install.
 func DemoName(st *state.Setup) string {
 	if st.MicroVMActive() {
@@ -1053,7 +1073,7 @@ func (s *completeScreen) View(w int) string {
 		{"sandbox", SandboxSummary(st)},
 		{"bucket", "gs://" + st.BucketName},
 		{"images", st.ImageSummary()},
-		{"filestore", map[bool]string{true: "installed", false: "skipped"}[st.FilestoreCSIDeployed]},
+		{"filestore", FilestoreSummary(st)},
 		{"autoscale", map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled]},
 		{"demo", DemoSummary(st)},
 	}

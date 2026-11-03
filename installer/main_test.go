@@ -410,3 +410,25 @@ func TestSummaryForAnUpgrade(t *testing.T) {
 		t.Errorf("upgrade summary reads like an install:\n%s", out)
 	}
 }
+
+// The exit summary tells a Filestore run that failed from one that was
+// skipped: the failed run may have left an IAM grant or a partial namespace
+// behind, and "skipped" would hide that (#114).
+func TestSummaryReportsAFailedFilestoreStep(t *testing.T) {
+	builder := snapshot.NewBuilder(t.TempDir(), true)
+	st := state.NewSetup()
+	st.FilestoreCSIFailed = true
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: builder}, true)
+	})
+	if !strings.Contains(out, "filestore  CSI driver install failed") || !strings.Contains(out, "gcp-filestore-csi-driver") {
+		t.Errorf("summary does not report the failed Filestore step:\n%s", out)
+	}
+
+	out = captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: state.NewSetup(), Builder: builder}, true)
+	})
+	if strings.Contains(out, "filestore  CSI driver") {
+		t.Errorf("summary has a Filestore line for an install that skipped the step:\n%s", out)
+	}
+}

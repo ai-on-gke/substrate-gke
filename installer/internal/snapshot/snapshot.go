@@ -1374,11 +1374,60 @@ func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 	}
 }
 
+// FilestoreOverlayRepo is the upstream Filestore CSI driver repository, whose
+// deploy/kubernetes/overlays/substrate is what the Filestore step installs.
+const FilestoreOverlayRepo = "https://github.com/kubernetes-sigs/gcp-filestore-csi-driver.git"
+
+// FilestoreAPICheckLine opens the check that the cluster serves the API
+// version the overlay's CSIDriverConfig is written against. The checklist
+// keys its row off it.
+const FilestoreAPICheckLine = "Checking the cluster serves the overlay's CSIDriverConfig API"
+
+// FilestoreAddonOffLine is printed in place of the addon update when the
+// managed driver is already off, so the checklist row lights either way.
+const FilestoreAddonOffLine = "The managed GKE Filestore CSI Driver addon is off; nothing to disable."
+
+// filestoreAPICheck runs in the overlay directory, before anything is
+// changed, and fails the step when the cluster does not serve the apiVersion
+// of the overlay's CSIDriverConfig. The overlay is written against
+// ate.dev/v1alpha1, which agent-substrate/substrate#2996 stopped serving
+// before v1.0.0-rc.1 (kubernetes-sigs/gcp-filestore-csi-driver#1416); left
+// to deploy.sh, that was found at the Kustomize apply, after it had granted
+// roles/file.editor and the step had turned the managed addon off, and the
+// apply itself had already created the namespace, Deployment and DaemonSet
+// (#114). The version is read from the clone rather than assumed, so the
+// check follows the overlay when it moves.
+const filestoreAPICheck = `want=$(sed -n 's|^apiVersion:[[:space:]]*\(ate\.dev/[^[:space:]]*\).*|\1|p' csi_driver_config.yaml | head -n 1)
+if [[ -z "${want}" ]]; then
+  echo "error: could not read the CSIDriverConfig apiVersion from the overlay's csi_driver_config.yaml; its layout has changed" >&2
+  exit 1
+fi
+echo "` + FilestoreAPICheckLine + ` (${want})..."
+served=$(kubectl get crd csidriverconfigs.ate.dev -o jsonpath='{range .spec.versions[?(@.served==true)]}{.name}{" "}{end}' 2>/dev/null || true)
+if [[ -z "${served}" ]]; then
+  echo "error: the cluster has no csidriverconfigs.ate.dev CRD; Substrate's control plane has to be on before its Filestore driver" >&2
+  exit 1
+fi
+if [[ " ${served} " != *" ${want#ate.dev/} "* ]]; then
+  echo "error: the Filestore overlay's CSIDriverConfig is written against ${want}, but this cluster serves csidriverconfigs.ate.dev as: ${served% }" >&2
+  echo "Nothing was changed: no IAM binding was granted and the managed Filestore addon was left as it is." >&2
+  echo "The overlay has to move to a served version upstream (kubernetes-sigs/gcp-filestore-csi-driver#1416); skip this step until it has." >&2
+  exit 1
+fi
+echo "The cluster serves csidriverconfigs.ate.dev as: ${served% }"`
+
 // DeployFilestoreCSI clones the GCP Filestore CSI Driver repository and invokes
 // its Substrate overlay deploy script (deploy/kubernetes/overlays/substrate/deploy.sh).
 // It automatically disables the managed GKE Filestore CSI Driver addon if enabled
 // to prevent conflicts with the Substrate overlay. It needs no Substrate
 // checkout of its own.
+//
+// The script does nothing it cannot take back until filestoreAPICheck has
+// passed: the clone and the check come first, the addon update and deploy.sh
+// (which grants IAM before it applies) after. The clone is of HEAD, not a
+// pin: no revision of the overlay serves ate.dev/v1 yet, so a pin would only
+// fix the failure in place, while HEAD picks up the upstream fix when it
+// lands and the check keeps the step honest until then.
 func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 	// Wizard answers reach this script as text, so they are quoted for the
 	// same reason the fetch preamble quotes its paths.
@@ -1387,15 +1436,18 @@ func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 
 	script := strings.Join([]string{
 		"set -euo pipefail",
+		`TMP_DIR=$(mktemp -d)`,
+		`trap 'rm -rf "${TMP_DIR}"' EXIT`,
+		`git clone --depth 1 ` + FilestoreOverlayRepo + ` "${TMP_DIR}/gcp-filestore-csi-driver"`,
+		`cd "${TMP_DIR}/gcp-filestore-csi-driver/deploy/kubernetes/overlays/substrate"`,
+		filestoreAPICheck,
 		fmt.Sprintf(`FILESTORE_ADDON=$(gcloud container clusters describe %s --project=%s --location=%s --format="value(addonsConfig.gcpFilestoreCsiDriverConfig.enabled)" 2>/dev/null || true)`, cluster, project, zone),
 		`if [[ "${FILESTORE_ADDON}" == "True" || "${FILESTORE_ADDON}" == "true" ]]; then`,
 		`    echo "Disabling managed GKE Filestore CSI Driver addon..."`,
 		fmt.Sprintf(`    gcloud container clusters update %s --project=%s --location=%s --update-addons=GcpFilestoreCsiDriver=DISABLED`, cluster, project, zone),
+		`else`,
+		`    echo "` + FilestoreAddonOffLine + `"`,
 		`fi`,
-		`TMP_DIR=$(mktemp -d)`,
-		`trap 'rm -rf "${TMP_DIR}"' EXIT`,
-		`git clone --depth 1 https://github.com/kubernetes-sigs/gcp-filestore-csi-driver.git "${TMP_DIR}/gcp-filestore-csi-driver"`,
-		`cd "${TMP_DIR}/gcp-filestore-csi-driver/deploy/kubernetes/overlays/substrate"`,
 		deployCmd,
 	}, "\n")
 
@@ -1405,10 +1457,12 @@ func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 		Argv:    []string{"bash", "-c", script},
 		Env:     b.env(st),
 		SimLines: []string{
+			"Cloning into 'gcp-filestore-csi-driver'...",
+			FilestoreAPICheckLine + " (ate.dev/v1)...",
+			"The cluster serves csidriverconfigs.ate.dev as: v1",
 			"Disabling managed GKE Filestore CSI Driver addon...",
 			"Updating " + st.ClusterName + "...",
 			"Updated [" + st.ClusterName + "].",
-			"Cloning into 'gcp-filestore-csi-driver'...",
 			"=================================================================",
 			"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
 			"=================================================================",
