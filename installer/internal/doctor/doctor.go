@@ -219,10 +219,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 				if missing := MissingMicroVMTools(); len(missing) > 0 {
 					return Result{Warn,
 						fmt.Sprintf("missing %s; needed only if you select the Micro-VM sandbox", strings.Join(missing, ", ")),
-						// Homebrew installs coreutils g-prefixed (gsha256sum);
-						// upstream's scripts call sha256sum by name, so the
-						// gnubin directory has to be on PATH for them too.
-						`brew install coreutils zstd jq && export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"   # or apt-get install coreutils zstd unzip jq make`}
+						MicroVMToolsFix(missing)}
 				}
 				return Result{Pass, strings.Join(MicroVMTools, ", ") + " on PATH", ""}
 			},
@@ -288,11 +285,33 @@ func gkeAuthPluginFix(sdkRoot string) string {
 }
 
 // MicroVMTools are the host utilities the micro-VM path needs beyond the
-// always-checked ones: sha256sum, zstd and unzip for upstream's asset
-// scripts, and make and jq for the demo on older trees such as v0.1.0.
+// always-checked ones: sha256sum and zstd for upstream's asset scripts.
 // Trees from agent-substrate/substrate#2092 on stage assets in ate-setup and
 // need none of them; see the TODO on snapshot.InstallMicroVMDeps.
-var MicroVMTools = []string{"sha256sum", "zstd", "unzip", "jq", "make"}
+var MicroVMTools = []string{"sha256sum", "zstd"}
+
+// MicroVMToolsFix returns the command that installs the missing MicroVMTools.
+func MicroVMToolsFix(missing []string) string {
+	var pkgs []string
+	gnubin := false
+	for _, tool := range missing {
+		switch tool {
+		case "sha256sum":
+			pkgs, gnubin = append(pkgs, "coreutils"), true
+		default:
+			pkgs = append(pkgs, tool)
+		}
+	}
+	fix := "brew install " + strings.Join(pkgs, " ")
+	if gnubin {
+		fix += ` && export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"`
+	}
+	fix += "   # or apt-get install " + strings.Join(pkgs, " ")
+	if gnubin {
+		fix += "; then restart the installer from this shell so it sees the new PATH"
+	}
+	return fix
+}
 
 // MissingMicroVMTools returns whichever of MicroVMTools are not on PATH.
 func MissingMicroVMTools() []string {

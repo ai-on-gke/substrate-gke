@@ -327,6 +327,13 @@ func TestNestedVirtualizationEnabled(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "bare-metal pool",
+			cluster: &containerpb.Cluster{
+				NodePools: []*containerpb.NodePool{{Config: &containerpb.NodeConfig{MachineType: "c3-standard-192-metal"}}},
+			},
+			want: true,
+		},
+		{
 			name: "every pool disabled",
 			cluster: &containerpb.Cluster{
 				NodePools: []*containerpb.NodePool{

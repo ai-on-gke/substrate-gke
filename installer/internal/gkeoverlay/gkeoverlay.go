@@ -64,7 +64,7 @@ const (
 	// CoreMonitoring is the router PodMonitoring upstream ships while its
 	// tree still carries the GKE content. Its absence is the signal that
 	// the tree needs deploy/gke, in the same way the installer probes other
-	// features by file presence (see snapshot.counterMicroVMDemoDir).
+	// features by file presence (see snapshot.CounterDriverDir).
 	CoreMonitoring = installDir + "/atenet-router-monitoring.yaml"
 
 	// BaseKustomization is the kustomization `ate-setup deploy ate-system`

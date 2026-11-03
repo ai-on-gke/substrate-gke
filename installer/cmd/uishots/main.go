@@ -95,10 +95,11 @@ func main() {
 	paste(app, "v0.6.0")
 	press(app, "enter", "enter")
 	press(app, "enter", "enter", "enter") // project fields
+	press(app, "enter")                   // sandbox: gVisor (the default)
 	shot(out, "clusters", app)            // list with install-state badges
 
 	press(app, "5", "enter") // the installed fixture → blocked panel
-	resize(app, 43)
+	resize(app, 44)
 	shot(out, "guard", app)
 	resize(app, 26)
 
@@ -110,8 +111,7 @@ func main() {
 	press(app, "enter")      // the demo drivers' IDs → control plane
 	press(app, "enter")      // control plane → filestore CSI
 	press(app, "s")          // skip filestore
-	press(app, "s")          // skip autoscaling → sandbox runtime
-	press(app, "enter")      // gVisor is the default choice → demo
+	press(app, "s")          // skip autoscaling → demo
 	press(app, "1", "enter") // deploy the counter demo
 	press(app, "enter")      // → complete
 	resize(app, 36)
