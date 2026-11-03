@@ -385,7 +385,7 @@ That log is the record to keep: the wizard is an interactive terminal program, a
 > [!CAUTION]
 > Do not re-run the install track against a cluster that already runs Substrate (the wizard blocks it). Run the installer and choose **Upgrade an installed cluster** instead.
 
-From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md) moves a cluster to a later patch release or to the next minor release.
+From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/guides/upgrade.md) moves a cluster to a later patch release or to the next minor release.
 
 The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster, reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, installs the installed release's `kubectl ate`, and creates the snapshot transfer service account new releases use. It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree and sets `NEW_RELEASE` (or `VERSION` for a build from source), and follow the runbook from step 1. **Nothing on the cluster changes until you do.**
 

@@ -98,7 +98,7 @@ func InstallOrder(demo bool) []Step {
 // cluster, asks where the new version comes from with the same images step an
 // install uses, fetches the two source trees upstream's runbook runs from, and
 // sets up ~/ate-upgrade the way the runbook does. The upgrade itself is
-// upstream's docs/upgrade.md.
+// upstream's docs/guides/upgrade.md.
 var UpgradeOrder = []Step{
 	Welcome, CheckSetup, UpgradeSource, Images, UpgradePlan, Complete,
 }
