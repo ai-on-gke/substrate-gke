@@ -68,9 +68,12 @@ You need two checkouts:
    `SNAPSHOT_LOCATION` and `SNAPSHOT_TRANSFER_GSA_NAME`; the environment file
    sets both. `--credential-provider` selects the egress credential provider.
    `--ingress-allowed-spiffe-ids` lists the clients the router lets reach
-   actors, and each deploy replaces the list. The IDs above are the counter
-   demos' driver pods, which call their actors through the router. Replace
-   them with your own clients' IDs
+   actors, and each deploy replaces the list. The IDs above are for the
+   counter demos' driver pods, which
+   [agent-substrate/substrate#3178](https://github.com/agent-substrate/substrate/pull/3178)
+   adds to call their actors through the router. Until that lands the demos
+   deploy no driver pod, so listing them is harmless. Replace them with your
+   own clients' IDs
    (`spiffe://cluster.local/ns/<namespace>/sa/<service-account>`) if you skip
    the demos. See upstream's
    [operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/guides/operator-install.md)
