@@ -34,6 +34,10 @@ var (
 	restClientOptions []option.ClientOption
 )
 
+// grantAttempts bounds the IAM grant loops that wait for a freshly created
+// service account to propagate.
+const grantAttempts = 6
+
 type Config struct {
 	ProjectID     string
 	ProjectNumber string

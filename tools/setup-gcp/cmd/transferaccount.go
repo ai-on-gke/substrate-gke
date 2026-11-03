@@ -86,10 +86,11 @@ func setupTransferServiceAccount(ctx context.Context, cfg *Config, members ...st
 		if err == nil {
 			return nil
 		}
-		if attempt >= 6 {
+		if attempt >= grantAttempts {
 			return err
 		}
-		slog.Warn("Granting token creator failed, retrying...", slog.String("gsa", email), slog.Int("attempt", attempt), slog.Any("err", err))
+		slog.Info("Token creator grant is not accepted yet (a new service account takes a moment to propagate), retrying",
+			slog.String("gsa", email), slog.String("attempt", attemptOf(attempt, grantAttempts)), slog.Any("err", err))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

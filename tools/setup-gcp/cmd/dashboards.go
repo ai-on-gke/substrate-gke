@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	dashboard "cloud.google.com/go/monitoring/dashboard/apiv1"
 	"cloud.google.com/go/monitoring/dashboard/apiv1/dashboardpb"
@@ -44,6 +45,57 @@ var dashboardFiles = []string{
 // Cloud Monitoring rejects its etag as out of date.
 const dashboardUpdateAttempts = 3
 
+// dashboardCallAttempts bounds how often one Monitoring call is retried after
+// a transient failure (ai-on-gke/substrate-gke#115). The client gives each
+// call a 30 s deadline and retries nothing but Unavailable on reads, so one
+// slow call surfaced as DeadlineExceeded and failed the last step of a
+// bootstrap whose other eight had succeeded.
+const dashboardCallAttempts = 4
+
+// dashboardRetryDelay is the wait before the second attempt at a Monitoring
+// call; it doubles on each further attempt. A var only so tests can shorten
+// it.
+var dashboardRetryDelay = 2 * time.Second
+
+// isTransientDashboardError reports whether repeating the same call may
+// succeed: its deadline passed, or the service was unavailable or answered
+// Unknown, the codes the generated client itself retries on reads. Aborted is
+// not transient here; updateDashboard handles it by rereading the etag.
+func isTransientDashboardError(err error) bool {
+	s, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch s.Code() {
+	case codes.DeadlineExceeded, codes.Unavailable, codes.Unknown:
+		return true
+	}
+	return false
+}
+
+// retryDashboardCall runs call until it succeeds, fails with an error a retry
+// would not fix, or dashboardCallAttempts are used up. Each attempt is its own
+// client call, so each gets the client's per-call deadline. action names the
+// call in the log.
+func retryDashboardCall[T any](ctx context.Context, action string, call func() (T, error)) (T, error) {
+	delay := dashboardRetryDelay
+	for attempt := 1; ; attempt++ {
+		v, err := call()
+		if err == nil || !isTransientDashboardError(err) || attempt >= dashboardCallAttempts || ctx.Err() != nil {
+			return v, err
+		}
+		slog.Warn(action+" did not complete, retrying",
+			slog.String("attempt", fmt.Sprintf("%d/%d", attempt, dashboardCallAttempts)),
+			slog.Any("err", err))
+		select {
+		case <-ctx.Done():
+			return v, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+}
+
 // createMonitoringDashboards creates or updates each dashboard in
 // dashboardFiles. It is idempotent: dashboards are matched by displayName and
 // updated in place, because CreateDashboard always creates a new dashboard (so
@@ -60,17 +112,22 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 	parent := "projects/" + cfg.ProjectID
 
 	// Index existing dashboards by displayName to decide create vs update.
-	existing := map[string][]*dashboardpb.Dashboard{}
-	it := client.ListDashboards(ctx, &dashboardpb.ListDashboardsRequest{Parent: parent})
-	for {
-		d, err := it.Next()
-		if err == iterator.Done {
-			break
+	existing, err := retryDashboardCall(ctx, "Listing dashboards", func() (map[string][]*dashboardpb.Dashboard, error) {
+		existing := map[string][]*dashboardpb.Dashboard{}
+		it := client.ListDashboards(ctx, &dashboardpb.ListDashboardsRequest{Parent: parent})
+		for {
+			d, err := it.Next()
+			if err == iterator.Done {
+				return existing, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			existing[d.GetDisplayName()] = append(existing[d.GetDisplayName()], d)
 		}
-		if err != nil {
-			return fmt.Errorf("list dashboards: %w", err)
-		}
-		existing[d.GetDisplayName()] = append(existing[d.GetDisplayName()], d)
+	})
+	if err != nil {
+		return fmt.Errorf("list dashboards: %w", err)
 	}
 
 	// An empty DashboardDir means the definitions embedded in the binary.
@@ -111,7 +168,13 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 			slog.Info("Creating dashboard",
 				slog.String("displayName", d.GetDisplayName()),
 				slog.String("file", filepath.Base(path)))
-			if _, err := client.CreateDashboard(ctx, &dashboardpb.CreateDashboardRequest{Parent: parent, Dashboard: d}); err != nil {
+			// A create whose deadline passed may still have landed, in
+			// which case the retry leaves a duplicate; the next run
+			// updates both (see above), which beats failing bootstrap.
+			_, err := retryDashboardCall(ctx, "Creating dashboard "+d.GetDisplayName(), func() (*dashboardpb.Dashboard, error) {
+				return client.CreateDashboard(ctx, &dashboardpb.CreateDashboardRequest{Parent: parent, Dashboard: d})
+			})
+			if err != nil {
 				return fmt.Errorf("create dashboard %q: %w", d.GetDisplayName(), err)
 			}
 		}
@@ -124,18 +187,23 @@ func createMonitoringDashboards(ctx context.Context, cfg *Config) error {
 // (ai-on-gke/substrate-gke#69), so it reads the current etag with
 // GetDashboard first, and reads it again and retries when the update still
 // fails with Aborted because something changed the dashboard in between.
+// Each call is retried on transient failures by retryDashboardCall.
 func updateDashboard(ctx context.Context, client *dashboard.DashboardsClient, name string, def *dashboardpb.Dashboard) error {
 	var err error
 	for range dashboardUpdateAttempts {
 		var cur *dashboardpb.Dashboard
-		cur, err = client.GetDashboard(ctx, &dashboardpb.GetDashboardRequest{Name: name})
+		cur, err = retryDashboardCall(ctx, "Reading dashboard "+name, func() (*dashboardpb.Dashboard, error) {
+			return client.GetDashboard(ctx, &dashboardpb.GetDashboardRequest{Name: name})
+		})
 		if err != nil {
 			return fmt.Errorf("get current etag: %w", err)
 		}
 		d := proto.Clone(def).(*dashboardpb.Dashboard)
 		d.Name = cur.GetName()
 		d.Etag = cur.GetEtag()
-		_, err = client.UpdateDashboard(ctx, &dashboardpb.UpdateDashboardRequest{Dashboard: d})
+		_, err = retryDashboardCall(ctx, "Updating dashboard "+name, func() (*dashboardpb.Dashboard, error) {
+			return client.UpdateDashboard(ctx, &dashboardpb.UpdateDashboardRequest{Dashboard: d})
+		})
 		if status.Code(err) != codes.Aborted {
 			return err
 		}
