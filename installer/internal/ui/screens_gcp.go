@@ -1275,7 +1275,9 @@ func (s *clusterScreen) Hints() []Hint {
 	case "confirm":
 		return []Hint{{"esc", "choose another"}}
 	}
-	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
+	// Last, so a squeezed bar drops it first: at 80 columns the list's
+	// "more" marker names the key too.
+	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}, {"G", "new cluster"}}
 }
 
 // aboutOne reports whether the screen is showing a panel about the cluster
@@ -1597,6 +1599,12 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			if s.cursor < len(s.clusters) {
 				s.cursor++
 			}
+		case "G", "end":
+			// The create row is the last, and in a busy project it is
+			// past the digit keys and, at 80×24, past the window.
+			s.cursor = len(s.clusters)
+		case "g", "home":
+			s.cursor = 0
 		case "r":
 			return s.Init()
 		case "b", "esc", "left":
@@ -1738,7 +1746,16 @@ func truncateTo(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func (s *clusterScreen) View(w int) string {
+func (s *clusterScreen) View(w int) string { return s.ViewSized(w, 0) }
+
+// ViewSized renders the screen to fit h rows, or without a limit when h is
+// 0. The list is the part that gives: it shows the window of rows that
+// holds the cursor (see listWindow), so the selection and the create row
+// can always be seen, and a panel below the list — the name prompt — keeps
+// its rows. Before this, a project with 25 clusters at 80×24 showed rows 1
+// to 15, the cursor went below them with nothing to say the list went on,
+// and the create row could never be seen.
+func (s *clusterScreen) ViewSized(w, h int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
 	if s.aboutOne() {
@@ -1791,29 +1808,71 @@ func (s *clusterScreen) View(w int) string {
 		}
 		badges[i], shorts[i] = badge, short
 	}
-	for i, row := range clusterRows(s.clusters, badges, shorts, w-2) {
+	rows := clusterRows(s.clusters, badges, shorts, w-2)
+	rows = append(rows, fmt.Sprintf("[%d] ＋ Create a new cluster (recommended)", len(s.clusters)+1))
+	for i, row := range rows {
+		if i == s.cursor {
+			rows[i] = theme.Selected.Render(" " + row + " ")
+		} else {
+			rows[i] = theme.Subtle.Render("  " + row)
+		}
+	}
+	cursor := s.cursor
+	if s.aboutOne() {
 		// A panel about one cluster needs every row the terminal has: at
 		// 80×24 the full list leaves it a handful, and the remedy — or the
 		// guard's cleanup command — was being clamped away. While one is
 		// open the list shrinks to the row it is about.
-		if s.aboutOne() && i != s.cursor {
-			continue
-		}
-		if i == s.cursor {
-			b.WriteString(theme.Selected.Render(" "+row+" ") + "\n")
-		} else {
-			b.WriteString(theme.Subtle.Render("  "+row) + "\n")
-		}
+		rows, cursor = rows[cursor:cursor+1], 0
 	}
-	createRow := fmt.Sprintf("[%d] ＋ Create a new cluster (recommended)", len(s.clusters)+1)
-	switch {
-	case s.aboutOne():
-	case s.cursor == len(s.clusters):
-		b.WriteString(theme.Selected.Render(" "+createRow+" ") + "\n")
-	default:
-		b.WriteString(theme.Subtle.Render("  "+createRow) + "\n")
+	// What goes under the list is rendered first: its rows come out of the
+	// list's budget, not the clamp, so the name prompt stays on screen.
+	tail := s.panelView(w)
+	avail := 0
+	if h > 0 {
+		avail = h - strings.Count(b.String(), "\n") - lipgloss.Height(tail)
 	}
+	top, size := listWindow(len(rows), cursor, avail)
+	if top > 0 {
+		b.WriteString(theme.Fainted.Render(fmt.Sprintf("  ↑ %d more", top)) + "\n")
+	}
+	for _, row := range rows[top : top+size] {
+		b.WriteString(row + "\n")
+	}
+	if below := len(rows) - top - size; below > 0 {
+		b.WriteString(theme.Fainted.Render(fmt.Sprintf("  ↓ %d more · [G] create a new cluster", below)) + "\n")
+	}
+	b.WriteString(tail)
+	return b.String()
+}
 
+// listWindow picks the rows of a list of total rows to show in avail lines
+// so that the cursor's row is one of them: the first row shown and how many.
+// When they all fit that is the whole list; avail of 0 or less is no limit.
+// Otherwise a line on each side that hides rows goes to a marker saying how
+// many, and the window is centred on the cursor, so the list scrolls a row
+// at a time once the cursor passes the middle.
+func listWindow(total, cursor, avail int) (top, size int) {
+	if avail <= 0 || total <= avail {
+		return 0, total
+	}
+	size = max(avail-2, 1)
+	top = min(max(cursor-size/2, 0), total-size)
+	// Only one side hides rows: its marker's line goes back to the list.
+	if top == 0 {
+		size = max(avail-1, 1)
+	} else if top+size == total {
+		size = max(avail-1, 1)
+		top = total - size
+	}
+	return top, size
+}
+
+// panelView is what the list's mode puts under it: the name prompt, the
+// probe's output, the guards and the rejection, or in list mode the note on
+// the version floor.
+func (s *clusterScreen) panelView(w int) string {
+	var b strings.Builder
 	switch s.mode {
 	case "name":
 		b.WriteString("\n" + theme.AccentPanel.Width(min(w-4, 60)).Render(
