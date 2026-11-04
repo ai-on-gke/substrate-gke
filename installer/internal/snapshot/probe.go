@@ -16,6 +16,8 @@ package snapshot
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -88,14 +90,81 @@ const (
 // a later probe against a different cluster. The file lives in its own
 // directory, which is removed whole: gcloud warns about an empty kubeconfig
 // and leaves a .backup of it next to the file.
+//
+// The install steps use kubeconfigLines instead: a probe only reads, so its
+// file can go when it exits, while a deploy's KUBECONFIG ends up in
+// ate-setup's record and has to outlive the step.
 func credentialLines(projectID, cluster, location string) []string {
 	return []string{
 		`kubeconfig_dir=$(mktemp -d)`,
 		`trap 'rm -rf "$kubeconfig_dir"' EXIT`,
 		`export KUBECONFIG="$kubeconfig_dir/config"`,
-		fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s >/dev/null",
-			ShellQuote(cluster), ShellQuote(location), ShellQuote(projectID)),
+		getCredentials(projectID, cluster, location),
 	}
+}
+
+// getCredentials is the gcloud command that writes the named cluster's
+// credentials into the kubeconfig $KUBECONFIG names, creating the file and
+// its directory if they are missing.
+func getCredentials(projectID, cluster, location string) string {
+	return fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s >/dev/null",
+		ShellQuote(cluster), ShellQuote(location), ShellQuote(projectID))
+}
+
+// KubeconfigPath is the installer's own kubeconfig for the named cluster.
+// Every step that reaches the cluster — kubectl, gcloud, ate-setup and the
+// scripts ate-setup runs — is pointed at it through KUBECONFIG, so the
+// user's ~/.kube/config is never written and their current context never
+// moves. Left to the ambient kubeconfig, ate-setup's own get-credentials
+// added the cluster there and made it current, and the verify and Filestore
+// steps then only worked by running against that switched context.
+//
+// Unlike the probes' throwaway file it is one per cluster and it stays:
+// ate-setup records the KUBECONFIG it ran with in the install record, which
+// the upgrade runbook's `--config <record>` runs read back, so the path has
+// to still resolve then. It lives beside the install cache, which Cleanup
+// sweeps only for fetched trees. The name is the context gcloud writes into
+// it, the same one that names ate-setup's record.
+func KubeconfigPath(projectID, cluster, location string) string {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = os.TempDir()
+	}
+	return filepath.Join(cache, "substrate-gke", "kubeconfig", kubeContext(projectID, cluster, location)+".yaml")
+}
+
+// kubeContext is the context name gcloud's get-credentials writes for a GKE
+// cluster, and so the name of ate-setup's record of it.
+func kubeContext(projectID, cluster, location string) string {
+	return "gke_" + projectID + "_" + location + "_" + cluster
+}
+
+// kubeconfigLines points a step's script at KubeconfigPath and fetches the
+// cluster's credentials into it. ate-setup takes a single-file KUBECONFIG
+// for its own client and exports it to the gcloud and scripts it runs, so
+// the get-credentials it does itself refreshes this file rather than the
+// user's. The export reaches every child of the step, including the checks
+// cordonLines and placementLines run in shells of their own.
+func kubeconfigLines(projectID, cluster, location string) []string {
+	return []string{
+		"export KUBECONFIG=" + ShellQuote(KubeconfigPath(projectID, cluster, location)),
+		getCredentials(projectID, cluster, location),
+	}
+}
+
+// KubeconfigExport is the line that points a shell at the installer's
+// kubeconfig for the cluster, for the kubectl commands the completion screen
+// and the exit summary hand over.
+func KubeconfigExport(st *state.Setup) string {
+	return "export KUBECONFIG=" + ShellQuote(KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone))
+}
+
+// GetCredentialsCommand is the gcloud command that adds the cluster to the
+// user's own kubeconfig instead, which also makes it their current context:
+// the exit summary offers it as the alternative to KubeconfigExport.
+func GetCredentialsCommand(st *state.Setup) string {
+	return fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s",
+		ShellQuote(st.ClusterName), ShellQuote(st.Zone), ShellQuote(st.ProjectID))
 }
 
 // CheckInstalled returns the command that probes whether the named cluster

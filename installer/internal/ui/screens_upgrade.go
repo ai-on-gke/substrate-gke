@@ -22,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
@@ -509,16 +510,41 @@ func (s *upgradePlanScreen) View(w int) string {
 }
 
 // handOver renders the upgrade hand-over: the runbook as the next step, and
-// the line to run in a panel of its own, at full width because a wrapped
-// line is copied short, with the notes under it.
+// the line to run in a panel of its own, at full width, with the notes under
+// it. A line the panel cannot hold whole is broken at its && joins (see
+// handOverLines) rather than wrapped by the renderer, which breaks inside a
+// word and copies short.
 func handOver(deps *Deps, w int) string {
 	st, builder := deps.Setup, deps.Builder
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Next: run this in the shell you upgrade from, then follow the upgrade runbook from step 1") + "\n")
 	b.WriteString(theme.Accent.Render("  "+builder.RunbookURL()) + "\n\n")
-	b.WriteString(theme.AccentPanel.Width(w-4).Render(builder.UpgradeShellLine(st)) + "\n")
+	inner := w - 4 - theme.AccentPanel.GetHorizontalFrameSize()
+	b.WriteString(theme.AccentPanel.Width(w-4).Render(handOverLines(builder.UpgradeShellLine(st), inner)) + "\n")
 	for _, note := range builder.UpgradeNotes(st) {
 		b.WriteString("\n" + theme.Warning.Width(w-4).Render(note) + "\n")
 	}
 	return b.String()
+}
+
+// handOverLines breaks a hand-over line wider than width at its " && "
+// joins, every line but the last ending in the && that continues it, so the
+// lines paste as the one command and no line ends inside a word. A line
+// that fits is returned as it is; the exit summary prints it whole either
+// way.
+func handOverLines(line string, width int) string {
+	var lines []string
+	cur := ""
+	for _, part := range strings.Split(line, " && ") {
+		switch {
+		case cur == "":
+			cur = part
+		case lipgloss.Width(cur+" && "+part+" &&") <= width:
+			cur += " && " + part
+		default:
+			lines = append(lines, cur+" &&")
+			cur = "  " + part
+		}
+	}
+	return strings.Join(append(lines, cur), "\n")
 }

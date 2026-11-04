@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -371,6 +372,73 @@ func TestTeardownReportsAClusterInAnotherLocation(t *testing.T) {
 	}
 	if !strings.Contains(run.output, "us-central1-a") {
 		t.Errorf("teardown output does not name the location the cluster is in:\n%s", run.output)
+	}
+}
+
+// installerKubeconfig writes the kubeconfig the substrate-gke installer keeps
+// for teardownEnv's cluster under HOME's cache dir, where Go's
+// os.UserCacheDir puts it, and returns its path.
+func installerKubeconfig(t *testing.T, home string) string {
+	t.Helper()
+	cache := filepath.Join(home, ".cache")
+	if runtime.GOOS == "darwin" {
+		cache = filepath.Join(home, "Library", "Caches")
+	}
+	path := filepath.Join(cache, "substrate-gke", "kubeconfig", "gke_acme_us-west1-c_substrate-test.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("apiVersion: v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Deleting the cluster also removes the kubeconfig the installer kept for it,
+// so a destroyed cluster leaves no credential file on the host: after a
+// delete that succeeded, after one that found the cluster already gone, and
+// under --cluster-scoped as under --all. A delete that failed keeps it: the
+// cluster is still there, and so should the way to reach it be.
+func TestTeardownRemovesTheInstallersKubeconfigWithTheCluster(t *testing.T) {
+	denied := []rule{{"container clusters delete", "1", "",
+		"ERROR: (gcloud.container.clusters.delete) ResponseError: code=403, message=Required \"container.clusters.delete\" permission(s) for \"projects/acme/zones/us-west1-c/clusters/substrate-test\"."}}
+	for _, tc := range []struct {
+		name    string
+		rules   []rule
+		args    []string
+		removed bool
+	}{
+		{"deleted", nil, []string{"--delete-cluster"}, true},
+		{"cluster-scoped", nil, []string{"--cluster-scoped"}, true},
+		{"already gone", notFoundRules, []string{"--delete-cluster"}, true},
+		{"denied", denied, []string{"--delete-cluster"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := installerKubeconfig(t, home)
+			env := map[string]string{"HOME": home}
+			for k, v := range teardownEnv {
+				env[k] = v
+			}
+			run := runTeardown(t, "", env, tc.rules, tc.args...)
+			if (run.exitCode == 0) != tc.removed {
+				t.Errorf("teardown %v exited %d:\n%s", tc.args, run.exitCode, run.output)
+			}
+			_, err := os.Stat(path)
+			switch {
+			case tc.removed && err == nil:
+				t.Errorf("teardown %v left the installer's kubeconfig behind:\n%s", tc.args, run.output)
+			case tc.removed && !strings.Contains(run.output, "Removed the installer's kubeconfig for the cluster: "+path):
+				t.Errorf("teardown %v did not say it removed the kubeconfig:\n%s", tc.args, run.output)
+			case !tc.removed && err != nil:
+				t.Errorf("teardown %v removed the installer's kubeconfig after a failed delete (%v):\n%s", tc.args, err, run.output)
+			}
+		})
+	}
+	// Without the file there is nothing to remove and nothing to say.
+	run := runTeardown(t, "", teardownEnv, nil, "--delete-cluster")
+	if run.exitCode != 0 || strings.Contains(run.output, "kubeconfig") {
+		t.Errorf("teardown without a kubeconfig to remove exited %d:\n%s", run.exitCode, run.output)
 	}
 }
 

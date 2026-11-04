@@ -289,14 +289,16 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 // does not exist.
 func TestSummaryRecapsTheDemoNextSteps(t *testing.T) {
 	builder := snapshot.NewBuilder(t.TempDir(), true)
-	portForward, demo := builder.NextSteps(nil)
-
 	st := state.NewSetup()
 	st.DemoDeployed = true
+	// The lead points a shell at the cluster, which the summary prints for
+	// every install; the demo steps follow it.
+	lead, demo := builder.NextSteps(st)
+
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: builder}, true)
 	})
-	for _, want := range append([]string{portForward}, demo...) {
+	for _, want := range append([]string{lead}, demo...) {
 		if !strings.Contains(out, want) {
 			t.Errorf("demo summary is missing next step %q:\n%s", want, out)
 		}
@@ -465,7 +467,7 @@ func TestSummaryForAnUpgrade(t *testing.T) {
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, deps, false)
 	})
-	for _, want := range []string{"Upgrade prepared", "github.com/agent-substrate/substrate/blob/" + snapshot.Commit + "/docs/guides/upgrade.md", "cd ~/ate-upgrade/new && export VERSION=", "export VERSION=substrate-0123456789ab there"} {
+	for _, want := range []string{"Upgrade prepared", "github.com/agent-substrate/substrate/blob/" + snapshot.Commit + "/docs/guides/upgrade.md", "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig && export VERSION=", "export VERSION=substrate-0123456789ab there"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("upgrade summary is missing %q:\n%s", want, out)
 		}

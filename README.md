@@ -19,6 +19,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 - [Where the images come from](#where-the-images-come-from)
 - [How Substrate itself is obtained](#how-substrate-itself-is-obtained)
 - [Logs](#logs)
+- [Your kubeconfig](#your-kubeconfig)
 - [Upgrading an installed cluster](#upgrading-an-installed-cluster)
 - [Tearing down](#tearing-down)
 - [Development](#development)
@@ -218,9 +219,9 @@ re-staged from the new tree:
   record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster) for where
   it is). Without `--config`, the run replaces that record with one that lacks the
   control plane's settings.
-- Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. Target the cluster's kube
-  context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
-  hack/install-microvm-deps.sh --install`.
+- Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. With `KUBECONFIG` pointed
+  at the cluster (see [Your kubeconfig](#your-kubeconfig)), run `NO_DEV_ENV=1 ARCH=amd64
+  BUCKET_NAME=<bucket> hack/install-microvm-deps.sh --install`.
 
 Both upload with `gcloud storage cp`. Run them with
 `CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False` in the environment, as the
@@ -380,6 +381,12 @@ Every command's full output is written to a timestamped log under `<user cache d
 
 That log is the record to keep: the wizard is an interactive terminal program, and started with its input or output piped or redirected (`go run . | tee log`, a CI step) it exits with a message instead of running. Driving it without a terminal is [#107](https://github.com/ai-on-gke/substrate-gke/issues/107).
 
+## Your kubeconfig
+
+The installer never writes `~/.kube/config` or changes your current context. Everything that reaches the cluster — the cluster probes, `ate-setup`, the Filestore step, and the completion screen's `[y]` verify — runs with `KUBECONFIG` pointed at a kubeconfig of the installer's own, `<user cache dir>/substrate-gke/kubeconfig/gke_<project>_<location>_<cluster>.yaml`, and the `ate-setup delete ate-system` command in the exit summary uses the same file. ate-setup records that path in its install record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster)), so leave the file where it is for as long as the cluster runs. Teardown removes it: the `ate-setup delete ate-system` commands (the wizard's `[t]` and the pasted one) after a delete that succeeds, and `tools/cleanup-gcp` (with or without `--cluster-scoped`) once the cluster is gone, so a destroyed cluster leaves no credential file behind.
+
+To work with the cluster from a shell, run the `export KUBECONFIG=...` line the completion screen and the exit summary print, or add the cluster to your own kubeconfig with `gcloud container clusters get-credentials <cluster> --location <location> --project <project>`, which also makes it your current context.
+
 ## Upgrading an installed cluster
 
 > [!CAUTION]
@@ -387,7 +394,7 @@ That log is the record to keep: the wizard is an interactive terminal program, a
 
 From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/guides/upgrade.md) moves a cluster to a later patch release or to the next minor release.
 
-The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster — picked from the installs this machine recorded, newest first, or typed in — reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, installs the installed release's `kubectl ate`, and runs `setup-gcp create iam`, which creates the snapshot transfer service account new releases use and re-applies the node service account and bucket grants (it only adds bindings). It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree and sets `NEW_RELEASE` (or `VERSION` for a build from source), and follow the runbook from step 1. **Nothing on the cluster changes until you do.**
+The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster — picked from the installs this machine recorded, newest first, or typed in — reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, fetches the cluster's credentials into `~/ate-upgrade/kubeconfig`, installs the installed release's `kubectl ate`, and runs `setup-gcp create iam`, which creates the snapshot transfer service account new releases use and re-applies the node service account and bucket grants (it only adds bindings). It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree, points its `kubectl` and `ate-setup` at that kubeconfig (in place of the runbook's `kubectl config use-context`, so your own current context stays put), and sets `NEW_RELEASE` (or `VERSION` for a build from source); then follow the runbook from step 1. **Nothing on the cluster changes until you do.**
 
 ate-setup writes that record on every deploy, under `ATE_RECORD_DIR` or by default at `<user cache dir>/ate-setup/installs/gke_<project>_<location>_<cluster>.yaml`. On a machine without it, write one from the settings the cluster was installed with ([operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/operator-install.md) lists them).
 
