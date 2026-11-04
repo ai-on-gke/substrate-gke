@@ -508,6 +508,7 @@ func TestTeardownClusterScopedKeepsProjectWideResources(t *testing.T) {
 		"iam service-accounts delete",
 		"projects remove-iam-policy-binding",
 		"artifacts repositories delete",
+		"substrate-filestore-csi",
 	} {
 		if strings.Contains(run.calls, unwanted) {
 			t.Errorf("--cluster-scoped ran a project-wide step (%q); calls:\n%s", unwanted, run.calls)
@@ -588,5 +589,77 @@ func TestTeardownAllDeletesNodeServiceAccountAfterCluster(t *testing.T) {
 	run = runTeardown(t, "", vars, nil, "--delete-node-service-account")
 	if run.exitCode != 0 || !strings.Contains(run.calls, "iam service-accounts delete custom-node@acme.iam.gserviceaccount.com") {
 		t.Errorf("--delete-node-service-account ignored NODE_GSA_NAME (exit %d); calls:\n%s", run.exitCode, run.calls)
+	}
+}
+
+// The Filestore step's deploy.sh (kubernetes-sigs/gcp-filestore-csi-driver)
+// creates substrate-filestore-csi@<project> and grants it roles/file.editor
+// on the project, which nothing in setup-gcp creates and teardown left
+// behind (#143). --all revokes the role, then deletes the account, after the
+// cluster whose driver runs as it; the revoke passes --format=none like the
+// others. An account that was never created, or a role that was never
+// granted (a Filestore run that failed before deploy.sh, or was skipped),
+// counts as deleted; an account that exists but whose delete was denied
+// fails the step and says so.
+func TestTeardownDeletesTheFilestoreServiceAccount(t *testing.T) {
+	const (
+		revoke = "projects remove-iam-policy-binding acme --member=serviceAccount:substrate-filestore-csi@acme.iam.gserviceaccount.com --role=roles/file.editor --condition=None --quiet --format=none"
+		remove = "iam service-accounts delete substrate-filestore-csi@acme.iam.gserviceaccount.com --project=acme --quiet"
+	)
+	run := runTeardown(t, "", teardownEnv, nil, "--all")
+	if run.exitCode != 0 {
+		t.Fatalf("teardown --all exited %d, want 0:\n%s", run.exitCode, run.output)
+	}
+	cluster := strings.Index(run.calls, "container clusters delete substrate-test")
+	role := strings.Index(run.calls, revoke)
+	account := strings.Index(run.calls, remove)
+	if cluster < 0 || role < 0 || account < 0 {
+		t.Fatalf("--all skipped the cluster or the Filestore service account; calls:\n%s", run.calls)
+	}
+	if !(cluster < role && role < account) {
+		t.Errorf("--all must delete the cluster, then revoke the Filestore role, then delete the account; calls:\n%s", run.calls)
+	}
+
+	tests := []struct {
+		name       string
+		rules      []rule
+		wantExit   bool
+		wantOutput string
+	}{
+		{"deleted", nil, false, "Deleting the Filestore CSI service account..."},
+		{"already gone", []rule{
+			{"projects remove-iam-policy-binding", "1", "", bindingNotPresent},
+			{"iam service-accounts delete", "1", "", serviceAccountDenied},
+			{"iam service-accounts list", "0", "", ""},
+		}, false, "(already deleted)"},
+		{"role already revoked", []rule{
+			{"projects remove-iam-policy-binding", "1", "", bindingNotPresent},
+		}, false, "(already deleted)"},
+		{"denied but exists", []rule{
+			{"iam service-accounts delete", "1", "", serviceAccountDenied},
+			{"iam service-accounts list", "0", "substrate-filestore-csi@acme.iam.gserviceaccount.com", ""},
+		}, true, "exists; deleting it was denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := runTeardown(t, "", teardownEnv, tt.rules, "--delete-filestore-service-account")
+			if failed := run.exitCode != 0; failed != tt.wantExit {
+				t.Errorf("teardown exit code %d, want failure = %v:\n%s", run.exitCode, tt.wantExit, run.output)
+			}
+			if !strings.Contains(run.output, tt.wantOutput) {
+				t.Errorf("teardown output lacks %q:\n%s", tt.wantOutput, run.output)
+			}
+			for _, want := range []string{revoke, remove} {
+				if !strings.Contains(run.calls, want) {
+					t.Errorf("teardown did not run %q; calls:\n%s", want, run.calls)
+				}
+			}
+			if tt.wantExit != strings.Contains(run.output, "FAILED: delete Filestore CSI service account") {
+				t.Errorf("teardown named the step as failed = %v, want %v:\n%s", !tt.wantExit, tt.wantExit, run.output)
+			}
+			if strings.Contains(run.calls, "ate-gke-node") || strings.Contains(run.calls, "ate-snapshot-transfer") {
+				t.Errorf("--delete-filestore-service-account touched another account; calls:\n%s", run.calls)
+			}
+		})
 	}
 }

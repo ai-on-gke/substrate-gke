@@ -121,7 +121,8 @@ func TestProgressNeverMovesBackward(t *testing.T) {
 }
 
 // The rows follow the script's order (snapshot.DeployFilestoreCSI): fetch and
-// the API check before anything changes, then the addon, IAM, and the apply.
+// the API check before anything changes, then the addon, IAM, the apply, and
+// the installer's own check of the roles/file.editor grant.
 func TestFilestoreCSIChecklistTracksDeployOutput(t *testing.T) {
 	items := FilestoreCSI()
 	lines := []string{
@@ -133,8 +134,11 @@ func TestFilestoreCSIChecklistTracksDeployOutput(t *testing.T) {
 		"  🚀 GKE Substrate Filestore CSI Driver Overlay Deployment",
 		"🔐 Configuring Service Account & IAM Bindings...",
 		"📦 Applying Substrate Filestore CSI Driver Overlay via Kustomize...",
+		"✅ Deployment complete!",
+		snapshot.FilestoreGrantCheckLine + " (substrate-filestore-csi@acme.iam.gserviceaccount.com)...",
+		"roles/file.editor is granted to substrate-filestore-csi@acme.iam.gserviceaccount.com.",
 	}
-	for i, want := range []int{0, 1, 1, 2, 2, 2, 3, 4} {
+	for i, want := range []int{0, 1, 1, 2, 2, 2, 3, 4, 4, 5, 5} {
 		if got := feed(items, lines[:i+1]); got != want {
 			t.Fatalf("after %d lines active = %d, want %d", i+1, got, want)
 		}

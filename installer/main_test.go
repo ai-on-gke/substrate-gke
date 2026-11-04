@@ -445,11 +445,16 @@ func TestSummaryReportsAFailedFilestoreStep(t *testing.T) {
 	if !strings.Contains(out, "filestore  CSI driver install failed") || !strings.Contains(out, "gcp-filestore-csi-driver") {
 		t.Errorf("summary does not report the failed Filestore step:\n%s", out)
 	}
+	// The teardown lead names the account deploy.sh created, which the
+	// failed run may have left behind with its project role (#143).
+	if !strings.Contains(out, "snapshot transfer and Filestore CSI service accounts") {
+		t.Errorf("teardown lead does not name the Filestore CSI service account after a failed run:\n%s", out)
+	}
 
 	out = captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: state.NewSetup(), Builder: builder}, true)
 	})
-	if strings.Contains(out, "filestore  CSI driver") {
+	if strings.Contains(out, "filestore  CSI driver") || strings.Contains(out, "Filestore CSI service account") {
 		t.Errorf("summary has a Filestore line for an install that skipped the step:\n%s", out)
 	}
 }
