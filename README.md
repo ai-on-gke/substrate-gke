@@ -78,7 +78,7 @@ A terminal wizard walks the steps below, running the real command it shows and s
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, the node service account, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
 | 7 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router gets the client allowlist from step 6. Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
-| 8 | 💾 Install Filestore CSI *(optional)* | Deploys the GCP Filestore CSI Driver from upstream's Substrate overlay. Before changing anything it checks that the cluster serves the API version the overlay's CSIDriverConfig uses, and fails there otherwise — the overlay still targets `ate.dev/v1alpha1`, which Substrate v1.0.0-rc.1 no longer serves ([kubernetes-sigs/gcp-filestore-csi-driver#1416](https://github.com/kubernetes-sigs/gcp-filestore-csi-driver/issues/1416)), so on this pin the step stops before touching IAM: skip it. If an existing cluster has GKE's managed Filestore driver on, installing turns it off first; skipping keeps it |
+| 8 | 💾 Install Filestore CSI *(optional)* | Deploys the GCP Filestore CSI Driver from upstream's Substrate overlay. Before changing anything it checks that the cluster serves the API version the overlay's CSIDriverConfig uses, and fails there otherwise — the overlay still targets `ate.dev/v1alpha1`, which Substrate has not served since before v1.0.0-rc.1 ([kubernetes-sigs/gcp-filestore-csi-driver#1416](https://github.com/kubernetes-sigs/gcp-filestore-csi-driver/issues/1416)), so on this pin the step stops before touching IAM: skip it. If an existing cluster has GKE's managed Filestore driver on, installing turns it off first; skipping keeps it |
 | 9 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 10 | 📦 Choose sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
 | 11 | 🎬 Deploy a demo workload *(`make run-demo` only)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
@@ -134,17 +134,17 @@ whether the cluster you selected has a KVM-capable node pool, and on choosing Mi
 stages those five assets and applies a cluster-wide `SandboxConfig` named `microvm` that
 points at them. How it stages them depends on the Substrate tree:
 
-- **Up to v1.0.0-rc.1** (the current pin): upstream's `hack/install-microvm-deps.sh
-  --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
-  snapshot bucket up to Substrate v0.5.0, in `<bucket>-assets` after).
+- **Up to v1.0.0-rc.1**: upstream's `hack/install-microvm-deps.sh --install` assembles
+  the assets for amd64 and uploads them under `kata-assets/` (in the snapshot bucket up
+  to Substrate v0.5.0, in `<bucket>-assets` after).
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
-  on** (upstream `main` and `release-1.0`, so from v1.0.0-rc.2): `ate-setup deploy
-  sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets
-  for both amd64 and arm64 and uploads them to `<bucket>-assets` under
-  `microvm-assets/<arch>/<sha256>`. It passes the control-plane step's settings and image
-  flags too, because every ate-setup deploy replaces the install record that `--upgrade`
-  reads. The control-plane step passes `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a
-  gVisor-only install stages nothing.
+  on** (v1.0.0-rc.2, the current pin, and upstream `main` and `release-1.0`):
+  `ate-setup deploy sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm`
+  downloads the assets for both amd64 and arm64 and uploads them with `gcloud` to
+  `<bucket>-assets` under `microvm-assets/<arch>/<sha256>`. It passes the control-plane
+  step's settings and image flags too, because every ate-setup deploy replaces the
+  install record that `--upgrade` reads. The control-plane step passes
+  `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a gVisor-only install stages nothing.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
 
@@ -307,13 +307,13 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** | **Build from source** |
 |---|---|---|
 | **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
-| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v1.0.0-rc.1`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1) tag | The pin, upstream's [`v1.0.0-rc.1`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1) tag |
+| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v1.0.0-rc.2`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.2) tag | The pin, upstream's [`v1.0.0-rc.2`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.2) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
 
 > [!NOTE]
 > Upstream publishes the pin's images to `ghcr.io/agent-substrate/substrate`
-> at tag `v1.0.0-rc.1`; give those as the registry and tag to install the pin
+> at tag `v1.0.0-rc.2`; give those as the registry and tag to install the pin
 > pre-built. The images step doesn't offer them by default yet. Releases don't
 > publish the demo images, so with these the counter demo step fails; skip it,
 > or build from source to run the demo. The GKE release registry

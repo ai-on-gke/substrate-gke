@@ -497,9 +497,11 @@ not remove atelet's snapshot grants from an existing install. Run Substrate at
 a revision whose node plugin gets snapshot credentials from ate-api-server's
 credential exchange first. On an older release, removing these grants makes
 every suspend and resume fail with `403`. Remove those grants after running
-`create bucket` and `create iam`, and after rerunning
-`hack/install-microvm-deps.sh --install` if you use microVM workers, so the
-assets are in the asset bucket. `ATELET` is set as in the manual equivalent
+`create bucket` and `create iam`, and after re-staging the micro-VM assets
+if you use microVM workers (`go run ./cmd/ate-setup deploy sandboxconfig
+--sandbox-classes=gvisor,microvm` from Substrate v1.0.0-rc.2 on,
+`hack/install-microvm-deps.sh --install` before), so the assets are in the
+asset bucket. `ATELET` is set as in the manual equivalent
 above:
 
 ```bash
