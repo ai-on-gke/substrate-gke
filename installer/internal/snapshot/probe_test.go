@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -25,15 +26,17 @@ import (
 )
 
 // fakeKubectl puts a kubectl on PATH that answers the probes' queries for a
-// cluster that runs Substrate: the namespace, the atelet DaemonSet, and the
-// API server's --version. gcloud succeeds without touching anything.
-func fakeKubectl(t *testing.T, build string) []string {
+// cluster that runs Substrate: the namespace, the atelet DaemonSet, the API
+// server Deployment's image, and the API server's --version. gcloud succeeds
+// without touching anything.
+func fakeKubectl(t *testing.T, image, build string) []string {
 	t.Helper()
 	bin := t.TempDir()
 	kubectl := `#!/bin/sh
 case "$*" in
   *"get namespace ate-system"*) echo ate-system ;;
   *"get daemonset atelet"*) echo daemonset.apps/atelet ;;
+  *"get deployment ate-api-server"*) echo '` + image + `' ;;
   *"--version"*) echo '` + build + `' ;;
   *) echo "unexpected kubectl $*" >&2; exit 1 ;;
 esac
@@ -83,7 +86,7 @@ func TestParseProbeReadsTheRunningBinary(t *testing.T) {
 	// End to end against a cluster that runs Substrate.
 	spec := ProbeCluster(st, false)
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
-	cmd.Env = fakeKubectl(t, "v0.6.0 commit="+full+" built=2026-10-22T00:00:00Z linux/amd64")
+	cmd.Env = fakeKubectl(t, "", "v0.6.0 commit="+full+" built=2026-10-22T00:00:00Z linux/amd64")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("ProbeCluster: %v\n%s", err, out)
@@ -135,16 +138,22 @@ func TestCheckInstalled(t *testing.T) {
 		t.Fatalf("ParseInstalled(false) = %+v, %v; want Installed: false", probe, err)
 	}
 
-	// Installed, with the API server's report
-	probe, err = ParseInstalled([]string{installedMarker + "true atelet v0.6.0 commit=" + Commit + " built=2026-10-22T00:00:00Z linux/amd64"})
+	// Installed, with the API server's image
+	probe, err = ParseInstalled([]string{installedMarker + "true atelet image=ghcr.io/agent-substrate/substrate/ate-api-server:v0.6.0@sha256:" + strings.Repeat("a", 64)})
 	if err != nil || !probe.Installed || !probe.Atelet || probe.Partial() || probe.Version != "v0.6.0" {
 		t.Fatalf("ParseInstalled(true with atelet) = %+v, %v", probe, err)
 	}
 
-	// Installed, with an API server that could not say
+	// Installed, with a Deployment that could not be read
 	probe, err = ParseInstalled([]string{installedMarker + "true atelet "})
 	if err != nil || !probe.Atelet || probe.Partial() || probe.Version != "" {
-		t.Fatalf("ParseInstalled(true with atelet, no report) = %+v, %v", probe, err)
+		t.Fatalf("ParseInstalled(true with atelet, no image) = %+v, %v", probe, err)
+	}
+
+	// Installed from source: ko tags the image latest, which names no version.
+	probe, err = ParseInstalled([]string{installedMarker + "true atelet image=us-docker.pkg.dev/acme/substrate/ate-api-server:latest@sha256:" + strings.Repeat("a", 64)})
+	if err != nil || !probe.Atelet || probe.Partial() || probe.Version != "" {
+		t.Fatalf("ParseInstalled(true with atelet, latest) = %+v, %v", probe, err)
 	}
 
 	// Installed without atelet: an interrupted install, not a running one.
@@ -177,24 +186,74 @@ func TestCheckInstalled(t *testing.T) {
 	}
 	// The probe must not rewrite the user's kubeconfig just for browsing
 	// clusters, and must not swallow a failing DaemonSet query into a
-	// bare-namespace answer; only the best-effort version report may fail.
+	// bare-namespace answer; only the best-effort version read may fail.
 	if !strings.Contains(script, `export KUBECONFIG="$kubeconfig_dir/config"`) {
 		t.Errorf("probe does not isolate its kubeconfig:\n%s", script)
 	}
-	if strings.Count(script, "|| true") != 1 || !strings.Contains(script, buildQuery) {
+	if strings.Count(script, "|| true") != 1 || !strings.Contains(script, imageQuery) {
 		t.Errorf("probe swallows kubectl failures:\n%s", script)
 	}
 
-	// End to end: a running install carries no version label on atelet, and
-	// still reads as installed rather than partial.
+	// End to end: a running install reads as installed rather than partial,
+	// with the version its API server image is tagged as.
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
-	cmd.Env = fakeKubectl(t, "v0.6.0 commit="+Commit+" built=2026-10-22T00:00:00Z linux/amd64")
+	cmd.Env = fakeKubectl(t, "ghcr.io/agent-substrate/substrate/ate-api-server:v0.6.0@sha256:"+strings.Repeat("a", 64), "")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("CheckInstalled: %v\n%s", err, out)
 	}
 	if p, err := ParseInstalled(strings.Split(string(out), "\n")); err != nil || !p.Atelet || p.Partial() || p.Version != "v0.6.0" {
 		t.Errorf("CheckInstalled read %+v, %v from:\n%s", p, err, out)
+	}
+}
+
+// The install guard probes every ready cluster in the project, in the
+// background, before the user has chosen one; in a shared project those are
+// other people's clusters. Browsing a list warrants reading, nothing more:
+// no exec into their pods, no logs, no port-forward, and nothing that writes.
+func TestCheckInstalledOnlyReads(t *testing.T) {
+	spec := CheckInstalled("acme", "substrate-test", "us-west1-c")
+	script := spec.Argv[len(spec.Argv)-1]
+	for _, verb := range []string{"exec", "logs", "port-forward", "attach", "cp ", "debug", "apply", "create", "delete", "patch", "edit", "replace", "scale", "rollout", "annotate", "label"} {
+		if strings.Contains(script, verb) {
+			t.Errorf("probe runs %q:\n%s", verb, script)
+		}
+	}
+	kubectls := regexp.MustCompile(`kubectl(?:\s+-n\s+\S+)?\s+(\S+)`).FindAllStringSubmatch(script, -1)
+	if len(kubectls) == 0 {
+		t.Fatalf("probe runs no kubectl:\n%s", script)
+	}
+	for _, m := range kubectls {
+		if m[1] != "get" {
+			t.Errorf("probe runs kubectl %s, not a get:\n%s", m[1], script)
+		}
+	}
+	gclouds := regexp.MustCompile(`gcloud\s+container\s+clusters\s+(\S+)`).FindAllStringSubmatch(script, -1)
+	if len(gclouds) != 1 || gclouds[0][1] != "get-credentials" {
+		t.Errorf("probe runs gcloud beyond get-credentials:\n%s", script)
+	}
+}
+
+// The version is the tag of the image the API server runs. ate-setup pins a
+// pre-built image's tag to VERSION, and appends the digest it resolved to;
+// a registry may carry a port; ko tags a build from source latest.
+func TestImageTagVersion(t *testing.T) {
+	for ref, want := range map[string]string{
+		"ghcr.io/agent-substrate/substrate/ate-api-server:v1.0.0-rc.1@sha256:" + strings.Repeat("0", 64): "v1.0.0-rc.1",
+		"ghcr.io/agent-substrate/substrate/ate-api-server:v1.0.0-rc.1":                                   "v1.0.0-rc.1",
+		"localhost:5000/substrate/ate-api-server:v0.6.0":                                                 "v0.6.0",
+		"localhost:5000/substrate/ate-api-server@sha256:" + strings.Repeat("0", 64):                      "",
+		"us-docker.pkg.dev/acme/substrate/ate-api-server:latest@sha256:" + strings.Repeat("0", 64):       "",
+		"ate-api-server": "",
+		"":               "",
+	} {
+		if got := imageTagVersion(ref); got != want {
+			t.Errorf("imageTagVersion(%q) = %q; want %q", ref, got, want)
+		}
+	}
+	// The dry run's fixture names the pin.
+	if got := imageTagVersion(simImage()); got != "substrate-"+ShortCommit() {
+		t.Errorf("imageTagVersion(simImage()) = %q", got)
 	}
 }
 

@@ -1848,12 +1848,13 @@ type installedClusterRunner struct {
 }
 
 // installedLine is what CheckInstalled prints for a running install whose API
-// server reports version, or for a bare namespace when version is empty.
+// server runs an image tagged version, or for a bare namespace when version
+// is empty.
 func installedLine(version string) string {
 	if version == "" {
 		return "SUBSTRATE_GKE_INSTALLED true"
 	}
-	return "SUBSTRATE_GKE_INSTALLED true atelet " + version + " commit=" + snapshot.Commit + " built=2026-10-22T00:00:00Z linux/amd64"
+	return "SUBSTRATE_GKE_INSTALLED true atelet image=ghcr.io/agent-substrate/substrate/ate-api-server:" + version + "@sha256:" + strings.Repeat("0", 64)
 }
 
 func (r installedClusterRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
