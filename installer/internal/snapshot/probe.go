@@ -152,13 +152,59 @@ func simBuild() string {
 
 // CleanupCommand renders cluster cleanup while keeping image repositories.
 // An unknown bucket is left as a placeholder for the user to fill in.
-func CleanupCommand(projectID, cluster, location, bucket string) string {
+// clusterScoped adds --cluster-scoped, which keeps what every Substrate
+// cluster in the project shares — the dashboards and the snapshot transfer
+// and node service accounts (see CleanupLeads).
+func CleanupCommand(projectID, cluster, location, bucket string, clusterScoped bool) string {
 	quoted := "<snapshot-bucket>"
 	if bucket != "" {
 		quoted = ShellQuote(bucket)
 	}
-	return fmt.Sprintf("./tools/cleanup-gcp --project %s --cluster %s --location %s --bucket %s",
+	command := fmt.Sprintf("./tools/cleanup-gcp --project %s --cluster %s --location %s --bucket %s",
 		ShellQuote(projectID), ShellQuote(cluster), ShellQuote(location), quoted)
+	if clusterScoped {
+		command += " --cluster-scoped"
+	}
+	return command
+}
+
+// CleanupLeads introduces the two GCP cleanup commands, as lines to print
+// ahead of each: the cluster-scoped form first, then the complete teardown.
+// They are alternatives, each a whole teardown on its own, and the copy
+// numbers them so that the second does not read as a step after the first.
+//
+// The cluster-scoped form leads because the dashboards and the snapshot
+// transfer and node service accounts are shared by every Substrate cluster
+// in the project, and the installer cannot tell whether another one still
+// depends on them — the provision step finding them already there is one
+// sign. repository reports whether the cluster-scoped command also deletes
+// the image repository this install provisioned (--delete-repository).
+// filestore reports whether the Filestore step ran, so the complete
+// teardown also names the Filestore CSI service account upstream's deploy.sh
+// created (a run that failed may have created it too); teardown.sh deletes
+// it in either case, as an account that was never created counts as
+// already deleted.
+func CleanupLeads(repository, filestore bool) (clusterScoped, complete []string) {
+	clusterScoped = []string{
+		"Option 1 — cluster-scoped (safe when other clusters share the project): delete only",
+		"this cluster, its snapshot and asset buckets, and the IAM bindings on them:",
+	}
+	if repository {
+		clusterScoped = []string{
+			clusterScoped[0],
+			"this cluster, its snapshot and asset buckets, the IAM bindings on them, and the",
+			"image repository:",
+		}
+	}
+	complete = []string{
+		"Option 2 — complete teardown (only if no other Substrate cluster uses this project):",
+		"delete this cluster and the shared resources in one go — the dashboards and the",
+		"snapshot transfer and node service accounts:",
+	}
+	if filestore {
+		complete[2] = "snapshot transfer, Filestore CSI and node service accounts:"
+	}
+	return clusterScoped, complete
 }
 
 // ParseInstalled reads what CheckInstalled printed.

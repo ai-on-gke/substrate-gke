@@ -539,16 +539,10 @@ func (b *Builder) FetchLabel() string {
 }
 
 // CleanupCommand preserves the cluster and repository targets used by this
-// install. clusterScoped adds --cluster-scoped, which keeps what every
-// Substrate cluster in the project shares — the dashboards and the snapshot
-// transfer and node service accounts — and is the form the exit summary
-// leads with: the installer cannot tell whether another cluster in the
-// project still depends on them.
+// install. clusterScoped adds --cluster-scoped, the form the exit summary
+// leads with (see CleanupLeads).
 func (b *Builder) CleanupCommand(st *state.Setup, clusterScoped bool) string {
-	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
-	if clusterScoped {
-		command += " --cluster-scoped"
-	}
+	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, clusterScoped)
 	if st.CreatesArtifactRepository() {
 		if st.RepositoryName() != "ate-images" {
 			command += " --repository " + ShellQuote(st.RepositoryName())

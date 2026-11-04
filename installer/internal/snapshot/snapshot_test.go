@@ -1943,7 +1943,7 @@ func TestCleanupCommandRepositoryOptions(t *testing.T) {
 			st := testSetup(t)
 			st.Zone = "europe-west4-a"
 			st.ArtifactRegistryRepository, st.KoDockerRepo, st.ImageRepo = tc.repository, tc.registry, tc.imageRepo
-			base := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
+			base := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, false)
 			if got, want := b.CleanupCommand(st, false), base+tc.suffix; got != want {
 				t.Errorf("cleanup = %q, want %q", got, want)
 			}

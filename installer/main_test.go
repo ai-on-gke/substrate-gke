@@ -217,9 +217,10 @@ func captureStdout(t *testing.T, fn func()) string {
 
 // Users get stuck with leftover charges unless the summary hands them a
 // complete GCP cleanup, carrying their own answers, quoted for pasting. It
-// leads with the cluster-scoped form: the dashboards and the transfer and
-// node service accounts are shared by every Substrate cluster in the
-// project, so the project-wide form comes second, as an explicit option.
+// offers two: the cluster-scoped form first — the dashboards and the
+// transfer and node service accounts are shared by every Substrate cluster
+// in the project — and the complete teardown second, worded as the
+// alternative rather than as a second step ("to also remove…" read as one).
 func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	st := state.NewSetup()
 	st.ProjectID = "acme"
@@ -257,9 +258,27 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	if strings.Contains(cleanups[1], "--cluster-scoped") {
 		t.Errorf("the second cleanup command must be the project-wide one: %s", cleanups[1])
 	}
-	for _, want := range []string{"only if no", "other cluster uses them", "dashboards and the snapshot transfer and node service accounts"} {
+	for _, want := range []string{
+		"one of two ways:",
+		"Option 1 — cluster-scoped (safe when other clusters share the project)",
+		"image repository:",
+		"Option 2 — complete teardown (only if no other Substrate cluster uses this project)",
+		"the dashboards and the",
+		"snapshot transfer and node service accounts:",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("summary does not say when the project-wide cleanup is safe (%q):\n%s", want, out)
+			t.Errorf("summary does not present the two cleanups as alternatives (%q):\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "To also") {
+		t.Errorf("the complete teardown reads as a step after the cluster-scoped one:\n%s", out)
+	}
+	// The two options' wording is shared with the reinstall guard's exit
+	// note, so the summary prints the helper's lines as they are.
+	clusterScoped, complete := snapshot.CleanupLeads(true, false)
+	for _, line := range append(clusterScoped, complete...) {
+		if !strings.Contains(out, line) {
+			t.Errorf("summary lacks the shared line %q:\n%s", line, out)
 		}
 	}
 }
