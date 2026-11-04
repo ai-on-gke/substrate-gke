@@ -216,7 +216,11 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 // Users get stuck with leftover charges unless the summary hands them a
-// complete GCP cleanup, carrying their own answers, quoted for pasting.
+// complete GCP cleanup, carrying their own answers, quoted for pasting. It
+// offers two: the cluster-scoped form first — the dashboards and the
+// transfer and node service accounts are shared by every Substrate cluster
+// in the project — and the complete teardown second, worded as the
+// alternative rather than as a second step ("to also remove…" read as one).
 func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	st := state.NewSetup()
 	st.ProjectID = "acme"
@@ -226,16 +230,55 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(t.TempDir(), true)}, true)
 	})
 
+	var cleanups []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "./tools/cleanup-gcp") {
+			cleanups = append(cleanups, line)
+		}
+	}
+	if len(cleanups) != 2 {
+		t.Fatalf("summary printed %d cleanup commands, want the cluster-scoped and the project-wide one:\n%s", len(cleanups), out)
+	}
 	for _, want := range []string{
-		"./tools/cleanup-gcp",
 		"--project " + snapshot.ShellQuote("acme"),
 		"--cluster " + snapshot.ShellQuote(st.ClusterName),
 		"--location " + snapshot.ShellQuote(st.Zone),
 		"--bucket " + snapshot.ShellQuote(st.BucketName),
 		"--delete-repository",
 	} {
+		for _, cleanup := range cleanups {
+			if !strings.Contains(cleanup, want) {
+				t.Errorf("summary cleanup line missing %q: %s", want, cleanup)
+			}
+		}
+	}
+	if !strings.Contains(cleanups[0], "--cluster-scoped") {
+		t.Errorf("the first cleanup command is not cluster-scoped: %s", cleanups[0])
+	}
+	if strings.Contains(cleanups[1], "--cluster-scoped") {
+		t.Errorf("the second cleanup command must be the project-wide one: %s", cleanups[1])
+	}
+	for _, want := range []string{
+		"one of two ways:",
+		"Option 1 — cluster-scoped (safe when other clusters share the project)",
+		"image repository:",
+		"Option 2 — complete teardown (only if no other Substrate cluster uses this project)",
+		"the dashboards and the",
+		"snapshot transfer and node service accounts:",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("summary cleanup line missing %q:\n%s", want, out)
+			t.Errorf("summary does not present the two cleanups as alternatives (%q):\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "To also") {
+		t.Errorf("the complete teardown reads as a step after the cluster-scoped one:\n%s", out)
+	}
+	// The two options' wording is shared with the reinstall guard's exit
+	// note, so the summary prints the helper's lines as they are.
+	clusterScoped, complete := snapshot.CleanupLeads(true, false)
+	for _, line := range append(clusterScoped, complete...) {
+		if !strings.Contains(out, line) {
+			t.Errorf("summary lacks the shared line %q:\n%s", line, out)
 		}
 	}
 }
@@ -447,7 +490,7 @@ func TestSummaryReportsAFailedFilestoreStep(t *testing.T) {
 	}
 	// The teardown lead names the account deploy.sh created, which the
 	// failed run may have left behind with its project role (#143).
-	if !strings.Contains(out, "snapshot transfer and Filestore CSI service accounts") {
+	if !strings.Contains(out, "snapshot transfer, Filestore CSI and node service accounts") {
 		t.Errorf("teardown lead does not name the Filestore CSI service account after a failed run:\n%s", out)
 	}
 

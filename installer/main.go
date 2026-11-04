@@ -243,8 +243,8 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		// command, which its panel's borders made awkward to copy.
 		for _, n := range app.ExitNotes() {
 			fmt.Println()
-			if n.Lead != "" {
-				fmt.Println(theme.Subtle.Render("  " + n.Lead))
+			for _, l := range n.Lead {
+				fmt.Println(theme.Subtle.Render("  " + l))
 			}
 			if n.Command != "" {
 				fmt.Println("  " + theme.CommandLine.Render(n.Command))
@@ -322,25 +322,22 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		teardown = b.TeardownCommand(st, b.Root)
 	}
 
-	// Two teardown depths: delete only the control plane (keep the cluster),
-	// or delete everything this install created and stop the charges. The
-	// cleanup invocation carries the wizard's own answers so it can be run
-	// from a fresh clone weeks later.
+	// Delete only the control plane (keep the cluster), or delete the
+	// install from GCP in one of two ways — cluster-scoped, or the complete
+	// teardown — which snapshot.CleanupLeads words as alternatives, the
+	// cluster-scoped one first. The cleanup invocations carry the wizard's
+	// own answers so they can be run from a fresh clone weeks later.
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	accounts := "snapshot transfer service account"
+	note("Or delete the install from GCP, one of two ways:")
 	// A Filestore run that failed may still have created the account and
 	// its project role (#143), so it is named for a failed run too.
-	if st.FilestoreCSIDeployed || st.FilestoreCSIFailed {
-		accounts = "snapshot transfer and Filestore CSI service accounts"
-	}
-	resources := "snapshot and asset buckets, " + accounts + ", IAM bindings, and dashboards"
-	if st.CreatesArtifactRepository() {
-		resources = "snapshot and asset buckets, " + accounts + ", IAM bindings, dashboards, and the image repository"
-	}
-	note("Delete everything this install created in GCP — the cluster, the", resources+":")
-	command(b.CleanupCommand(st))
+	clusterScoped, complete := snapshot.CleanupLeads(st.CreatesArtifactRepository(), st.FilestoreCSIDeployed || st.FilestoreCSIFailed)
+	note(clusterScoped...)
+	command(b.CleanupCommand(st, true))
+	note(complete...)
+	command(b.CleanupCommand(st, false))
 
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
 	// install leaves a written copy behind.

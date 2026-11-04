@@ -131,9 +131,12 @@ type App struct {
 func (a *App) Step() state.Step { return a.mach.Current() }
 
 // An ExitNote is something a screen wants left in the terminal when the
-// wizard exits on it: a lead line, a command to copy, and a trailing remark.
+// wizard exits on it: lead lines, a command to copy, and a trailing remark.
 // Any of the three may be empty.
-type ExitNote struct{ Lead, Command, Trail string }
+type ExitNote struct {
+	Lead           []string
+	Command, Trail string
+}
 
 // exitNoter is a screen with exit notes.
 type exitNoter interface{ exitNotes() []ExitNote }

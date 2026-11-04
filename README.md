@@ -404,7 +404,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 ```
 
 > [!TIP]
-> The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
+> The exit summary from your install prints this invocation pre-filled, as two alternatives — the `--cluster-scoped` form, and the complete teardown — copy the one you want from there rather than retyping values.
 
 The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
 

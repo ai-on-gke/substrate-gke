@@ -1299,20 +1299,35 @@ func (s *clusterScreen) aboutOne() bool {
 	return false
 }
 
-// exitNotes leaves the reinstall guard's cleanup command in the terminal
+// exitNotes leaves the reinstall guard's cleanup commands in the terminal
 // when the wizard exits on the guard. The panel's copy is meant to be
 // copied, but it sits in a bordered panel and comes out with the border
 // characters on every line; after the alt screen closes it can be copied
-// clean.
+// clean. The two commands are the exit summary's two options, in its words
+// and order: cluster-scoped first, the complete teardown as the alternative.
 func (s *clusterScreen) exitNotes() []ExitNote {
 	sel, ok := s.selected()
 	if s.mode != "installed" || !ok {
 		return nil
 	}
+	// Neither command deletes an image repository: this run did not
+	// provision one, and cannot tell what else pushes to it. Nor did this
+	// run take the Filestore step, so the complete teardown's lead does not
+	// name its service account; teardown.sh deletes the account anyway when
+	// an earlier install's Filestore step created it.
+	clusterScoped, complete := snapshot.CleanupLeads(false, false)
+	project := s.deps.Setup.ProjectID
 	return []ExitNote{{
-		Lead:    fmt.Sprintf("Cluster %s already runs Substrate. To upgrade it, run the installer again and choose \"Upgrade an installed cluster\". For the full GCP cleanup — cluster, bucket, IAM, dashboards — run:", sel.Name),
-		Command: snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""),
-		Trail:   "(--bucket: the snapshot bucket that install used)",
+		Lead: append([]string{
+			fmt.Sprintf("Cluster %s already runs Substrate.", sel.Name),
+			"To upgrade it, run the installer again and choose \"Upgrade an installed cluster\".",
+			"To delete it from GCP instead, one of two ways:",
+		}, clusterScoped...),
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", true),
+	}, {
+		Lead:    complete,
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", false),
+		Trail:   "(--bucket, in either: the snapshot bucket that install used)",
 	}}
 }
 
@@ -1952,8 +1967,8 @@ func (s *clusterScreen) panelView(w int) string {
 		// survive is the safe path, not why it is the safe path. The keys
 		// are not repeated — the bottom bar shows them, outside the clamp,
 		// and a second copy with its own wording disagreed with it — and
-		// neither is the cleanup command: it took four rows the remedies
-		// need, and exiting on this panel prints it (exitNotes), where it
+		// neither are the cleanup commands: they took rows the remedies
+		// need, and exiting on this panel prints them (exitNotes), where they
 		// can be copied without the panel's borders.
 		panelW := min(w-4, 88)
 		textW := panelW - 2
@@ -1963,7 +1978,7 @@ func (s *clusterScreen) panelView(w int) string {
 			"",
 			theme.Title.Render("Supported paths forward:"),
 			hangingIndent("  1. ", "Upgrade it: exit, run the installer again and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
-			hangingIndent("  2. ", "Tear down and reinstall: "+theme.Key.Render("[t]")+" deletes Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and the install continues here. Exiting instead prints the command for the full GCP cleanup — cluster, bucket, IAM, dashboards.", textW),
+			hangingIndent("  2. ", "Tear down and reinstall: "+theme.Key.Render("[t]")+" deletes Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and the install continues here. Exiting instead prints the GCP cleanup commands, cluster-scoped and complete.", textW),
 			"",
 			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order: the control plane and atelet roll to the new commit at once, while worker pools stay on the older worker image."),
 		}, "\n")))

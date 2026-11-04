@@ -2060,14 +2060,14 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	if panel := flat(scr.View(87)); !strings.Contains(panel, "Upgrade an installed cluster") {
 		t.Errorf("view missing upgrade track recommendation:\n%s", panel)
 	}
-	// The cleanup command itself is printed when the wizard exits on the
-	// guard, where it can be copied without the panel's borders; the panel
-	// says so and the exit notes carry it.
-	if !strings.Contains(flat(view), "prints the command for the full GCP cleanup") {
-		t.Errorf("view missing the pointer to the cleanup command:\n%s", view)
+	// The cleanup commands themselves are printed when the wizard exits on
+	// the guard, where they can be copied without the panel's borders; the
+	// panel says so and the exit notes carry them.
+	if !strings.Contains(flat(view), "prints the GCP cleanup commands") {
+		t.Errorf("view missing the pointer to the cleanup commands:\n%s", view)
 	}
-	if notes := app.ExitNotes(); len(notes) != 1 || !strings.Contains(notes[0].Command, "cleanup-gcp") {
-		t.Errorf("exit notes on the guard = %+v, want the cleanup-gcp command", notes)
+	if notes := app.ExitNotes(); len(notes) != 2 || !strings.Contains(notes[0].Command, "cleanup-gcp") || !strings.Contains(notes[1].Command, "cleanup-gcp") {
+		t.Errorf("exit notes on the guard = %+v, want the two cleanup-gcp commands", notes)
 	}
 
 	// Pressing esc returns to cluster list
@@ -3950,7 +3950,7 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 // quoted values at their hyphens and indented the continuation, so the copied
 // command no longer ran; it is broken at flags instead, with continuations.
 func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
-	cleanup := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "")
+	cleanup := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "", false)
 	// The completion screen's Next steps at 80 columns (39 columns of
 	// text): the head of the second command is wider than the panel, and
 	// the first carries a comment. Before, the panel re-wrapped the head and
@@ -4056,7 +4056,9 @@ func TestHintBarFitsTheGuardAt80Columns(t *testing.T) {
 // confirmation: while it is open the list shrinks to that cluster's row so
 // the panel gets the terminal's height, and the panel does not repeat the
 // bottom bar's keys with its own wording. Exiting on it leaves the cleanup
-// command in the terminal, where it can be copied without panel borders.
+// commands in the terminal, where they can be copied without panel borders:
+// the exit summary's two options, cluster-scoped first and the complete
+// teardown as the alternative, worded the same way (not as a second step).
 func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
@@ -4078,8 +4080,36 @@ func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
 		t.Errorf("the guard panel repeats the keys:\n%s", view)
 	}
 	notes := app.ExitNotes()
-	if len(notes) != 1 || !strings.Contains(notes[0].Command, "--cluster 'substrate-installed'") || !strings.Contains(notes[0].Command, "--location 'us-west1-c'") {
-		t.Errorf("exit notes on the guard = %+v, want the cleanup command", notes)
+	if len(notes) != 2 {
+		t.Fatalf("exit notes on the guard = %+v, want the cluster-scoped and the complete cleanup", notes)
+	}
+	for i, n := range notes {
+		for _, want := range []string{"./tools/cleanup-gcp", "--cluster 'substrate-installed'", "--location 'us-west1-c'", "--bucket <snapshot-bucket>"} {
+			if !strings.Contains(n.Command, want) {
+				t.Errorf("exit note %d's command lacks %q: %s", i+1, want, n.Command)
+			}
+		}
+		if strings.Contains(n.Command, "--delete-repository") {
+			t.Errorf("exit note %d deletes an image repository this run did not provision: %s", i+1, n.Command)
+		}
+	}
+	if !strings.Contains(notes[0].Command, "--cluster-scoped") || strings.Contains(notes[1].Command, "--cluster-scoped") {
+		t.Errorf("exit notes = %+v, want the cluster-scoped command first and the complete one second", notes)
+	}
+	clusterScoped, complete := snapshot.CleanupLeads(false, false)
+	if lead := strings.Join(notes[0].Lead, " "); !strings.HasPrefix(lead, "Cluster substrate-installed already runs Substrate.") || !strings.HasSuffix(lead, strings.Join(clusterScoped, " ")) {
+		t.Errorf("exit note 1's lead = %q, want the guard's verdict and then the summary's cluster-scoped option", lead)
+	}
+	if lead := strings.Join(notes[1].Lead, " "); lead != strings.Join(complete, " ") {
+		t.Errorf("exit note 2's lead = %q, want the summary's complete-teardown option", lead)
+	}
+	for i, want := range []string{"Option 1 — cluster-scoped", "Option 2 — complete teardown (only if no other Substrate cluster uses this project)"} {
+		if !strings.Contains(strings.Join(notes[i].Lead, " "), want) {
+			t.Errorf("exit note %d's lead lacks %q: %v", i+1, want, notes[i].Lead)
+		}
+	}
+	if !strings.Contains(notes[1].Trail, "--bucket") {
+		t.Errorf("exit note 2's trail = %q, want the --bucket placeholder explained", notes[1].Trail)
 	}
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the list
 	if notes := app.ExitNotes(); len(notes) != 0 {
