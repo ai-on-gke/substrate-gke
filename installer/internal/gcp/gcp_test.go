@@ -16,6 +16,7 @@ package gcp
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -387,6 +388,42 @@ func TestChannelVersionsAndCarries(t *testing.T) {
 	} {
 		if got := ChannelCarries(carried[tc.channel], tc.version); got != tc.want {
 			t.Errorf("%s carries %s = %v, want %v", tc.channel, tc.version, got, tc.want)
+		}
+	}
+}
+
+// ValidClusterName is GKE's rule — [a-z]([-a-z0-9]*[a-z0-9])?, at most 40
+// characters — and each rejection names the one rule the name broke, since
+// the form shows the message as the name is typed.
+func TestValidClusterName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string // substring of the error; "" means valid
+	}{
+		{"substrate-poc", ""},
+		{"a", ""},
+		{"a1", ""},
+		{"c3-standard-4", ""},
+		{strings.Repeat("a", 40), ""},
+		{"", "a cluster name is required"},
+		{strings.Repeat("a", 41), "is 41 characters; GKE allows at most 40"},
+		{"1cluster", "must start with a lowercase letter"},
+		{"-cluster", "must start with a lowercase letter"},
+		{"Cluster", "must start with a lowercase letter"},
+		{"cluster-", "must not end with a hyphen"},
+		{"my_cluster", `contains '_': only lowercase letters, digits and hyphens are allowed`},
+		{"myCluster", `contains 'C': only lowercase letters, digits and hyphens are allowed`},
+		{"my cluster", `contains ' ': only lowercase letters, digits and hyphens are allowed`},
+		{"my.cluster", `contains '.': only lowercase letters, digits and hyphens are allowed`},
+	} {
+		err := ValidClusterName(tc.name)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("ValidClusterName(%q) = %v, want nil", tc.name, err)
+		case tc.want != "" && err == nil:
+			t.Errorf("ValidClusterName(%q) = nil, want error containing %q", tc.name, tc.want)
+		case tc.want != "" && !strings.Contains(err.Error(), tc.want):
+			t.Errorf("ValidClusterName(%q) = %q, want containing %q", tc.name, err, tc.want)
 		}
 	}
 }

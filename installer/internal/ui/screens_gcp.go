@@ -1254,6 +1254,11 @@ func (s *clusterScreen) logComp() *execComp { return s.comp }
 func (s *clusterScreen) Hints() []Hint {
 	switch s.mode {
 	case "name":
+		// The bar says what [enter] does: on a listed name it selects that
+		// cluster, not create a second one (see Update).
+		if text, bad := s.nameProblem(); text != "" && !bad {
+			return []Hint{{"enter", "select the existing cluster"}, {"esc", "back to list"}}
+		}
 		return []Hint{{"enter", "create with this name"}, {"esc", "back to list"}}
 	case "probing":
 		if s.comp != nil && s.comp.failed != nil {
@@ -1309,6 +1314,26 @@ func (s *clusterScreen) exitNotes() []ExitNote {
 		Command: snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""),
 		Trail:   "(--bucket: the snapshot bucket that install used)",
 	}}
+}
+
+// nameProblem is what is wrong with the name in the create prompt, shown
+// under the input as it is typed: the rule GKE would reject it for (bad, and
+// [enter] refuses it — the alternative is bootstrap failing on it minutes
+// later), or that a listed cluster already has it (not bad: [enter] then
+// selects that cluster, see Update, so the duplicate is visible before it
+// is pressed rather than a surprise after).
+func (s *clusterScreen) nameProblem() (text string, bad bool) {
+	name := strings.TrimSpace(s.nameInput.Value())
+	if err := gcp.ValidClusterName(name); err != nil {
+		msg := err.Error()
+		return strings.ToUpper(msg[:1]) + msg[1:] + ".", true
+	}
+	for _, c := range s.clusters {
+		if c.Name == name {
+			return "Already exists in " + c.Location + ": [enter] selects it from the list.", false
+		}
+	}
+	return "", false
 }
 
 // selected is the cluster under the cursor, and false on the create-new row.
@@ -1490,7 +1515,9 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				return nil
 			case "enter":
 				name := strings.TrimSpace(s.nameInput.Value())
-				if name == "" {
+				// A name GKE would reject stays on the prompt, which is
+				// showing why (nameProblem).
+				if _, bad := s.nameProblem(); bad {
 					return nil
 				}
 				// A listed cluster typed by name is still that cluster: it
@@ -1888,9 +1915,20 @@ func (s *clusterScreen) panelView(w int) string {
 	var b strings.Builder
 	switch s.mode {
 	case "name":
-		b.WriteString("\n" + theme.AccentPanel.Width(min(w-4, 60)).Render(
-			theme.Title.Render("New cluster name")+"\n"+s.nameInput.View()+"\n"+
-				theme.Subtle.Render("Created in "+s.deps.Setup.Zone+" by setup-gcp in the next step.")))
+		panelW := min(w-4, 60)
+		lines := []string{theme.Title.Render("New cluster name"), s.nameInput.View()}
+		// The verdict on the name goes right under it, before the note:
+		// the panel is clamped from the bottom, and the note is the line
+		// to lose.
+		if text, bad := s.nameProblem(); text != "" {
+			style := theme.Warning
+			if bad {
+				style = theme.Bad
+			}
+			lines = append(lines, lipgloss.NewStyle().Width(panelW-2).Render(style.Render(text)))
+		}
+		lines = append(lines, theme.Subtle.Render("Created in "+s.deps.Setup.Zone+" by setup-gcp in the next step."))
+		b.WriteString("\n" + theme.AccentPanel.Width(panelW).Render(strings.Join(lines, "\n")))
 	case "probing":
 		sel := s.clusters[s.cursor]
 		b.WriteString("\n" + theme.Subtle.Render(fmt.Sprintf("Checking %s for existing Substrate installation…", sel.Name)) + "\n\n")

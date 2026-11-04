@@ -2808,6 +2808,87 @@ func TestTypedInstalledClusterNameIsStillGuarded(t *testing.T) {
 	}
 }
 
+// The create prompt checks the name against GKE's rule as it is typed and
+// names the rule broken; [enter] on a bad name stays on the prompt instead of
+// failing minutes later in bootstrap with GKE's regex (#128).
+func TestCreateFormRejectsInvalidClusterName(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("enter") // cursor defaults to "Create a new cluster" -> name mode
+	scr := app.cur.(*clusterScreen)
+	if scr.mode != "name" {
+		t.Fatalf("mode = %q, want name", scr.mode)
+	}
+	// Typed, not set: the verdict has to follow the keystrokes.
+	scr.nameInput.SetValue("my-cluster")
+	if view := flat(app.View()); strings.Contains(view, "Cluster name \"") {
+		t.Fatalf("valid name flagged:\n%s", view)
+	}
+	press("_")
+	if view := flat(app.View()); !strings.Contains(view, "Cluster name \"my-cluster_\" contains '_': only lowercase letters, digits and hyphens are allowed.") {
+		t.Fatalf("typed underscore not flagged:\n%s", view)
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"My-Cluster", "must start with a lowercase letter"},
+		{"1st-cluster", "must start with a lowercase letter"},
+		{"my-cluster-", "must not end with a hyphen"},
+		{"my cluster", "contains ' '"},
+		{"", "A cluster name is required."},
+	} {
+		scr.nameInput.SetValue(tc.name)
+		if view := flat(app.View()); !strings.Contains(view, tc.want) {
+			t.Errorf("name %q: want %q in view:\n%s", tc.name, tc.want, view)
+		}
+		press("enter")
+		if app.mach.Current() != state.Cluster || scr.mode != "name" {
+			t.Fatalf("name %q: enter advanced: step=%v mode=%q", tc.name, app.mach.Current(), scr.mode)
+		}
+		if app.deps.Setup.ClusterIsNew || app.deps.Setup.ClusterName != "substrate-test" {
+			t.Fatalf("name %q leaked into Setup: %q (new=%v)", tc.name, app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
+		}
+	}
+}
+
+// A valid name shows no verdict and [enter] creates with it.
+func TestCreateFormAcceptsValidClusterName(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("enter")
+	scr := app.cur.(*clusterScreen)
+	scr.nameInput.SetValue("agents-2")
+	if view := flat(app.View()); strings.Contains(view, "Cluster name \"") || strings.Contains(view, "Already exists") {
+		t.Fatalf("valid new name flagged:\n%s", view)
+	}
+	press("enter")
+	if app.mach.Current() != state.Provision {
+		t.Fatalf("after a valid name: %v (mode %q)", app.mach.Current(), scr.mode)
+	}
+	if !app.deps.Setup.ClusterIsNew || app.deps.Setup.ClusterName != "agents-2" {
+		t.Errorf("Setup = %q (new=%v), want agents-2 new", app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
+	}
+}
+
+// A name already in the list is said to be, with where, before [enter] turns
+// it into a selection of that cluster (TestTypedInstalledClusterNameIsStillGuarded).
+func TestCreateFormFlagsListedClusterName(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("enter")
+	scr := app.cur.(*clusterScreen)
+	scr.nameInput.SetValue("substrate-ga")
+	view := flat(app.View())
+	for _, want := range []string{"Already exists in us-west1-c: [enter] selects it from the list.", "select the existing cluster"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("listed name: want %q in view:\n%s", want, view)
+		}
+	}
+	press("enter")
+	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterIsNew || app.deps.Setup.ClusterName != "substrate-ga" {
+		t.Fatalf("typed listed name: step=%v mode=%q cluster=%q new=%v, want substrate-ga selected",
+			app.mach.Current(), scr.mode, app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
+	}
+}
+
 // teardownClusterRunner reports the cluster installed until a teardown spec
 // has run, then clean — the runner-side view of [t] from the blocked panel.
 type teardownClusterRunner struct {
