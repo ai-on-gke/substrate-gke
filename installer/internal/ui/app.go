@@ -69,6 +69,13 @@ type Screen interface {
 	CapturesText() bool
 }
 
+// sizedScreen is a Screen that fits itself to the rows the body has rather
+// than leaving the cut to clampHeight, which keeps the top: a list that has
+// to scroll to its cursor.
+type sizedScreen interface {
+	ViewSized(width, height int) string
+}
+
 // Hint is one bottom-bar key binding.
 type Hint struct{ Key, Label string }
 
@@ -483,14 +490,15 @@ func (a *App) View() string {
 	case overlayExit:
 		content = a.exitView(contentW)
 	case overlaySlash:
+		panel := theme.AccentPanel.Width(contentW - 2).Render(a.slash.View())
 		content = lipgloss.JoinVertical(lipgloss.Left,
-			a.cur.View(contentW),
-			theme.AccentPanel.Width(contentW-2).Render(a.slash.View()),
+			a.screenView(contentW, bodyH-lipgloss.Height(panel)),
+			panel,
 		)
 	case overlayLog:
 		content = a.logModalView(contentW, bodyH)
 	default:
-		content = a.cur.View(contentW)
+		content = a.screenView(contentW, bodyH)
 	}
 	// The screen itself knows whether a command failed, so the clamp choice
 	// is not left to sniffing rendered strings — raw output that merely
@@ -511,4 +519,13 @@ func (a *App) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, bottom)
+}
+
+// screenView renders the current screen w columns wide and, for one that
+// sizes itself, h rows tall.
+func (a *App) screenView(w, h int) string {
+	if s, ok := a.cur.(sizedScreen); ok {
+		return s.ViewSized(w, h)
+	}
+	return a.cur.View(w)
 }

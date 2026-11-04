@@ -3872,6 +3872,124 @@ func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
 	}
 }
 
+// manyClusters is a project busy enough to overflow the list at 80×24: 25
+// clusters, none of them ready, so the create row is [26] and no background
+// probe runs.
+func manyClusters(t *testing.T) []gcp.Cluster {
+	t.Helper()
+	base, err := (&gcp.Client{DryRun: true}).ListClusters(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(base, func(c gcp.Cluster) bool { return !c.SubstrateReady() })
+	if i < 0 {
+		t.Fatal("the dry-run list has no cluster below the floor")
+	}
+	var many []gcp.Cluster
+	for n := 1; n <= 25; n++ {
+		c := base[i]
+		c.Name = fmt.Sprintf("cluster-%02d", n)
+		many = append(many, c)
+	}
+	return many
+}
+
+// A busy project at 80×24 (#110): 26 rows in a body of 19. The list scrolls
+// with the cursor and says how many rows are out of view, the note under it
+// keeps its rows, and the create row — [26], past the digit keys and the
+// window — is one key away and visible when selected, with the name prompt
+// under it.
+func TestClusterListScrollsToTheCursorAt80x24(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	scr := app.cur.(*clusterScreen)
+	pump(t, app, clustersMsg{owner: scr, clusters: manyClusters(t)})
+	pump(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	press("g")
+	for i := 0; i <= 25; i++ {
+		if scr.cursor != i {
+			t.Fatalf("cursor = %d, want %d", scr.cursor, i)
+		}
+		frame := app.View()
+		if want := fmt.Sprintf("[%d]", i+1); !strings.Contains(frame, want) {
+			t.Errorf("cursor on row %s: the frame does not show it:\n%s", want, frame)
+		}
+		if !strings.Contains(frame, " more") {
+			t.Errorf("cursor on row %d: nothing says rows are out of view:\n%s", i+1, frame)
+		}
+		if !strings.Contains(frame, "Substrate needs") {
+			t.Errorf("cursor on row %d: the list ran over the note under it:\n%s", i+1, frame)
+		}
+		press("j")
+	}
+	if frame := app.View(); !strings.Contains(frame, "[26]") || !strings.Contains(frame, "Create a new cluster") {
+		t.Errorf("the create row is selected and not shown:\n%s", frame)
+	}
+
+	press("g")
+	if scr.cursor != 0 {
+		t.Errorf("after g: cursor = %d, want 0", scr.cursor)
+	}
+	press("G")
+	if scr.cursor != 25 {
+		t.Errorf("after G: cursor = %d, want the create row", scr.cursor)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyHome})
+	if scr.cursor != 0 {
+		t.Errorf("after home: cursor = %d, want 0", scr.cursor)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEnd})
+	if scr.cursor != 25 {
+		t.Errorf("after end: cursor = %d, want the create row", scr.cursor)
+	}
+	press("enter")
+	if scr.mode != "name" {
+		t.Fatalf("mode = %q, want name", scr.mode)
+	}
+	frame := app.View()
+	for _, want := range []string{"[26]", "New cluster name", "↑ "} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("the name prompt frame lacks %q:\n%s", want, frame)
+		}
+	}
+}
+
+// Without a height the list is whole, as the screen tests render it; with
+// one the window holds the cursor, uses every line it has — a marker on
+// each side with hidden rows, the list on the rest — and shows the whole
+// list when it fits.
+func TestListWindowKeepsTheCursorAndFillsTheLines(t *testing.T) {
+	const total = 26
+	for avail := 1; avail <= 30; avail++ {
+		for cursor := 0; cursor < total; cursor++ {
+			top, size := listWindow(total, cursor, avail)
+			if cursor < top || cursor >= top+size {
+				t.Errorf("avail %d: cursor %d is outside rows %d..%d", avail, cursor, top, top+size-1)
+			}
+			lines := size
+			if top > 0 {
+				lines++
+			}
+			if top+size < total {
+				lines++
+			}
+			switch {
+			case total <= avail && (top != 0 || size != total):
+				t.Errorf("avail %d: %d rows fit, got rows %d..%d", avail, total, top, top+size-1)
+			case total > avail && avail > 2 && lines != avail:
+				t.Errorf("avail %d cursor %d: rows %d..%d take %d lines", avail, cursor, top, top+size-1, lines)
+			}
+		}
+	}
+	if top, size := listWindow(total, 13, 0); top != 0 || size != total {
+		t.Errorf("no limit: rows %d..%d, want them all", top, top+size-1)
+	}
+	s, _, _ := drivenClusterScreen(t)
+	if whole := flat(s.View(110)); !strings.Contains(whole, "[1]") || !strings.Contains(whole, "Create a new cluster") {
+		t.Errorf("View without a height does not show the whole list:\n%s", whole)
+	}
+}
+
 // `make run` has no demo step; `make run-demo` ends with it. Both set the
 // ingress allowlist right before the control plane is turned on.
 func TestRunAndRunDemoFlows(t *testing.T) {
