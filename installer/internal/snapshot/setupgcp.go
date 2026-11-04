@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -60,8 +61,10 @@ func FindSetupGCP(explicit string, starts ...string) (string, error) {
 			dir = parent
 		}
 	}
+	// Name each start once: a binary run from its own directory has the
+	// working directory and the executable's directory the same.
 	return "", fmt.Errorf("cannot find %s above %s; run the installer from a substrate-gke checkout or pass --setup-gcp",
-		SetupGCPPath, strings.Join(starts, " or "))
+		SetupGCPPath, strings.Join(slices.Compact(slices.Clone(starts)), " or "))
 }
 
 // isSetupGCP reports whether dir holds the setup-gcp main module. A go.mod

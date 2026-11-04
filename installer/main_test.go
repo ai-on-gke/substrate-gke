@@ -122,6 +122,27 @@ func TestSummaryDoesNotPointAtTheRemovedCache(t *testing.T) {
 	}
 }
 
+// A pre-built install builds nothing, so its summary must not say the tree
+// was fetched to build images; a source build's must.
+func TestSummarySaysWhyTheTreeWasFetched(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "substrate-4a2cb262dd62")
+	for _, tc := range []struct{ name, imageRepo, want, wantNot string }{
+		{"source build", "", "fetched to build your images", "deploy manifests"},
+		{"pre-built images", "ghcr.io/agent-substrate/substrate", "fetched for its deploy manifests", "to build your images"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := state.NewSetup()
+			st.ImageRepo = tc.imageRepo
+			out := captureStdout(t, func() {
+				printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(root, true)}, true)
+			})
+			if !strings.Contains(out, tc.want) || strings.Contains(out, tc.wantNot) {
+				t.Errorf("summary should say %q and not %q:\n%s", tc.want, tc.wantNot, out)
+			}
+		})
+	}
+}
+
 // Under --dry-run cleanup never runs, and it can also fail; either way a
 // tree (or an older cache) may still be on disk, and the summary must not
 // claim it was removed.
