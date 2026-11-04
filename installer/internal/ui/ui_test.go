@@ -1610,6 +1610,11 @@ func TestUpgradeSourceOffersThisMachinesInstalls(t *testing.T) {
 	if zi, ai := strings.Index(view, "zeta"), strings.Index(view, "alpha"); zi < 0 || ai < 0 || zi > ai || !strings.Contains(view, "[3] Type a different cluster") {
 		t.Fatalf("the records should be listed newest first, then the row to type one:\n%s", view)
 	}
+	// The version a record names is whatever the last deploy wrote, so a
+	// row does not show it; the real one is read off the cluster after the pick.
+	if strings.Contains(view, "v1.1.0") || strings.Contains(view, "v1.0.0") {
+		t.Fatalf("a record's row should not show the version it names:\n%s", view)
+	}
 
 	press("3", "enter") // type a different cluster
 	if scr.mode != "target" || scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" {

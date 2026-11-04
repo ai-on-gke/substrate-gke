@@ -144,19 +144,21 @@ func writtenOn(in snapshot.Install) string {
 }
 
 // installRows lists the records as aligned columns: the cluster first,
-// since it is what the user is looking for, then where it is, what it
-// ran, and when the record was written.
+// since it is what the user is looking for, then where it is and when the
+// record was written. The version the record names is not shown: the
+// runbook's deploys rewrite it before the API server runs the new release,
+// and the screen reads the real one off the cluster after the pick.
 func (s *upgradeSourceScreen) installRows() []string {
-	var cluster, project, location, version int
+	var cluster, project, location int
 	for _, in := range s.installs {
 		cluster, project = max(cluster, len(in.ClusterName)), max(project, len(in.ProjectID))
-		location, version = max(location, len(in.Location)), max(version, len(in.Version))
+		location = max(location, len(in.Location))
 	}
 	index := len(fmt.Sprintf("[%d]", len(s.installs)+1))
 	rows := make([]string, len(s.installs))
 	for i, in := range s.installs {
-		rows[i] = fmt.Sprintf("%-*s %-*s  %-*s  %-*s  %-*s  %s", index, fmt.Sprintf("[%d]", i+1),
-			cluster, in.ClusterName, project, in.ProjectID, location, in.Location, version, in.Version, writtenOn(in))
+		rows[i] = fmt.Sprintf("%-*s %-*s  %-*s  %-*s  %s", index, fmt.Sprintf("[%d]", i+1),
+			cluster, in.ClusterName, project, in.ProjectID, location, in.Location, writtenOn(in))
 	}
 	return rows
 }

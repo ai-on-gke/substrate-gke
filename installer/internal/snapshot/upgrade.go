@@ -139,10 +139,12 @@ func recordDir() (string, error) {
 }
 
 // Install is one record ate-setup wrote: a cluster this machine installed
-// Substrate on, the version it deployed, and when.
+// Substrate on, and when. The record also names a version, but every
+// `ate-setup deploy` in the upgrade runbook rewrites it with the new
+// release's, so during or after an aborted upgrade it need not be what the
+// API server runs; the upgrade flow reads that off the cluster instead.
 type Install struct {
 	ProjectID, ClusterName, Location string
-	Version                          string
 	// WrittenAt is the record's cluster.writtenAt, else the file's
 	// modification time.
 	WrittenAt time.Time
@@ -211,8 +213,6 @@ func readInstall(path string) (Install, bool) {
 			in.ClusterName = value
 		case "gcp.clusterLocation":
 			in.Location = value
-		case "cluster.substrateVersion":
-			in.Version = value
 		case "cluster.writtenAt":
 			if t, err := time.Parse(time.RFC3339, value); err == nil {
 				in.WrittenAt = t

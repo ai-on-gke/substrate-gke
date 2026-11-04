@@ -2355,11 +2355,11 @@ func TestListInstallsOrdersRecordsNewestFirst(t *testing.T) {
 	if want := []string{"zeta", "byname", "alpha"}; !slices.Equal(names, want) {
 		t.Fatalf("ListInstalls = %v, want %v", names, want)
 	}
-	if in := got[2]; in.ProjectID != "acme" || in.Location != "us-west1-c" || in.Version != "v1.0.0" ||
+	if in := got[2]; in.ProjectID != "acme" || in.Location != "us-west1-c" ||
 		!in.WrittenAt.Equal(time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)) || in.Path != filepath.Join(dir, "gke_acme_us-west1-c_alpha.yaml") {
 		t.Errorf("alpha's record misread: %+v", in)
 	}
-	if in := got[1]; in.ProjectID != "other" || in.Location != "europe-west4" || in.Version != "" ||
+	if in := got[1]; in.ProjectID != "other" || in.Location != "europe-west4" ||
 		!in.WrittenAt.Equal(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("a record without a gcp block should be read off its name and time: %+v", in)
 	}
