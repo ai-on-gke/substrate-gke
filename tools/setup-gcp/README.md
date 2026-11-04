@@ -576,8 +576,10 @@ go -C tools/setup-gcp run . create repository --project-id <project> --region <r
 [`teardown.sh`](teardown.sh) deletes what `bootstrap` creates, in reverse
 order: dashboards, bucket IAM bindings, the snapshot transfer service
 account, project IAM bindings, the snapshot and asset buckets and their
-contents, the cluster, and then the node service account its nodes ran as.
-It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
+contents, the cluster, and then the Filestore CSI driver's service account
+(`substrate-filestore-csi`, which the installer's Filestore step creates
+through upstream's `deploy.sh` rather than `bootstrap`) and the node service
+account its nodes ran as. It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
 `CLUSTER_NAME`, `CLUSTER_LOCATION`, `BUCKET_NAME`,
 `SNAPSHOT_TRANSFER_GSA_NAME`, default `ate-snapshot-transfer`, and
 `NODE_GSA_NAME`, default `ate-gke-node`) and shells out to `gcloud`. Each step can run alone; see
@@ -588,9 +590,10 @@ It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
 tools/setup-gcp/teardown.sh [--all|--cluster-scoped]
 ```
 
-* `--all` deletes everything, including the dashboards, the snapshot transfer
-  and node service accounts and the node service account's project role, which every
-  Substrate cluster in the project shares.
+* `--all` deletes everything, including the dashboards, the snapshot transfer,
+  Filestore CSI and node service accounts and the project roles of the last
+  two (`roles/file.editor` and `roles/container.defaultNodeServiceAccount`),
+  which every Substrate cluster in the project shares.
 * `--cluster-scoped` deletes only this cluster, its buckets and the bindings on
   them. Use it while other Substrate clusters still use the project.
 

@@ -329,9 +329,15 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	resources := "snapshot and asset buckets, snapshot transfer service account, IAM bindings, and dashboards"
+	accounts := "snapshot transfer service account"
+	// A Filestore run that failed may still have created the account and
+	// its project role (#143), so it is named for a failed run too.
+	if st.FilestoreCSIDeployed || st.FilestoreCSIFailed {
+		accounts = "snapshot transfer and Filestore CSI service accounts"
+	}
+	resources := "snapshot and asset buckets, " + accounts + ", IAM bindings, and dashboards"
 	if st.CreatesArtifactRepository() {
-		resources = "snapshot and asset buckets, snapshot transfer service account, IAM bindings, dashboards, and the image repository"
+		resources = "snapshot and asset buckets, " + accounts + ", IAM bindings, dashboards, and the image repository"
 	}
 	note("Delete everything this install created in GCP — the cluster, the", resources+":")
 	command(b.CleanupCommand(st))

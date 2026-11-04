@@ -1416,6 +1416,60 @@ if [[ " ${served} " != *" ${want#ate.dev/} "* ]]; then
 fi
 echo "The cluster serves csidriverconfigs.ate.dev as: ${served% }"`
 
+// FilestoreServiceAccount is the name of the service account upstream's
+// deploy.sh creates when run without --service-account, as the Filestore
+// step runs it; teardown.sh deletes the same account.
+const FilestoreServiceAccount = "substrate-filestore-csi"
+
+// FilestoreGrantCheckLine opens the check that the project grants
+// roles/file.editor to the Filestore CSI service account. The checklist
+// keys its row off it.
+const FilestoreGrantCheckLine = "Checking roles/file.editor is granted to the Filestore CSI service account"
+
+// filestoreGrantAttempts bounds the re-grant in filestoreGrantCheck.
+const filestoreGrantAttempts = 6
+
+// filestoreGrantCheck runs after deploy.sh, with FILESTORE_PROJECT and
+// FILESTORE_GSA set, and fails the step when the project policy does not
+// grant roles/file.editor to the account. On a fresh project deploy.sh
+// creates the account and grants the role in the next breath; IAM has not
+// propagated the account yet, so the grant fails with "Service account ...
+// does not exist", and deploy.sh swallows that (`|| true`), so the step
+// "succeeds" without the role and the first CreateVolume fails with a
+// permission error nothing points back here
+// (kubernetes-sigs/gcp-filestore-csi-driver#1417, #143). Until that lands
+// upstream, the installer reads the policy back and re-grants, a few
+// seconds apart, for a bounded number of attempts; it says what to run when
+// the role is still missing. A policy that already holds the role is left
+// alone: no add-iam-policy-binding, no policy write.
+var filestoreGrantCheck = `echo "` + FilestoreGrantCheckLine + ` (${FILESTORE_GSA})..."
+filestore_role_granted() {
+  local roles
+  roles=$(gcloud projects get-iam-policy "${FILESTORE_PROJECT}" \
+    --flatten="bindings[].members" \
+    --filter="bindings.role=roles/file.editor AND bindings.members=serviceAccount:${FILESTORE_GSA}" \
+    --format="value(bindings.role)") || return 1
+  [[ "${roles}" == *roles/file.editor* ]]
+}
+attempt=0
+until filestore_role_granted; do
+  attempt=$((attempt + 1))
+  if [[ "${attempt}" -gt ` + strconv.Itoa(filestoreGrantAttempts) + ` ]]; then
+    echo "error: roles/file.editor is not granted to ${FILESTORE_GSA} on project ${FILESTORE_PROJECT} after ` + strconv.Itoa(filestoreGrantAttempts) + ` attempts; without it the Filestore CSI driver cannot create volumes." >&2
+    echo "deploy.sh grants the role right after creating the account, before IAM knows the account, and ignores the failure (kubernetes-sigs/gcp-filestore-csi-driver#1417). Grant it and re-run this step:" >&2
+    echo "  gcloud projects add-iam-policy-binding ${FILESTORE_PROJECT} --member=serviceAccount:${FILESTORE_GSA} --role=roles/file.editor --condition=None" >&2
+    exit 1
+  fi
+  echo "roles/file.editor is not granted to ${FILESTORE_GSA} yet (deploy.sh grants it before IAM knows a new account; kubernetes-sigs/gcp-filestore-csi-driver#1417). Granting it, attempt ${attempt} of ` + strconv.Itoa(filestoreGrantAttempts) + `..."
+  gcloud projects add-iam-policy-binding "${FILESTORE_PROJECT}" \
+    --member="serviceAccount:${FILESTORE_GSA}" \
+    --role=roles/file.editor \
+    --condition=None \
+    --format=none || true
+  sleep 5
+done
+echo "roles/file.editor is granted to ${FILESTORE_GSA}."`
+
 // DeployFilestoreCSI clones the GCP Filestore CSI Driver repository and invokes
 // its Substrate overlay deploy script (deploy/kubernetes/overlays/substrate/deploy.sh).
 // It automatically disables the managed GKE Filestore CSI Driver addon if enabled
@@ -1427,7 +1481,9 @@ echo "The cluster serves csidriverconfigs.ate.dev as: ${served% }"`
 // (which grants IAM before it applies) after. The clone is of HEAD, not a
 // pin: no revision of the overlay serves ate.dev/v1 yet, so a pin would only
 // fix the failure in place, while HEAD picks up the upstream fix when it
-// lands and the check keeps the step honest until then.
+// lands and the check keeps the step honest until then. After deploy.sh,
+// filestoreGrantCheck makes sure the role it may have failed to grant is
+// there.
 func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 	// Wizard answers reach this script as text, so they are quoted for the
 	// same reason the fetch preamble quotes its paths.
@@ -1449,6 +1505,9 @@ func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 		`    echo "` + FilestoreAddonOffLine + `"`,
 		`fi`,
 		deployCmd,
+		fmt.Sprintf(`FILESTORE_PROJECT=%s`, project),
+		fmt.Sprintf(`FILESTORE_GSA=%s@%s.iam.gserviceaccount.com`, FilestoreServiceAccount, project),
+		filestoreGrantCheck,
 	}, "\n")
 
 	return execx.Spec{
@@ -1488,6 +1547,8 @@ func (b *Builder) DeployFilestoreCSI(st *state.Setup) execx.Spec {
 			"   - Check controller status : kubectl get pods -n gcp-filestore-csi-driver",
 			"   - Check Substrate driver  : kubectl get csidriverconfig",
 			"=================================================================",
+			FilestoreGrantCheckLine + " (" + FilestoreServiceAccount + "@" + st.ProjectID + ".iam.gserviceaccount.com)...",
+			"roles/file.editor is granted to " + FilestoreServiceAccount + "@" + st.ProjectID + ".iam.gserviceaccount.com.",
 		},
 	}
 }

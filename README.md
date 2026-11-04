@@ -395,7 +395,7 @@ The flow refuses an upgrade the runbook does not support, including a move betwe
 
 ## Tearing down
 
-An install creates **billable resources**: the GKE cluster, the snapshot and micro-VM asset buckets, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
+An install creates **billable resources**: the GKE cluster, the snapshot and micro-VM asset buckets, service accounts and IAM bindings (including the Filestore CSI driver's, if that step ran), monitoring dashboards, and any image repository provisioned for a source build.
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
@@ -408,7 +408,7 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 
 The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
 
-This deletes the dashboards and the snapshot transfer and node service accounts too, which every Substrate cluster in the project shares. If other Substrate clusters still use the project, add `--cluster-scoped` (or `CLUSTER_SCOPED=true` with `make teardown`): it deletes only this cluster, its buckets and the bindings on them.
+This deletes the dashboards and the snapshot transfer, Filestore CSI and node service accounts too (with the project roles of the last two), which every Substrate cluster in the project shares. If other Substrate clusters still use the project, add `--cluster-scoped` (or `CLUSTER_SCOPED=true` with `make teardown`): it deletes only this cluster, its buckets and the bindings on them.
 
 Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line.
 

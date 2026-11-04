@@ -110,7 +110,9 @@ func Deploy(prebuilt bool) []ChecklistItem {
 // grants IAM when the overlay's CSIDriverConfig is written against an API
 // version the cluster does not serve (#114). The addon row lights either
 // way — the script says so when there is nothing to disable — so a cluster
-// without the managed driver does not show it as a stall.
+// without the managed driver does not show it as a stall. The last row is
+// the installer's own check that deploy.sh's roles/file.editor grant took,
+// which it re-grants when IAM had not yet propagated the account (#143).
 func FilestoreCSI() []ChecklistItem {
 	return []ChecklistItem{
 		{"Fetch Filestore CSI driver overlay repository", containsAny("Cloning into", "Fetching")},
@@ -118,6 +120,7 @@ func FilestoreCSI() []ChecklistItem {
 		{"Disable managed Filestore CSI driver addon (if enabled)", containsAny("Disabling managed", "GcpFilestoreCsiDriver=DISABLED", "Updating [", snapshot.FilestoreAddonOffLine)},
 		{"Configure Service Account & IAM Bindings", contains("Configuring Service Account")},
 		{"Apply Kustomize overlay", contains("Applying Substrate Filestore CSI Driver Overlay")},
+		{"Check the service account holds roles/file.editor", contains(snapshot.FilestoreGrantCheckLine)},
 	}
 }
 

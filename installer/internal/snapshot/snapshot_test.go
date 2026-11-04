@@ -2245,6 +2245,8 @@ func TestFilestoreScriptChecksTheAPIBeforeChangingAnything(t *testing.T) {
 		"GcpFilestoreCsiDriver=DISABLED",
 		FilestoreAddonOffLine,
 		"./deploy.sh --project-id",
+		"FILESTORE_GSA=substrate-filestore-csi@'acme'.iam.gserviceaccount.com",
+		"gcloud projects get-iam-policy",
 	} {
 		i := strings.Index(script, want)
 		if i < 0 {
@@ -2257,6 +2259,97 @@ func TestFilestoreScriptChecksTheAPIBeforeChangingAnything(t *testing.T) {
 	}
 	if strings.Index(script, "gcloud") < strings.Index(script, "kubectl get crd") {
 		t.Errorf("gcloud runs before the API check:\n%s", script)
+	}
+}
+
+// filestoreGrantCheck runs as written against a fake gcloud whose policy
+// answers come from a script of per-call results. deploy.sh grants
+// roles/file.editor right after creating the account and ignores the
+// failure IAM propagation causes (kubernetes-sigs/gcp-filestore-csi-driver
+// #1417), so the step reads the policy back: a grant that is there is left
+// alone; one that is missing is re-granted and read again; one that never
+// appears fails the step, naming the role, the account and the command.
+func TestFilestoreGrantCheckRegrantsAMissingRole(t *testing.T) {
+	bin := t.TempDir()
+	// Each get-iam-policy call shifts one line off FAKE_POLICIES, in a
+	// file so the count survives the subshell; add-iam-policy-binding and
+	// every other call succeed silently. sleep is a no-op so the retry's
+	// pauses do not slow the test.
+	fake := `#!/bin/bash
+echo "gcloud $*" >> "$CALLS"
+case "$*" in
+  *get-iam-policy*)
+    answer=$(head -n 1 "$POLICIES")
+    sed -i.bak '1d' "$POLICIES"
+    [ -n "$answer" ] && echo "$answer"
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(bin, "gcloud"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const gsa = "substrate-filestore-csi@acme.iam.gserviceaccount.com"
+	run := func(policies ...string) (out string, calls string, err error) {
+		dir := t.TempDir()
+		policiesFile, callsFile := filepath.Join(dir, "policies"), filepath.Join(dir, "calls")
+		if err := os.WriteFile(policiesFile, []byte(strings.Join(policies, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "-c", "set -euo pipefail\nFILESTORE_PROJECT=acme\nFILESTORE_GSA="+gsa+"\n"+filestoreGrantCheck)
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "POLICIES="+policiesFile, "CALLS="+callsFile)
+		o, err := cmd.CombinedOutput()
+		c, _ := os.ReadFile(callsFile)
+		return string(o), string(c), err
+	}
+	const (
+		read    = "gcloud projects get-iam-policy acme --flatten=bindings[].members --filter=bindings.role=roles/file.editor AND bindings.members=serviceAccount:" + gsa + " --format=value(bindings.role)"
+		regrant = "gcloud projects add-iam-policy-binding acme --member=serviceAccount:" + gsa + " --role=roles/file.editor --condition=None --format=none"
+	)
+
+	out, calls, err := run("roles/file.editor")
+	if err != nil {
+		t.Fatalf("a granted role failed the check: %v\n%s", err, out)
+	}
+	if !strings.Contains(calls, read) || strings.Contains(calls, "add-iam-policy-binding") {
+		t.Errorf("a granted role must be read once and not re-granted; calls:\n%s", calls)
+	}
+	if !strings.Contains(out, FilestoreGrantCheckLine+" ("+gsa+")...") || !strings.Contains(out, "roles/file.editor is granted to "+gsa+".") {
+		t.Errorf("a passing check does not say so:\n%s", out)
+	}
+
+	out, calls, err = run("", "roles/file.editor")
+	if err != nil {
+		t.Fatalf("a role that appeared after the re-grant failed the check: %v\n%s", err, out)
+	}
+	if n := strings.Count(calls, regrant); n != 1 {
+		t.Errorf("re-granted %d times, want 1; calls:\n%s", n, calls)
+	}
+	if n := strings.Count(calls, read); n != 2 {
+		t.Errorf("read the policy %d times, want 2; calls:\n%s", n, calls)
+	}
+	if !strings.Contains(out, "kubernetes-sigs/gcp-filestore-csi-driver#1417") || !strings.Contains(out, "attempt 1 of 6") {
+		t.Errorf("the re-grant does not say why:\n%s", out)
+	}
+
+	out, calls, err = run()
+	if err == nil {
+		t.Fatalf("a role that never appeared passed the check:\n%s", out)
+	}
+	if n := strings.Count(calls, regrant); n != 6 {
+		t.Errorf("re-granted %d times, want 6; calls:\n%s", n, calls)
+	}
+	for _, want := range []string{
+		"error: roles/file.editor is not granted to " + gsa + " on project acme after 6 attempts",
+		"cannot create volumes",
+		"gcloud projects add-iam-policy-binding acme --member=serviceAccount:" + gsa + " --role=roles/file.editor --condition=None",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure output lacks %q:\n%s", want, out)
+		}
 	}
 }
 

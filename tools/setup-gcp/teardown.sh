@@ -177,6 +177,14 @@ node_service_account() {
   echo "${NODE_GSA_NAME:-ate-gke-node}@${PROJECT_ID}.iam.gserviceaccount.com"
 }
 
+# filestore_service_account prints the Filestore CSI driver's service
+# account email, as upstream's deploy/kubernetes/overlays/substrate/deploy.sh
+# (kubernetes-sigs/gcp-filestore-csi-driver) names it when run without
+# --service-account, which is how the installer's Filestore step runs it.
+filestore_service_account() {
+  echo "substrate-filestore-csi@${PROJECT_ID}.iam.gserviceaccount.com"
+}
+
 function usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
@@ -191,6 +199,7 @@ function usage() {
   echo "  --revoke-atelet-permissions           Revoke the project-wide grants older installs gave atelet"
   echo "  --revoke-gke-node-permissions         Revoke the project-wide image pull grants older installs gave the default compute service account"
   echo "  --delete-node-service-account         Delete the GKE node service account and its project role (after the clusters that use it)"
+  echo "  --delete-filestore-service-account    Delete the Filestore CSI driver's service account and its project role (after the clusters that use it)"
   echo "  --all                                 Run every step above (reverse order of setup)"
   echo "  --delete-repository                   Delete the Artifact Registry repository and its images (not part of --all)"
   exit 1
@@ -337,6 +346,29 @@ delete_node_service_account() {
   delete_service_account "delete node service account" "$(node_service_account)"
 }
 
+# Delete the Filestore CSI driver's service account (reverse of upstream's
+# deploy.sh, which the installer's Filestore step runs; nothing in setup-gcp
+# creates it). Its project role is removed first, so no binding is left
+# naming a deleted account; deleting the account drops the
+# roles/iam.workloadIdentityUser binding deploy.sh put on it. The step runs
+# whether or not the Filestore step was taken: an account that was never
+# created counts as already deleted, and so does one left by a Filestore run
+# that failed after deploy.sh had granted the role (#114). The driver's
+# controller in a cluster still runs as the account, so --all runs this after
+# deleting the cluster, as for the node account.
+delete_filestore_service_account() {
+  require PROJECT_ID
+  echo "Deleting the Filestore CSI service account..."
+  gcloud_step "revoke Filestore CSI service account role" \
+    projects remove-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:$(filestore_service_account)" \
+    --role=roles/file.editor \
+    --condition=None \
+    --quiet \
+    --format=none
+  delete_service_account "delete Filestore CSI service account" "$(filestore_service_account)"
+}
+
 # Delete the snapshot and microVM asset buckets (Reverse of create_buckets)
 delete_snapshot_bucket() {
   require PROJECT_ID BUCKET_NAME
@@ -462,6 +494,7 @@ for arg in "$@"; do
     --delete-cluster) steps+=(delete_cluster) ;;
     --delete-dashboards) steps+=(delete_dashboards) ;;
     --delete-node-service-account) steps+=(delete_node_service_account) ;;
+    --delete-filestore-service-account) steps+=(delete_filestore_service_account) ;;
     --delete-repository)
       steps+=(delete_repository)
       delete_repository_requested=true
@@ -472,7 +505,7 @@ for arg in "$@"; do
       ;;
     --all)
       all_requested=true
-      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}" delete_node_service_account)
+      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}" delete_filestore_service_account delete_node_service_account)
       ;;
     *) usage ;;
   esac
