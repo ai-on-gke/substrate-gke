@@ -610,9 +610,10 @@ func (s *projectScreen) submit() tea.Cmd {
 		// someone else. The probes in this submit still share one fetch.
 		// This runs here in the Cmd, never on the Update goroutine.
 		s.deps.GCP.ResetToken()
-		// The token does not depend on the project: fetch it while
-		// `projects describe` runs, so the probes below find it cached
-		// instead of paying a second cold gcloud spawn after it.
+		// The token does not depend on the project: queue its fetch now,
+		// so it runs right behind `projects describe` (gcloud processes
+		// are serialized, see execx.LockGcloud) and the probes below find
+		// it cached instead of paying a cold gcloud spawn in turn.
 		go s.deps.GCP.WarmToken(context.Background())
 		msg.number, msg.err = projectNumber(ctx, pid)
 		msg.err = deadlineHit(ctx, msg.err, "looking up project "+pid)
@@ -1199,8 +1200,10 @@ type bgProbeMsg struct {
 }
 
 // bgProbes probes the substrate-ready clusters in the background, one
-// command per cluster so they run concurrently: the list renders
-// immediately and each row picks up its install badge as its result lands.
+// command per cluster: the list renders immediately and each row picks up
+// its install badge as its result lands. The Runner runs them one at a time
+// (gcloud cannot overlap itself, see execx.LockGcloud), so a foreground
+// probe of the selection queues behind the ones already started.
 // Only ready clusters — the others cannot take an install, so their state
 // decides nothing — and a probe that fails (say, kubectl cannot reach the
 // cluster) just leaves its row unbadged; selecting it still runs the

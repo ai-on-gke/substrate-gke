@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 )
 
 // RequiredBetaAPIs are the Kubernetes beta PodCertificate APIs that setup-gcp's
@@ -323,6 +325,15 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	defer c.end()
 	ctx, stop := c.bound(ctx)
 	defer stop()
+	// One gcloud at a time, installer-wide (see execx.LockGcloud): this run
+	// queues behind the Runner's commands and the other runs, the token
+	// fetch included. The wait is bounded by the caller's ctx and Close, not
+	// by cmdTimeout, which times gcloud itself.
+	release, err := execx.LockGcloud(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcloud %s: %w", strings.Join(args, " "), err)
+	}
+	defer release()
 	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gcloud", args...)

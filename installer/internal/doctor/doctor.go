@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
@@ -68,6 +69,15 @@ const probeTimeout = 30 * time.Second
 func output(ctx context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
+	if name == "gcloud" {
+		// The checks run one after another, but a re-run pressed while one
+		// is still out would overlap it; see execx.LockGcloud.
+		release, err := execx.LockGcloud(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
 	out, err := exec.CommandContext(ctx, name, args...).Output()
 	return strings.TrimSpace(string(out)), err
 }
