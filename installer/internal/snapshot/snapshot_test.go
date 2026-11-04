@@ -232,6 +232,34 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 // The wizard's in-place teardown carries the cluster in its own env, so it
 // can only ever delete from the cluster it names, never whatever context is
 // ambient — and a cluster name with a space must not split it.
+// The installer's teardowns take back the kubeconfig the install left: the
+// guard's [t] removes it after the namespace is gone, never before (the wait
+// reads it), and the pasted delete removes it only when ate-setup succeeded.
+// A failed teardown keeps it, so a retry has the cluster's credentials.
+func TestTeardownRemovesTheInstallersKubeconfig(t *testing.T) {
+	st := testSetup(t)
+	b := NewBuilder("/tmp/substrate-pin", true)
+	path := ShellQuote(KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone))
+
+	del := b.DeleteAteSystem(st.ProjectID, st.ClusterName, st.Zone)
+	script := del.Argv[len(del.Argv)-1]
+	wait, rm := strings.Index(script, "kubectl wait --for=delete namespace/ate-system"), strings.LastIndex(script, `rm -f "$KUBECONFIG"`)
+	if wait < 0 || rm < wait {
+		t.Errorf("[t] teardown does not remove the kubeconfig after the namespace wait:\n%s", script)
+	}
+	if !strings.Contains(script, "export KUBECONFIG="+path) {
+		t.Errorf("[t] teardown removes $KUBECONFIG without exporting it first:\n%s", script)
+	}
+	for name, cmd := range map[string]string{
+		"teardown":          b.TeardownCommand(st, ""),
+		"explicit teardown": b.TeardownCommand(st, "/tmp/substrate"),
+	} {
+		if !strings.Contains(cmd, "delete ate-system && rm -f "+path) {
+			t.Errorf("%s does not remove the kubeconfig after a successful delete:\n%s", name, cmd)
+		}
+	}
+}
+
 func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 	spec := NewBuilder("/tmp/substrate-pin", true).DeleteAteSystem("acme", "prod cluster", "us-west1-c")
 	script := spec.Argv[len(spec.Argv)-1]

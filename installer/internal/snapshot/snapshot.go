@@ -321,12 +321,14 @@ func (b *Builder) inEphemeralTree(command string) string {
 // KUBECONFIG names the installer's kubeconfig for the cluster (see
 // KubeconfigPath): ate-setup fetches the credentials it needs into it, as it
 // did for the install, instead of into the user's ~/.kube/config. Set on the
-// command rather than exported, it leaves the pasting shell as it was.
+// command rather than exported, it leaves the pasting shell as it was. A
+// delete that succeeds removes the file: the install left it, and nothing
+// reads it once the control plane is gone (a later install fetches anew).
 func (b *Builder) TeardownCommand(st *state.Setup, root string) string {
+	kubeconfig := ShellQuote(KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone))
 	env := fmt.Sprintf("KUBECONFIG=%s PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s KUBECTL_CONTEXT= NO_DEV_ENV=1",
-		ShellQuote(KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone)),
-		ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone))
-	del := env + " go run ./cmd/ate-setup delete ate-system"
+		kubeconfig, ShellQuote(st.ProjectID), ShellQuote(st.ClusterName), ShellQuote(st.Zone))
+	del := env + " go run ./cmd/ate-setup delete ate-system && rm -f " + kubeconfig
 	if root != "" {
 		return fmt.Sprintf("(cd %s && %s)", ShellQuote(root), del)
 	}
@@ -343,7 +345,9 @@ func (b *Builder) TeardownCommand(st *state.Setup, root string) string {
 // ate-setup returns while the namespace is still deleting, so the command
 // waits for it to actually go: the guard re-probes the moment this finishes,
 // and a probe of a half-deleted install would report — and cache — the very
-// state the teardown just removed.
+// state the teardown just removed. Last, it removes the installer's
+// kubeconfig for the cluster, as TeardownCommand does: the install left it,
+// and an install that follows fetches a fresh one.
 func (b *Builder) DeleteAteSystem(projectID, cluster, location string) execx.Spec {
 	env := fmt.Sprintf("PROJECT_ID=%s CLUSTER_NAME=%s CLUSTER_LOCATION=%s KUBECTL_CONTEXT= NO_DEV_ENV=1",
 		ShellQuote(projectID), ShellQuote(cluster), ShellQuote(location))
@@ -351,6 +355,7 @@ func (b *Builder) DeleteAteSystem(projectID, cluster, location string) execx.Spe
 	lines = append(lines,
 		env+" go run ./cmd/ate-setup delete ate-system",
 		"kubectl wait --for=delete namespace/ate-system --timeout=180s",
+		`rm -f "$KUBECONFIG"`,
 	)
 	return execx.Spec{
 		Label:   "ate-setup delete ate-system",

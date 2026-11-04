@@ -185,6 +185,40 @@ filestore_service_account() {
   echo "substrate-filestore-csi@${PROJECT_ID}.iam.gserviceaccount.com"
 }
 
+# installer_kubeconfig prints the path of the kubeconfig the substrate-gke
+# installer keeps for this cluster, <user cache dir>/substrate-gke/kubeconfig/
+# gke_<project>_<location>_<cluster>.yaml, resolving the cache dir the way
+# Go's os.UserCacheDir does: ~/Library/Caches on macOS, $XDG_CACHE_HOME or
+# ~/.cache elsewhere. Prints nothing when HOME is unset.
+installer_kubeconfig() {
+  local cache
+  if [ -z "${HOME:-}" ]; then
+    return 0
+  fi
+  case "${OSTYPE:-}" in
+    darwin*) cache="${HOME}/Library/Caches" ;;
+    *) cache="${XDG_CACHE_HOME:-${HOME}/.cache}" ;;
+  esac
+  echo "${cache}/substrate-gke/kubeconfig/gke_${PROJECT_ID}_${CLUSTER_LOCATION}_${CLUSTER_NAME}.yaml"
+}
+
+# remove_installer_kubeconfig deletes installer_kubeconfig once the cluster
+# is gone, so a destroyed cluster leaves no credential file behind on the
+# host. Best effort: the file is the installer's, not a GCP resource, so a
+# failure to remove it is reported and never fails the teardown.
+remove_installer_kubeconfig() {
+  local kubeconfig
+  kubeconfig="$(installer_kubeconfig)"
+  if [ -z "${kubeconfig}" ] || [ ! -f "${kubeconfig}" ]; then
+    return 0
+  fi
+  if rm -f "${kubeconfig}"; then
+    echo "Removed the installer's kubeconfig for the cluster: ${kubeconfig}"
+  else
+    echo "WARNING: could not remove the installer's kubeconfig for the cluster: ${kubeconfig}" >&2
+  fi
+}
+
 function usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
@@ -402,7 +436,8 @@ delete_gvisor_node_pool() {
     --quiet
 }
 
-# Delete Cluster (Reverse of create_cluster)
+# Delete Cluster (Reverse of create_cluster). Once the cluster is gone, the
+# installer's kubeconfig for it goes too (see remove_installer_kubeconfig).
 delete_cluster() {
   require PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION
   echo "Deleting GKE cluster..."
@@ -411,32 +446,35 @@ delete_cluster() {
     --location="${CLUSTER_LOCATION}" \
     --project="${PROJECT_ID}" \
     --quiet
-  if [ "${last_status}" != "gone" ]; then
+  if [ "${last_status}" = "failed" ]; then
     return 0
   fi
-  # GKE answers a wrong --location with the same NOT_FOUND as a deleted
-  # cluster. Look for the name in every location before calling it deleted.
-  local elsewhere
-  if ! elsewhere=$(gcloud container clusters list \
-      --project="${PROJECT_ID}" \
-      --filter="name=${CLUSTER_NAME}" \
-      --format="value(location)" 2>"${scratch}/list-err"); then
-    cat "${scratch}/list-err" >&2
-    # A caller may hold container.clusters.delete without
-    # container.clusters.list. Failing then would fail every re-run for a
-    # cluster that is gone, so warn instead; any other list error still fails.
-    if grep -q 'PERMISSION_DENIED' "${scratch}/list-err"; then
-      echo "WARNING: could not verify that ${CLUSTER_NAME} is absent from other locations (listing clusters was denied); treating it as deleted. If ${CLUSTER_LOCATION} is the wrong location, the cluster is still running." >&2
-    else
-      failed+=("delete cluster (could not check other locations for ${CLUSTER_NAME})")
+  if [ "${last_status}" = "gone" ]; then
+    # GKE answers a wrong --location with the same NOT_FOUND as a deleted
+    # cluster. Look for the name in every location before calling it deleted.
+    local elsewhere
+    if ! elsewhere=$(gcloud container clusters list \
+        --project="${PROJECT_ID}" \
+        --filter="name=${CLUSTER_NAME}" \
+        --format="value(location)" 2>"${scratch}/list-err"); then
+      cat "${scratch}/list-err" >&2
+      # A caller may hold container.clusters.delete without
+      # container.clusters.list. Failing then would fail every re-run for a
+      # cluster that is gone, so warn instead; any other list error still fails.
+      if grep -q 'PERMISSION_DENIED' "${scratch}/list-err"; then
+        echo "WARNING: could not verify that ${CLUSTER_NAME} is absent from other locations (listing clusters was denied); treating it as deleted. If ${CLUSTER_LOCATION} is the wrong location, the cluster is still running." >&2
+      else
+        failed+=("delete cluster (could not check other locations for ${CLUSTER_NAME})")
+        return 0
+      fi
+    elif [ -n "${elsewhere}" ]; then
+      elsewhere="$(echo ${elsewhere} | tr ' ' ',')"
+      echo "Cluster ${CLUSTER_NAME} is not in ${CLUSTER_LOCATION} but exists in: ${elsewhere}" >&2
+      failed+=("delete cluster (${CLUSTER_NAME} is in ${elsewhere}, not ${CLUSTER_LOCATION})")
+      return 0
     fi
-    return 0
   fi
-  if [ -n "${elsewhere}" ]; then
-    elsewhere="$(echo ${elsewhere} | tr ' ' ',')"
-    echo "Cluster ${CLUSTER_NAME} is not in ${CLUSTER_LOCATION} but exists in: ${elsewhere}" >&2
-    failed+=("delete cluster (${CLUSTER_NAME} is in ${elsewhere}, not ${CLUSTER_LOCATION})")
-  fi
+  remove_installer_kubeconfig
 }
 
 validate_repository_config() {
