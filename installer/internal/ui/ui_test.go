@@ -1534,9 +1534,134 @@ func (r noRecordRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx
 	return ch
 }
 
+// Outside --dry-run the form names no cluster until one is typed: the
+// install track's defaults are examples, shown as placeholders, since shown
+// as values they were submitted as a cluster nobody has.
+func TestUpgradeSourceFormStartsEmptyOutsideDryRun(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter") // upgrade track; the doctor's checks run simulated
+	app.deps.DryRun = false
+	press("enter") // doctor → installed cluster
+	scr, ok := app.cur.(*upgradeSourceScreen)
+	if !ok || scr.mode != "target" {
+		t.Fatalf("after doctor: %v %T", app.mach.Current(), app.cur)
+	}
+	for i, want := range []string{"my-project", "substrate-test", "us-west1-c"} {
+		if v, p := scr.fields[i].Value(), scr.fields[i].Placeholder; v != "" || p != want {
+			t.Errorf("field %d = %q with placeholder %q, want empty with placeholder %q", i, v, p, want)
+		}
+	}
+	if view := app.View(); !strings.Contains(view, "my-project") {
+		t.Errorf("the placeholder should show:\n%s", view)
+	}
+	press("enter", "enter", "enter")
+	if app.mach.Current() != state.UpgradeSource || scr.mode != "target" || scr.focus != 0 || scr.errText != "A project ID is required." {
+		t.Fatalf("an empty form should be refused: %v mode=%s focus=%d err=%q", app.mach.Current(), scr.mode, scr.focus, scr.errText)
+	}
+	typeText(t, app, "acme")
+	press("enter")
+	typeText(t, app, "prod")
+	press("enter")
+	typeText(t, app, "us-east1-b")
+	press("enter")
+	if app.mach.Current() != state.Images {
+		t.Fatalf("after the cluster is typed: %v mode=%s err=%q", app.mach.Current(), scr.mode, scr.errText)
+	}
+	if st := app.deps.Setup; st.ProjectID != "acme" || st.ClusterName != "prod" || st.Zone != "us-east1-b" {
+		t.Fatalf("the typed cluster was not recorded: %+v", st)
+	}
+}
+
+// With records of the installs this machine made, the screen offers them
+// newest first; a pick fills the form, and the row past them types a
+// different cluster, from empty fields.
+func TestUpgradeSourceOffersThisMachinesInstalls(t *testing.T) {
+	records := t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
+	// Named so the older sorts first by file name.
+	writeInstallRecord(t, records, "acme", "us-west1-c", "alpha", "v1.0.0", "2026-10-01T10:00:00Z")
+	writeInstallRecord(t, records, "acme", "us-east4-a", "zeta", "v1.1.0", "2026-11-01T10:00:00Z")
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter")
+	app.deps.DryRun = false
+	press("enter")
+	scr, ok := app.cur.(*upgradeSourceScreen)
+	if !ok || scr.mode != "records" || len(scr.installs) != 2 || scr.installs[0].ClusterName != "zeta" {
+		t.Fatalf("after doctor: %v %T mode=%s installs=%+v", app.mach.Current(), app.cur, scr.mode, scr.installs)
+	}
+	view := app.View()
+	if zi, ai := strings.Index(view, "zeta"), strings.Index(view, "alpha"); zi < 0 || ai < 0 || zi > ai || !strings.Contains(view, "[3] Type a different cluster") {
+		t.Fatalf("the records should be listed newest first, then the row to type one:\n%s", view)
+	}
+	// The version a record names is whatever the last deploy wrote, so a
+	// row does not show it; the real one is read off the cluster after the pick.
+	if strings.Contains(view, "v1.1.0") || strings.Contains(view, "v1.0.0") {
+		t.Fatalf("a record's row should not show the version it names:\n%s", view)
+	}
+
+	press("3", "enter") // type a different cluster
+	if scr.mode != "target" || scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" {
+		t.Fatalf("typing a different cluster should start empty: mode=%s %q %q %q", scr.mode, scr.value(0), scr.value(1), scr.value(2))
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if scr.mode != "records" || scr.cursor != 0 {
+		t.Fatalf("esc from the form should return to the records: mode=%s cursor=%d", scr.mode, scr.cursor)
+	}
+
+	pump(t, app, tea.KeyMsg{Type: tea.KeyDown})
+	pump(t, app, tea.KeyMsg{Type: tea.KeyUp})
+	press("enter") // the newest
+	if scr.mode != "target" || scr.value(0) != "acme" || scr.value(1) != "zeta" || scr.value(2) != "us-east4-a" || scr.focus != 2 {
+		t.Fatalf("picking a record should fill the form: mode=%s %q %q %q focus=%d", scr.mode, scr.value(0), scr.value(1), scr.value(2), scr.focus)
+	}
+	if view := app.View(); !strings.Contains(view, "record of zeta") {
+		t.Errorf("the form should say where its values came from:\n%s", view)
+	}
+	press("enter") // read it
+	if app.mach.Current() != state.Images {
+		t.Fatalf("after the pick: %v mode=%s err=%q", app.mach.Current(), scr.mode, scr.errText)
+	}
+	if st := app.deps.Setup; st.ProjectID != "acme" || st.ClusterName != "zeta" || st.Zone != "us-east4-a" {
+		t.Fatalf("the picked cluster was not recorded: %+v", st)
+	}
+}
+
+// writeInstallRecord writes a record like ate-setup's of an install, under
+// the records directory.
+func writeInstallRecord(t *testing.T, records, project, location, cluster, version, writtenAt string) {
+	t.Helper()
+	dir := filepath.Join(records, "installs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("apiVersion: install.ate.dev/v1alpha1\ncluster:\n  context: gke_%[1]s_%[2]s_%[3]s\n  outcome: succeeded\n  substrateVersion: %[4]s\n  writtenAt: %[5]q\ngcp:\n  clusterLocation: %[2]s\n  clusterName: %[3]s\n  projectID: %[1]s\nkind: SubstrateInstall\n",
+		project, location, cluster, version, writtenAt)
+	if err := os.WriteFile(filepath.Join(dir, "gke_"+project+"_"+location+"_"+cluster+".yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A cluster that cannot be read can still be upgraded: the installed commit
 // and version are typed in instead.
 func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.Runner = noRecordRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -1591,6 +1716,7 @@ func (r unreportedBuildRunner) Start(ctx context.Context, spec execx.Spec) <-cha
 // An API server that does not report its build sends the track to the form,
 // with a note saying why.
 func TestUpgradeTrackAsksWhenTheAPIServerCannotSay(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.Runner = unreportedBuildRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -1632,6 +1758,11 @@ func TestUpgradeTrackRefusesAnUnsupportedUpgrade(t *testing.T) {
 			}
 		}
 		press("3", "enter", "enter")
+		// The second walk finds the record the first left, and types the
+		// cluster in past it.
+		if scr := app.cur.(*upgradeSourceScreen); scr.mode == "records" {
+			press("2", "enter")
+		}
 		typeText(t, app, "acme")
 		press("enter", "enter", "enter", "m")
 		typeText(t, app, snapshot.Commit)
@@ -1731,6 +1862,7 @@ func (r *hangingRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx
 // A read that hangs can be cancelled with esc, which ends the process behind
 // it rather than leaving a late get-credentials to retarget kubectl.
 func TestUpgradeTrackCancelsAHangingRead(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	runner := &hangingRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -1779,6 +1911,7 @@ func (r failsForRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx
 // cluster whose read fails must not offer the first cluster's facts as the
 // second's.
 func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.Runner = failsForRunner{inner: execx.DryRun{Delay: time.Millisecond}, cluster: "other-cluster"}
@@ -1817,6 +1950,7 @@ func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
 // Backing out of the final screen takes its summary with it: what is printed
 // on exit describes the screen the user left from.
 func TestBackFromCompleteClearsCompleted(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")

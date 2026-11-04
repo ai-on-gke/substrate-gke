@@ -21,8 +21,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/gkeoverlay"
@@ -116,16 +118,122 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 // directory, one file per kube context. ate-setup fetched the credentials
 // itself, so the context is the one gcloud names.
 func RecordPath(st *state.Setup) (string, error) {
-	dir := os.Getenv("ATE_RECORD_DIR")
-	if dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot locate the cache directory ate-setup records installs in: %w", err)
-		}
-		dir = filepath.Join(base, "ate-setup")
+	dir, err := recordDir()
+	if err != nil {
+		return "", err
 	}
 	context := "gke_" + st.ProjectID + "_" + st.Zone + "_" + st.ClusterName
-	return filepath.Join(dir, "installs", context+".yaml"), nil
+	return filepath.Join(dir, context+".yaml"), nil
+}
+
+// recordDir is the directory ate-setup writes its install records in.
+func recordDir() (string, error) {
+	if dir := os.Getenv("ATE_RECORD_DIR"); dir != "" {
+		return filepath.Join(dir, "installs"), nil
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot locate the cache directory ate-setup records installs in: %w", err)
+	}
+	return filepath.Join(base, "ate-setup", "installs"), nil
+}
+
+// Install is one record ate-setup wrote: a cluster this machine installed
+// Substrate on, and when. The record also names a version, but every
+// `ate-setup deploy` in the upgrade runbook rewrites it with the new
+// release's, so during or after an aborted upgrade it need not be what the
+// API server runs; the upgrade flow reads that off the cluster instead.
+type Install struct {
+	ProjectID, ClusterName, Location string
+	// WrittenAt is the record's cluster.writtenAt, else the file's
+	// modification time.
+	WrittenAt time.Time
+	Path      string
+}
+
+// ListInstalls returns the records in the directory RecordPath reads,
+// newest first. A record names its cluster under gcp; one that does not is
+// read off its file name, the context gcloud names, whose three parts
+// cannot contain an underscore. A file that names no cluster either way is
+// not a record and is left out, and so is any error: the list is an offer,
+// and a machine without one types the cluster in.
+func ListInstalls() []Install {
+	dir, err := recordDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var installs []Install
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		if in, ok := readInstall(filepath.Join(dir, e.Name())); ok {
+			installs = append(installs, in)
+		}
+	}
+	slices.SortStableFunc(installs, func(a, b Install) int {
+		if c := b.WrittenAt.Compare(a.WrittenAt); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ClusterName, b.ClusterName)
+	})
+	return installs
+}
+
+// readInstall reads one record line by line, the way RecordPrebuilt and the
+// runbook's own commands do: the keys under gcp and cluster are the ones
+// it needs, and a record is flat YAML ate-setup wrote itself.
+func readInstall(path string) (Install, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Install{}, false
+	}
+	in, section := Install{Path: path}, ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, " ") {
+			section = strings.TrimSuffix(line, ":")
+			continue
+		}
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		switch section + "." + key {
+		case "gcp.projectID":
+			in.ProjectID = value
+		case "gcp.clusterName":
+			in.ClusterName = value
+		case "gcp.clusterLocation":
+			in.Location = value
+		case "cluster.writtenAt":
+			if t, err := time.Parse(time.RFC3339, value); err == nil {
+				in.WrittenAt = t
+			}
+		}
+	}
+	if in.ProjectID == "" || in.ClusterName == "" || in.Location == "" {
+		parts := strings.Split(strings.TrimSuffix(filepath.Base(path), ".yaml"), "_")
+		if len(parts) != 4 || parts[0] != "gke" || slices.Contains(parts, "") {
+			return Install{}, false
+		}
+		in.ProjectID, in.Location, in.ClusterName = parts[1], parts[2], parts[3]
+	}
+	if in.WrittenAt.IsZero() {
+		info, err := os.Stat(path)
+		if err != nil {
+			return Install{}, false
+		}
+		in.WrittenAt = info.ModTime()
+	}
+	return in, true
 }
 
 var releaseVersion = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$`)
