@@ -58,12 +58,12 @@ const (
 	// images, which have to have been built from it.
 	//
 	// It is a release commit rather than a commit of main: the commit
-	// upstream's v1.0.0-rc.1 tag names, the first release with published
-	// images (ghcr.io/agent-substrate/substrate).
+	// upstream's v1.0.0-rc.2 tag names. Releases from v1.0.0-rc.1 on publish
+	// their images (ghcr.io/agent-substrate/substrate).
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "f86fde9dfb5424c8d16f613de80469bdbef06541"
+	Commit = "e59281c766d547689482a1fce666ca3f0f6bd008"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -72,7 +72,7 @@ const (
 )
 
 // There is no default image registry yet. Upstream publishes Commit's images
-// to ghcr.io/agent-substrate/substrate at v1.0.0-rc.1, but the images step
+// to ghcr.io/agent-substrate/substrate at v1.0.0-rc.2, but the images step
 // does not offer them, so a pre-built install names the registry and tag of
 // images published for Commit, or for whatever commit it gives the images
 // step. A registry is read-only to an install: images are pulled from it and
@@ -1324,8 +1324,9 @@ func microVMEnv(base []string) []string {
 // the checkout selects how InstallMicroVMDeps stages the assets:
 // agent-substrate/substrate#2092 ported it into ate-setup (`deploy
 // sandboxconfig --sandbox-classes`) and deleted it in the same commit, so the
-// script and the flag never coexist. The pinned Commit (v1.0.0-rc.1) predates
-// #2092 and still has the script; upstream main and release-1.0 do not.
+// script and the flag never coexist. The pinned Commit (v1.0.0-rc.2) is past
+// #2092 and takes the ate-setup branch; v1.0.0-rc.1 and the older commits the
+// images step accepts still have the script.
 const legacyMicroVMScript = "hack/install-microvm-deps.sh"
 
 // microVMATESetup stages the micro-VM assets and applies the `microvm`
@@ -1362,9 +1363,9 @@ const microVMATESetup = "go run ./cmd/ate-setup deploy sandboxconfig"
 // flags, and records both sandbox classes. The script ignores them.
 //
 // TODO(#99): Drop the script branch, ARCH in microVMEnv, and the
-// sha256sum/zstd/unzip entries in doctor.MicroVMTools once Commit is past
-// agent-substrate/substrate#2092 and older commits typed into the images step
-// no longer need them.
+// sha256sum/zstd/unzip entries in doctor.MicroVMTools once the older commits
+// typed into the images step (v1.0.0-rc.1 and before) no longer need them;
+// Commit itself is past agent-substrate/substrate#2092.
 func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 	display, argv := imageArgs(st)
 	lines := kubeconfigLines(st.ProjectID, st.ClusterName, st.Zone)
@@ -1388,14 +1389,19 @@ func (b *Builder) InstallMicroVMDeps(st *state.Setup) execx.Spec {
 		DisplayIsSummary: true,
 		Argv:             b.inTree(strings.Join(lines, "\n")),
 		Env:              append(env, sandboxClassesEnv(state.SandboxGVisor, state.SandboxMicroVM)),
-		// The dry run follows the pinned Commit, which still has the script.
+		// The dry run follows the pinned Commit, which is past #2092: the
+		// lines are ate-setup's, which assembles both architectures and
+		// stages them under microvm-assets/.
 		SimLines: append(b.fetchSimLines(),
-			"Staging with: "+legacyMicroVMScript+" --install",
-			"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
-			"[install-microvm-deps]: Uploading assets to gs://"+st.BucketName+"-assets/kata-assets/ ...",
-			"[install-microvm-deps]: Applying microvm SandboxConfig from manifests/microvm/sandboxconfig-microvm.yaml.tmpl...",
-			"sandboxconfig.ate.dev/microvm created",
-			"[install-microvm-deps]: Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm).",
+			"Staging with: "+microVMATESetup+display,
+			"[step]: deploy_sandboxconfig",
+			"[step]: prepare_microvm_deps",
+			"Assembling microVM assets into bin/microvm-assets/amd64 (arch=amd64)...",
+			"Assembling microVM assets into bin/microvm-assets/arm64 (arch=arm64)...",
+			"Uploading assets to gs://"+st.BucketName+"-assets/microvm-assets/ ...",
+			"[step]: deploy_microvm_sandboxconfig",
+			"Applying microvm SandboxConfig from manifests/ate-install/sandboxconfig-microvm.yaml.tmpl...",
+			"Done. Installed cluster-wide microvm SandboxConfig.",
 		),
 	}
 }

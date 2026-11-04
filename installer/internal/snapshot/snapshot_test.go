@@ -400,8 +400,8 @@ func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 }
 
 // Runs the branch the micro-VM staging step takes under real bash, with go
-// and the script stubbed, in a tree with upstream's shell installer (the
-// pinned rc.1) and one without it (core main, from
+// and the script stubbed, in a tree with upstream's shell installer (up to
+// v1.0.0-rc.1) and one without it (the pinned v1.0.0-rc.2, from
 // agent-substrate/substrate#2092 on).
 func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
@@ -453,6 +453,42 @@ func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 			}
 			if got := strings.TrimSpace(string(out)); got != tc.announce {
 				t.Errorf("printed %q, want %q", got, tc.announce)
+			}
+		})
+	}
+}
+
+// The dry run replays the path the pinned Commit takes. v1.0.0-rc.2 is past
+// agent-substrate/substrate#2092, so it must announce ate-setup, with the
+// image flags of a pre-built install, print the phases the checklist keys
+// off (see steps.MicroVMDeps), and never mention the script.
+func TestInstallMicroVMDepsDryRunFollowsThePin(t *testing.T) {
+	b := NewBuilder(fakeCheckout(t), false)
+	for name, tc := range map[string]struct {
+		st       *state.Setup
+		announce string
+	}{
+		"source":    {testSetup(t), "Staging with: " + microVMATESetup},
+		"pre-built": {prebuiltSetup(t), "Staging with: " + microVMATESetup + " --image-repo " + testImageRepo + " --image-tag " + testImageTag},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.st.SandboxClass = state.SandboxMicroVM
+			lines := b.InstallMicroVMDeps(tc.st).SimLines
+			if !slices.Contains(lines, tc.announce) {
+				t.Errorf("dry run does not announce %q:\n%s", tc.announce, strings.Join(lines, "\n"))
+			}
+			out := strings.Join(lines, "\n")
+			for _, want := range []string{
+				"Assembling microVM assets",
+				"Uploading assets to gs://" + tc.st.BucketName + "-assets/microvm-assets/",
+				"Applying microvm SandboxConfig",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("dry run missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "install-microvm-deps") || strings.Contains(out, "kata-assets") {
+				t.Errorf("dry run replays the pre-#2092 script, which the pin no longer has:\n%s", out)
 			}
 		})
 	}
@@ -2431,7 +2467,7 @@ exit 0
 
 // filestoreAPICheck runs as written against a fake kubectl. A cluster that
 // serves only v1 must fail an overlay written against v1alpha1 — upstream's
-// state at the v1.0.0-rc.1 pin — naming both versions and saying nothing was
+// state from v1.0.0-rc.1 on, the pin included — naming both versions and saying nothing was
 // changed; pass an overlay on v1, or a cluster that still serves both; and
 // fail a cluster without the CRD.
 func TestFilestoreAPICheckComparesTheOverlayWithTheCluster(t *testing.T) {
