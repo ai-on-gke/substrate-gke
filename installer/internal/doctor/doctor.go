@@ -301,7 +301,7 @@ func gkeAuthPluginFix(sdkRoot string) string {
 // always-checked ones on trees older than the pin: sha256sum, zstd and unzip
 // for upstream's asset scripts up to v1.0.0-rc.1, and make and jq for the demo
 // on older trees such as v0.1.0. Trees from agent-substrate/substrate#2092 on,
-// the pinned v1.0.0-rc.2 included, stage assets in ate-setup and need none of
+// the pinned v1.0.0-rc.3 included, stage assets in ate-setup and need none of
 // them; see the TODO on snapshot.InstallMicroVMDeps.
 var MicroVMTools = []string{"sha256sum", "zstd", "unzip", "jq", "make"}
 

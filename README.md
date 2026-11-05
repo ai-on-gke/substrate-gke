@@ -138,13 +138,14 @@ points at them. How it stages them depends on the Substrate tree:
   the assets for amd64 and uploads them under `kata-assets/` (in the snapshot bucket up
   to Substrate v0.5.0, in `<bucket>-assets` after).
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
-  on** (v1.0.0-rc.2, the current pin, and upstream `main` and `release-1.0`):
-  `ate-setup deploy sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm`
-  downloads the assets for both amd64 and arm64 and uploads them with `gcloud` to
-  `<bucket>-assets` under `microvm-assets/<arch>/<sha256>`. It passes the control-plane
-  step's settings and image flags too, because every ate-setup deploy replaces the
-  install record that `--upgrade` reads. The control-plane step passes
-  `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a gVisor-only install stages nothing.
+  on** (v1.0.0-rc.2 and later, v1.0.0-rc.3 being the current pin, and upstream `main`
+  and `release-1.0`): `ate-setup deploy sandboxconfig` with
+  `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets for both amd64 and
+  arm64 and uploads them with `gcloud` to `<bucket>-assets` under
+  `microvm-assets/<arch>/<sha256>`. It passes the control-plane step's settings and image
+  flags too, because every ate-setup deploy replaces the install record that `--upgrade`
+  reads. The control-plane step passes `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a
+  gVisor-only install stages nothing.
 
 A WorkerPool then names it in `spec.sandboxClasses`:
 
@@ -307,13 +308,13 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** | **Build from source** |
 |---|---|---|
 | **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
-| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v1.0.0-rc.2`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.2) tag | The pin, upstream's [`v1.0.0-rc.2`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.2) tag |
+| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag | The pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
 
 > [!NOTE]
 > Upstream publishes the pin's images to `ghcr.io/agent-substrate/substrate`
-> at tag `v1.0.0-rc.2`; give those as the registry and tag to install the pin
+> at tag `v1.0.0-rc.3`; give those as the registry and tag to install the pin
 > pre-built. The images step doesn't offer them by default yet. Releases don't
 > publish the demo images, so with these the counter demo step fails; skip it,
 > or build from source to run the demo. The GKE release registry
