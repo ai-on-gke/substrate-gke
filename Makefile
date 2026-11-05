@@ -88,7 +88,9 @@ substrate-pin:
 
 # MinGoVersion is a hand-maintained mirror of upstream's go.mod at Commit, and
 # nothing else notices when the two drift — a stale value makes the doctor pass
-# and the install then die mid-bootstrap. Run this after bumping the pin.
+# and the install then die mid-bootstrap. ReleaseVersion is the same kind of
+# mirror of the tag naming Commit: pre-built installs pull its images and read
+# the manifests from Commit. Run this after bumping the pin.
 .PHONY: substrate-pin-check
 substrate-pin-check:
 	@commit='$(call pin,Commit)'; pinned='$(call pin,MinGoVersion)'; \
@@ -99,4 +101,13 @@ substrate-pin-check:
 	elif [ "$$pinned" != "$$upstream" ]; then \
 		echo "substrate-pin-check: MinGoVersion is $$pinned but substrate@$$commit needs go $$upstream" >&2; exit 1; \
 	fi; \
-	echo "substrate-pin-check: MinGoVersion $$pinned matches substrate@$$commit"
+	echo "substrate-pin-check: MinGoVersion $$pinned matches substrate@$$commit"; \
+	release='$(call pin,ReleaseVersion)'; \
+	refs=$$(git ls-remote --tags https://github.com/agent-substrate/substrate.git "refs/tags/$$release" "refs/tags/$$release^{}"); \
+	tagged=$$(printf '%s\n' "$$refs" | awk '$$2 ~ /\^\{\}$$/ { print $$1; found=1; exit } { first = first ? first : $$1 } END { if (!found) print first }'); \
+	if [ -z "$$tagged" ]; then \
+		echo "substrate-pin-check: no tag $$release in agent-substrate/substrate" >&2; exit 1; \
+	elif [ "$$tagged" != "$$commit" ]; then \
+		echo "substrate-pin-check: ReleaseVersion $$release names $$tagged, not Commit $$commit" >&2; exit 1; \
+	fi; \
+	echo "substrate-pin-check: ReleaseVersion $$release names substrate@$$commit"

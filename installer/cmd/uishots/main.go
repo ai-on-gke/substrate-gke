@@ -110,11 +110,8 @@ func run(out string) (err error) {
 	w.press("enter")      // welcome → doctor
 	w.press("enter")      // doctor → images
 	w.press("1", "enter") // pre-built images
-	// There is no default registry, so the images step needs one and a tag.
-	w.paste("registry.example.com/substrate")
-	w.press("enter")
-	w.paste("v0.6.0")
-	w.press("enter", "enter")
+	// The pre-built track offers the pin's published release.
+	w.press("enter", "enter", "enter")
 	w.press("enter", "enter", "enter") // project fields
 	// The list, not one of the cluster step's panels: the create row is
 	// shown only while the list is.

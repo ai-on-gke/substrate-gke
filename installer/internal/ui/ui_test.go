@@ -96,8 +96,8 @@ func key(s string) tea.Msg {
 // step.
 const testClientID = "spiffe://cluster.local/ns/shop/sa/frontend"
 
-// testImageRepo and testImageTag stand in for a published image set. No
-// registry is published by default, so the pre-built track always types one.
+// testImageRepo and testImageTag stand in for a published image set other than
+// the release the pre-built track offers, so the walks replace its defaults.
 const (
 	testImageRepo = "registry.example.com/substrate"
 	testImageTag  = "v0.6.0"
@@ -110,11 +110,24 @@ const (
 // would otherwise push the package past go test's 10 minute default.
 func typeReleaseImages(t *testing.T, app *App) {
 	t.Helper()
+	clearField(t, app)
 	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter"))
+	clearField(t, app)
 	typeText(t, app, testImageTag)
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter"))
+}
+
+// clearField empties the images step's focused field, which the pre-built
+// track prefills with the release it offers, so text typed next replaces it.
+func clearField(t *testing.T, app *App) {
+	t.Helper()
+	scr, ok := app.cur.(*imagesScreen)
+	if !ok {
+		t.Fatalf("clearField on %T, want the images step", app.cur)
+	}
+	scr.fields[scr.focus].SetValue("")
 }
 
 func testApp(t *testing.T) *App {
@@ -1390,6 +1403,7 @@ func TestImagesScreenRejectsAMalformedTag(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
+	clearField(t, app)
 	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
 
@@ -1423,8 +1437,10 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
+	clearField(t, app)
 	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
+	clearField(t, app)
 	typeText(t, app, testImageTag)
 	pump(t, app, key("enter")) // tag → commit
 
@@ -3917,10 +3933,11 @@ func TestProvisionChecklistNamesTheSelectedCommit(t *testing.T) {
 	}
 }
 
-// No registry is published by default, so the pre-built track offers no
-// registry or tag and refuses to go on without them. Its manifest commit, like
-// the source track's revision, starts at the pin.
-func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
+// The pre-built track offers the pin's published release: upstream's release
+// registry at the release tag, with the pin as the manifest commit, like the
+// source track's revision. Cleared, the registry is refused rather than
+// guessed.
+func TestImagesScreenOffersTheReleaseAndThePin(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
@@ -3928,14 +3945,31 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 	pump(t, app, key("enter")) // pre-built images
 
 	scr := app.cur.(*imagesScreen)
-	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != snapshot.Commit {
-		t.Fatalf("pre-built fields = %q, %q, %q; want empty, empty, the pin", scr.value(0), scr.value(1), scr.value(2))
+	if scr.value(0) != snapshot.ReleaseRepo || scr.value(1) != snapshot.ReleaseVersion || scr.value(2) != snapshot.Commit {
+		t.Fatalf("pre-built fields = %q, %q, %q; want %s, %s, the pin", scr.value(0), scr.value(1), scr.value(2), snapshot.ReleaseRepo, snapshot.ReleaseVersion)
 	}
+	if v := scr.View(120); strings.Contains(v, mismatchWarning) {
+		t.Errorf("the offered release warns about its own commit:\n%s", v)
+	}
+	scr.fields[0].SetValue("")
 	pump(t, app, key("enter"))
 	pump(t, app, key("enter"))
-	pump(t, app, key("enter")) // submit with nothing typed
+	pump(t, app, key("enter")) // submit with the registry cleared
 	if app.mach.Current() != state.Images || !strings.Contains(scr.errText, "registry is required") || scr.focus != 0 {
 		t.Fatalf("an empty registry was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
+	}
+	// A mirror of the release carries the same tag, built from the same
+	// commit, so the pin's commit is right for it.
+	scr.errText = ""
+	scr.fields[0].SetValue("registry.example.com/substrate")
+	if v := scr.View(120); strings.Contains(v, mismatchWarning) {
+		t.Errorf("a mirror of the release warns about the pin's commit:\n%s", v)
+	}
+	// Another tag with the pin's commit is the mismatch the screen warns
+	// about.
+	scr.fields[1].SetValue("v0.6.0")
+	if v := scr.View(120); !strings.Contains(v, mismatchWarning) {
+		t.Errorf("another tag with the pin's commit gave no warning:\n%s", v)
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the choice
@@ -3943,6 +3977,78 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 	pump(t, app, key("enter")) // build from source
 	if got := scr.value(0); got != snapshot.Commit {
 		t.Errorf("source revision = %q, want the pin %s", got, snapshot.Commit)
+	}
+}
+
+// mismatchWarning is the images step's warning that the offered commit may
+// not be the one the given images were built from.
+const mismatchWarning = "If these images were not built from it"
+
+// The images screen is rebuilt on every entry, so the pre-built track has to
+// start from what the run already holds: coming back after typing a mirror
+// must not offer the release again, or enter-through would install from it.
+// The same goes for the commit, which would move the builder back to the pin.
+func TestImagesScreenKeepsTheTypedRegistry(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	app := testApp(t)
+	st := app.deps.Setup
+	st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: commit})
+
+	scr := newImagesScreen(app.deps)
+	scr.enterRelease()
+	if scr.value(0) != testImageRepo || scr.value(1) != testImageTag || scr.value(2) != commit {
+		t.Errorf("re-entered pre-built fields = %q, %q, %q; want %s, %s, %s", scr.value(0), scr.value(1), scr.value(2), testImageRepo, testImageTag, commit)
+	}
+}
+
+// On the upgrade track PrepareUpgrade writes the offered registry into
+// new.yaml, so a cluster installed from a mirror is offered that mirror, with
+// its tag left to the user. A record of a build from source has no registry
+// and gets the release.
+func TestImagesScreenOffersTheRecordsRegistryOnUpgrade(t *testing.T) {
+	const mirror = "us-docker.pkg.dev/acme/mirror"
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
+
+	for name, tc := range map[string]struct {
+		record    string
+		repo, tag string
+	}{
+		"mirror": {"images:\n  repo: " + mirror + "\n  tag: v0.6.0\n", mirror, ""},
+		"source": {"ko:\n  dockerRepo: us-west1-docker.pkg.dev/acme/ate-images\n", snapshot.ReleaseRepo, snapshot.ReleaseVersion},
+	} {
+		app := testApp(t)
+		st := app.deps.Setup
+		st.Upgrade = true
+		st.ProjectID, st.Zone, st.ClusterName = "acme", "us-west1-c", "ate-"+name
+		record, err := snapshot.RecordPath(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(record, []byte(tc.record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		scr := newImagesScreen(app.deps)
+		scr.enterRelease()
+		if scr.value(0) != tc.repo || scr.value(1) != tc.tag {
+			t.Errorf("%s: upgrade pre-built fields = %q, %q; want %q, %q", name, scr.value(0), scr.value(1), tc.repo, tc.tag)
+		}
+	}
+}
+
+// With --substrate-root the manifests come from the user's tree, so the
+// pre-built track has to say the images must match it: every field can stay
+// at its default and still pair that tree with the release's images.
+func TestImagesScreenSaysUnmanagedImagesMustMatchTheTree(t *testing.T) {
+	app := testApp(t) // testApp's builder is an unmanaged root
+	scr := newImagesScreen(app.deps)
+	scr.enterRelease()
+	if v := scr.View(120); !strings.Contains(v, "the images have to have been built from that tree") {
+		t.Errorf("the unmanaged-root note does not say the images must match it:\n%s", v)
 	}
 }
 

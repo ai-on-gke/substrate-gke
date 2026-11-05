@@ -308,16 +308,16 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** | **Build from source** |
 |---|---|---|
 | **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
-| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag | The pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag |
+| **Default value** | Registry `ghcr.io/agent-substrate/substrate` and tag `v1.0.0-rc.3`, the pin's release; the commit defaults to the pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag | The pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
 
 > [!NOTE]
-> Upstream publishes the pin's images to `ghcr.io/agent-substrate/substrate`
-> at tag `v1.0.0-rc.3`; give those as the registry and tag to install the pin
-> pre-built. The images step doesn't offer them by default yet. Releases don't
-> publish the demo images, so with these the counter demo step fails; skip it,
-> or build from source to run the demo. The GKE release registry
+> Upstream's release workflow publishes each release's images to
+> `ghcr.io/agent-substrate/substrate`, tagged with the release tag, and the
+> images step offers the pin's release from there. Releases don't publish the
+> demo images, so with these the counter demo step fails; skip it, or build
+> from source to run the demo. The GKE release registry
 > (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated.
 
 > [!TIP]
@@ -338,8 +338,9 @@ For source builds using the default registry, the installer creates `ate-images`
 <summary><strong>Other details worth knowing</strong> (click to expand)</summary>
 
 - `ate-setup` pins every image to the digest its tag resolves to — nothing is built or pushed for a pre-built install.
+- Coming back to the images step keeps the registry and tag you typed. On the upgrade track, a cluster installed from another registry (a mirror, say) is offered that registry rather than the release one, with the tag left for you to give.
 - The tag doubles as the Substrate version that ate-setup records. The wizard checks at the prompt that it is a valid image tag. A tag carrying its digest (`v0.1.0-gke.1@sha256:…`) is fine — the version is the tag alone.
-- For build-from-source, a checkout of your own (fork included) is installed with `--substrate-root` instead — see [How Substrate itself is obtained](#how-substrate-itself-is-obtained).
+- For build-from-source, a checkout of your own (fork included) is installed with `--substrate-root` instead — see [How Substrate itself is obtained](#how-substrate-itself-is-obtained). With pre-built images, `--substrate-root` supplies the manifests, so the images have to have been built from that tree; the default release only matches a tree at the pin.
 - Whatever you name is resolved to an exact commit *before* the install starts, and checked against the remote via a filtered shallow fetch — so a naming mismatch is caught at the prompt, not ten minutes into an install.
 
 </details>
@@ -438,7 +439,7 @@ make screenshots  # regenerate the README screenshots from the dry-run wizard
 
 ### Bumping the pinned commit
 
-This changes what fresh installs get. Edit `Commit` in `installer/internal/snapshot/snapshot.go`, and update `MinGoVersion` next to it to match the `go` directive in that revision's `go.mod`.
+This changes what fresh installs get. Edit `Commit` in `installer/internal/snapshot/snapshot.go`, update `MinGoVersion` next to it to match the `go` directive in that revision's `go.mod`, and set `ReleaseVersion` to the release tag naming the new `Commit`, whose images `ReleaseRepo` (`ghcr.io/agent-substrate/substrate`) holds.
 
 ```bash
 make substrate-pin        # print the current pinned values
@@ -448,7 +449,7 @@ make substrate-pin-check  # verify MinGoVersion against upstream's go.mod — ru
 > [!WARNING]
 > Skipping `make substrate-pin-check` after a bump lets the preflight doctor pass while the install fails mid-bootstrap.
 
-`Commit` is a default, not a limit: the images step offers it as the revision to build from and as the commit pre-built images were built from, and accepts any other revision. There is no default image registry or tag to bump with it.
+`Commit`, `ReleaseRepo` and `ReleaseVersion` are defaults, not limits: the images step offers `Commit` as the revision to build from and as the commit pre-built images were built from, offers `ReleaseRepo` and `ReleaseVersion` as the pre-built registry and tag, and accepts any other values. It warns when the registry or tag is changed but the commit is not.
 
 ## Glossary
 

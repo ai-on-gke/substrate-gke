@@ -69,15 +69,30 @@ const (
 	// prefers the real go.mod once the tree is on disk and falls back to this
 	// when checking Go before the first fetch.
 	MinGoVersion = "1.27.0"
-)
 
-// There is no default image registry yet. Upstream publishes Commit's images
-// to ghcr.io/agent-substrate/substrate at v1.0.0-rc.3, but the images step
-// does not offer them, so a pre-built install names the registry and tag of
-// images published for Commit, or for whatever commit it gives the images
-// step. A registry is read-only to an install: images are pulled from it and
-// never pushed to it, which is why installing pre-built images leaves
-// KO_DOCKER_REPO out of the picture.
+	// ReleaseRepo is where upstream's release workflow publishes the images
+	// of each release tag, every image tagged with the release tag. The
+	// images step offers it as the pre-built registry.
+	//
+	// A registry is read-only to an install: images are pulled from it and
+	// never pushed to it, which is why installing pre-built images leaves
+	// KO_DOCKER_REPO out of the picture.
+	//
+	// Releases publish the control plane, worker, credential provider and
+	// envoy-dataplane images, not the demo images, so a demo deployed with
+	// --image-repo pointing here finds no image for its workload.
+	ReleaseRepo = "ghcr.io/agent-substrate/substrate"
+
+	// ReleaseVersion is the release tag naming Commit, whose images
+	// ReleaseRepo holds; the images step offers it as the pre-built tag. It
+	// moves with Commit, because the manifests read out of that tree have to
+	// match the images this tag names. `make substrate-pin-check` fails when
+	// the tag does not name Commit.
+	//
+	// Both are defaults, not limits: the images step takes any registry and
+	// tag, along with the commit those images were built from.
+	ReleaseVersion = "v1.0.0-rc.3"
+)
 
 // TransferGSAName is the snapshot transfer service account's name: what
 // setup-gcp creates (its DefaultTransferGSAName) and what ate-setup is given
@@ -509,6 +524,10 @@ func NewBuilder(root string, managed bool) *Builder {
 	}
 	return &Builder{Root: root, Managed: managed, Version: version, repo: RepoURL, commit: Commit}
 }
+
+// SourceCommit is the commit the builder reads manifests from: Commit, or the
+// one UseSource last named.
+func (b *Builder) SourceCommit() string { return b.commit }
 
 // UseSource repoints the builder at the commit the user named in the images
 // step: a branch, a tag, or a commit of the upstream repository, which is the
