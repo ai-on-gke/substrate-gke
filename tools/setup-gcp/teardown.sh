@@ -62,11 +62,14 @@ trap 'rm -rf "${scratch}"' EXIT
 # binding does not exist, which is the state teardown wants. These are the
 # forms gcloud uses: GKE's code=404/Not found, Cloud Storage's "not found: 404",
 # "HTTPError 404" and "matched no objects", IAM's "binding ... not found!", and
-# Monitoring's NOT_FOUND. Only lines gcloud itself prints as "ERROR: ..."
-# count, so other text in the log, such as the shell's "command not found",
-# is not read as a deleted resource.
+# Monitoring's NOT_FOUND. Only what gcloud itself prints from its "ERROR: ..."
+# line on counts, so other text in the log, such as the shell's "command not
+# found", is not read as a deleted resource. The whole block from that line
+# counts, not just the line: `container clusters delete` prints "Some requests
+# did not succeed:" and puts the code=404 on the next line.
 already_gone() {
-  grep -qiE '^ERROR: .*(not found|NOT_FOUND|code=404|HTTPError 404|matched no objects)' "$1"
+  sed -n '/^ERROR: /,$p' "$1" |
+    grep -qiE 'not found|NOT_FOUND|code=404|HTTPError 404|matched no objects'
 }
 
 # bucket_gone BUCKET reports whether gs://BUCKET no longer exists. The bucket
@@ -113,6 +116,53 @@ gcloud_step() {
   fi
 }
 
+# service_account_gone EMAIL LOG reports whether a failed delete of the
+# service account EMAIL, whose output is in LOG, failed because the account is
+# gone. IAM answers a delete of an account that does not exist, or that was
+# deleted in the last 30 days and can still be undeleted, with
+# PERMISSION_DENIED "(or it may not exist)" rather than NOT_FOUND: the same
+# words as for a caller who lacks the permission on an existing account, and
+# describe gets the same answer for a deleted account. Listing the project's
+# accounts, which omits deleted ones, tells the two apart.
+service_account_gone() {
+  local email="$1" log="$2" listed
+  grep -q 'PERMISSION_DENIED: .*(or it may not exist)' "${log}" || return 1
+  if ! listed=$(gcloud iam service-accounts list \
+      --project="${PROJECT_ID}" \
+      --filter="email=${email}" \
+      --format="value(email)" 2>"${scratch}/list-err"); then
+    cat "${scratch}/list-err" >&2
+    # As for the cluster below: a caller allowed to delete accounts but not
+    # to list them must not fail every re-run, so warn instead.
+    if grep -q 'PERMISSION_DENIED' "${scratch}/list-err"; then
+      echo "WARNING: could not verify that ${email} is deleted (listing service accounts was denied); treating it as deleted. If it still exists, deleting it was denied." >&2
+      return 0
+    fi
+    return 1
+  fi
+  if [ -n "${listed}" ]; then
+    echo "Service account ${email} exists; deleting it was denied." >&2
+    return 1
+  fi
+  return 0
+}
+
+# delete_service_account STEP EMAIL deletes the service account EMAIL, as
+# gcloud_step would, with service_account_gone as a second reading of the
+# error.
+delete_service_account() {
+  local step="$1" email="$2" log="${scratch}/last"
+  if gcloud iam service-accounts delete "${email}" \
+      --project="${PROJECT_ID}" --quiet 2>&1 | tee "${log}"; then
+    return 0
+  fi
+  if already_gone "${log}" || service_account_gone "${email}" "${log}"; then
+    echo "(already deleted)"
+  else
+    failed+=("${step}")
+  fi
+}
+
 # --- Helper Functions ---
 
 # transfer_service_account prints the snapshot transfer service account's
@@ -125,6 +175,48 @@ transfer_service_account() {
 # NODE_GSA_NAME as setup-gcp builds it.
 node_service_account() {
   echo "${NODE_GSA_NAME:-ate-gke-node}@${PROJECT_ID}.iam.gserviceaccount.com"
+}
+
+# filestore_service_account prints the Filestore CSI driver's service
+# account email, as upstream's deploy/kubernetes/overlays/substrate/deploy.sh
+# (kubernetes-sigs/gcp-filestore-csi-driver) names it when run without
+# --service-account, which is how the installer's Filestore step runs it.
+filestore_service_account() {
+  echo "substrate-filestore-csi@${PROJECT_ID}.iam.gserviceaccount.com"
+}
+
+# installer_kubeconfig prints the path of the kubeconfig the substrate-gke
+# installer keeps for this cluster, <user cache dir>/substrate-gke/kubeconfig/
+# gke_<project>_<location>_<cluster>.yaml, resolving the cache dir the way
+# Go's os.UserCacheDir does: ~/Library/Caches on macOS, $XDG_CACHE_HOME or
+# ~/.cache elsewhere. Prints nothing when HOME is unset.
+installer_kubeconfig() {
+  local cache
+  if [ -z "${HOME:-}" ]; then
+    return 0
+  fi
+  case "${OSTYPE:-}" in
+    darwin*) cache="${HOME}/Library/Caches" ;;
+    *) cache="${XDG_CACHE_HOME:-${HOME}/.cache}" ;;
+  esac
+  echo "${cache}/substrate-gke/kubeconfig/gke_${PROJECT_ID}_${CLUSTER_LOCATION}_${CLUSTER_NAME}.yaml"
+}
+
+# remove_installer_kubeconfig deletes installer_kubeconfig once the cluster
+# is gone, so a destroyed cluster leaves no credential file behind on the
+# host. Best effort: the file is the installer's, not a GCP resource, so a
+# failure to remove it is reported and never fails the teardown.
+remove_installer_kubeconfig() {
+  local kubeconfig
+  kubeconfig="$(installer_kubeconfig)"
+  if [ -z "${kubeconfig}" ] || [ ! -f "${kubeconfig}" ]; then
+    return 0
+  fi
+  if rm -f "${kubeconfig}"; then
+    echo "Removed the installer's kubeconfig for the cluster: ${kubeconfig}"
+  else
+    echo "WARNING: could not remove the installer's kubeconfig for the cluster: ${kubeconfig}" >&2
+  fi
 }
 
 function usage() {
@@ -141,12 +233,17 @@ function usage() {
   echo "  --revoke-atelet-permissions           Revoke the project-wide grants older installs gave atelet"
   echo "  --revoke-gke-node-permissions         Revoke the project-wide image pull grants older installs gave the default compute service account"
   echo "  --delete-node-service-account         Delete the GKE node service account and its project role (after the clusters that use it)"
+  echo "  --delete-filestore-service-account    Delete the Filestore CSI driver's service account and its project role (after the clusters that use it)"
   echo "  --all                                 Run every step above (reverse order of setup)"
   echo "  --delete-repository                   Delete the Artifact Registry repository and its images (not part of --all)"
   exit 1
 }
 
 # --- Teardown Functions ---
+
+# The remove-iam-policy-binding steps pass --format=none: without it gcloud
+# prints the whole updated policy, hundreds of lines for a shared project,
+# naming every member. Its "Updated IAM policy" line still shows.
 
 # Revoke GKE Node Permissions (Reverse of grant_gke_node_permissions)
 revoke_gke_node_permissions() {
@@ -159,7 +256,8 @@ revoke_gke_node_permissions() {
       --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
       --role="${role}" \
       --condition=None \
-      --quiet
+      --quiet \
+      --format=none
   done
 }
 
@@ -175,7 +273,8 @@ revoke_atelet_permissions() {
       --member="${member}" \
       --role="${role}" \
       --condition=None \
-      --quiet
+      --quiet \
+      --format=none
   done
 }
 
@@ -227,7 +326,8 @@ delete_iam_policy_bindings() {
           storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
           --member="${wi}/${subject}" \
           --role="${role}" \
-          --quiet
+          --quiet \
+          --format=none
       done
     done
     local transfer
@@ -237,7 +337,8 @@ delete_iam_policy_bindings() {
         storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
         --member="${transfer}" \
         --role="${role}" \
-        --quiet
+        --quiet \
+        --format=none
     done
   fi
   if bucket_gone "${asset_bucket}"; then
@@ -247,7 +348,8 @@ delete_iam_policy_bindings() {
       storage buckets remove-iam-policy-binding "gs://${asset_bucket}" \
       --member="${wi}/atelet" \
       --role=roles/storage.objectViewer \
-      --quiet
+      --quiet \
+      --format=none
   fi
 }
 
@@ -256,9 +358,7 @@ delete_iam_policy_bindings() {
 delete_transfer_service_account() {
   require PROJECT_ID
   echo "Deleting the snapshot transfer service account..."
-  gcloud_step "delete transfer service account" \
-    iam service-accounts delete "$(transfer_service_account)" \
-    --project="${PROJECT_ID}" --quiet
+  delete_service_account "delete transfer service account" "$(transfer_service_account)"
 }
 
 # Delete the GKE node service account (Reverse of ensureNodeServiceAccount).
@@ -275,10 +375,32 @@ delete_node_service_account() {
     --member="serviceAccount:$(node_service_account)" \
     --role=roles/container.defaultNodeServiceAccount \
     --condition=None \
-    --quiet
-  gcloud_step "delete node service account" \
-    iam service-accounts delete "$(node_service_account)" \
-    --project="${PROJECT_ID}" --quiet
+    --quiet \
+    --format=none
+  delete_service_account "delete node service account" "$(node_service_account)"
+}
+
+# Delete the Filestore CSI driver's service account (reverse of upstream's
+# deploy.sh, which the installer's Filestore step runs; nothing in setup-gcp
+# creates it). Its project role is removed first, so no binding is left
+# naming a deleted account; deleting the account drops the
+# roles/iam.workloadIdentityUser binding deploy.sh put on it. The step runs
+# whether or not the Filestore step was taken: an account that was never
+# created counts as already deleted, and so does one left by a Filestore run
+# that failed after deploy.sh had granted the role (#114). The driver's
+# controller in a cluster still runs as the account, so --all runs this after
+# deleting the cluster, as for the node account.
+delete_filestore_service_account() {
+  require PROJECT_ID
+  echo "Deleting the Filestore CSI service account..."
+  gcloud_step "revoke Filestore CSI service account role" \
+    projects remove-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:$(filestore_service_account)" \
+    --role=roles/file.editor \
+    --condition=None \
+    --quiet \
+    --format=none
+  delete_service_account "delete Filestore CSI service account" "$(filestore_service_account)"
 }
 
 # Delete the snapshot and microVM asset buckets (Reverse of create_buckets)
@@ -314,7 +436,8 @@ delete_gvisor_node_pool() {
     --quiet
 }
 
-# Delete Cluster (Reverse of create_cluster)
+# Delete Cluster (Reverse of create_cluster). Once the cluster is gone, the
+# installer's kubeconfig for it goes too (see remove_installer_kubeconfig).
 delete_cluster() {
   require PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION
   echo "Deleting GKE cluster..."
@@ -323,32 +446,35 @@ delete_cluster() {
     --location="${CLUSTER_LOCATION}" \
     --project="${PROJECT_ID}" \
     --quiet
-  if [ "${last_status}" != "gone" ]; then
+  if [ "${last_status}" = "failed" ]; then
     return 0
   fi
-  # GKE answers a wrong --location with the same NOT_FOUND as a deleted
-  # cluster. Look for the name in every location before calling it deleted.
-  local elsewhere
-  if ! elsewhere=$(gcloud container clusters list \
-      --project="${PROJECT_ID}" \
-      --filter="name=${CLUSTER_NAME}" \
-      --format="value(location)" 2>"${scratch}/list-err"); then
-    cat "${scratch}/list-err" >&2
-    # A caller may hold container.clusters.delete without
-    # container.clusters.list. Failing then would fail every re-run for a
-    # cluster that is gone, so warn instead; any other list error still fails.
-    if grep -q 'PERMISSION_DENIED' "${scratch}/list-err"; then
-      echo "WARNING: could not verify that ${CLUSTER_NAME} is absent from other locations (listing clusters was denied); treating it as deleted. If ${CLUSTER_LOCATION} is the wrong location, the cluster is still running." >&2
-    else
-      failed+=("delete cluster (could not check other locations for ${CLUSTER_NAME})")
+  if [ "${last_status}" = "gone" ]; then
+    # GKE answers a wrong --location with the same NOT_FOUND as a deleted
+    # cluster. Look for the name in every location before calling it deleted.
+    local elsewhere
+    if ! elsewhere=$(gcloud container clusters list \
+        --project="${PROJECT_ID}" \
+        --filter="name=${CLUSTER_NAME}" \
+        --format="value(location)" 2>"${scratch}/list-err"); then
+      cat "${scratch}/list-err" >&2
+      # A caller may hold container.clusters.delete without
+      # container.clusters.list. Failing then would fail every re-run for a
+      # cluster that is gone, so warn instead; any other list error still fails.
+      if grep -q 'PERMISSION_DENIED' "${scratch}/list-err"; then
+        echo "WARNING: could not verify that ${CLUSTER_NAME} is absent from other locations (listing clusters was denied); treating it as deleted. If ${CLUSTER_LOCATION} is the wrong location, the cluster is still running." >&2
+      else
+        failed+=("delete cluster (could not check other locations for ${CLUSTER_NAME})")
+        return 0
+      fi
+    elif [ -n "${elsewhere}" ]; then
+      elsewhere="$(echo ${elsewhere} | tr ' ' ',')"
+      echo "Cluster ${CLUSTER_NAME} is not in ${CLUSTER_LOCATION} but exists in: ${elsewhere}" >&2
+      failed+=("delete cluster (${CLUSTER_NAME} is in ${elsewhere}, not ${CLUSTER_LOCATION})")
+      return 0
     fi
-    return 0
   fi
-  if [ -n "${elsewhere}" ]; then
-    elsewhere="$(echo ${elsewhere} | tr ' ' ',')"
-    echo "Cluster ${CLUSTER_NAME} is not in ${CLUSTER_LOCATION} but exists in: ${elsewhere}" >&2
-    failed+=("delete cluster (${CLUSTER_NAME} is in ${elsewhere}, not ${CLUSTER_LOCATION})")
-  fi
+  remove_installer_kubeconfig
 }
 
 validate_repository_config() {
@@ -406,6 +532,7 @@ for arg in "$@"; do
     --delete-cluster) steps+=(delete_cluster) ;;
     --delete-dashboards) steps+=(delete_dashboards) ;;
     --delete-node-service-account) steps+=(delete_node_service_account) ;;
+    --delete-filestore-service-account) steps+=(delete_filestore_service_account) ;;
     --delete-repository)
       steps+=(delete_repository)
       delete_repository_requested=true
@@ -416,7 +543,7 @@ for arg in "$@"; do
       ;;
     --all)
       all_requested=true
-      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}" delete_node_service_account)
+      steps+=(delete_dashboards delete_iam_policy_bindings delete_transfer_service_account revoke_atelet_permissions revoke_gke_node_permissions "${buckets_and_cluster[@]}" delete_filestore_service_account delete_node_service_account)
       ;;
     *) usage ;;
   esac

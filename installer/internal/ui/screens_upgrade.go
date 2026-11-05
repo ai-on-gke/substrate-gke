@@ -17,12 +17,15 @@ package ui
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/theme"
 )
 
@@ -35,12 +38,18 @@ import (
 // typed in.
 type upgradeSourceScreen struct {
 	deps *Deps
-	// mode: "target" (project, cluster, location), "reading", "manual".
-	mode   string
-	fields []textinput.Model
-	labels []string
-	focus  int
-	comp   *execComp
+	// mode: "records" (this machine's install records to pick from),
+	// "target" (project, cluster, location), "reading", "manual".
+	mode string
+	// installs are ate-setup's records of the clusters this machine
+	// installed Substrate on, newest first; cursor is the row chosen among
+	// them, one past the last for typing a different cluster.
+	installs []snapshot.Install
+	cursor   int
+	fields   []textinput.Model
+	labels   []string
+	focus    int
+	comp     *execComp
 	// parsed marks the read's output as consumed: the component keeps
 	// reporting ok on later ticks, and the probe must be applied once.
 	parsed  bool
@@ -51,7 +60,7 @@ type upgradeSourceScreen struct {
 var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 func newUpgradeSourceScreen(deps *Deps) *upgradeSourceScreen {
-	s := &upgradeSourceScreen{deps: deps}
+	s := &upgradeSourceScreen{deps: deps, installs: snapshot.ListInstalls()}
 	s.enterTarget()
 	return s
 }
@@ -69,6 +78,8 @@ func (s *upgradeSourceScreen) Stop() {
 
 func (s *upgradeSourceScreen) Hints() []Hint {
 	switch s.mode {
+	case "records":
+		return []Hint{{"↑/↓", "choose"}, {"enter", "pick"}, {"esc", "back"}}
 	case "reading":
 		if s.comp != nil && s.comp.failed != nil {
 			return []Hint{{"r", "retry"}, {"m", "describe the installed Substrate by hand"}, {"b", "back"}}
@@ -78,16 +89,79 @@ func (s *upgradeSourceScreen) Hints() []Hint {
 	return []Hint{{"tab/↓", "next field"}, {"enter", "confirm"}, {"esc", "back"}}
 }
 
+// enterTarget starts naming the cluster: from this machine's install
+// records when it has any, else by typing it in.
 func (s *upgradeSourceScreen) enterTarget() tea.Cmd {
+	s.mode, s.cursor, s.errText, s.note, s.comp, s.fields = "records", 0, "", "", nil, nil
+	if len(s.installs) == 0 {
+		return s.typeTarget()
+	}
+	return nil
+}
+
+// typeTarget opens the form for a cluster typed in. Its fields start
+// empty, with examples as placeholders: the install track's defaults name
+// no cluster of the user's, and shown as values they were submitted as
+// one. A cluster already named here — by a read backed out of — is kept,
+// and so are the defaults under --dry-run, which scripts the walk through
+// them.
+func (s *upgradeSourceScreen) typeTarget() tea.Cmd {
 	st := s.deps.Setup
-	s.mode, s.focus, s.errText, s.note, s.comp = "target", 0, "", "", nil
+	s.note = ""
+	if s.deps.DryRun || st.ProjectID != "" {
+		return s.enterForm(st.ProjectID, st.ClusterName, st.Zone, 0)
+	}
+	return s.enterForm("", "", "", 0)
+}
+
+// pick fills the form from the record under the cursor, focused on its
+// last field so one enter reads the cluster, or opens it for typing from
+// the row past the records.
+func (s *upgradeSourceScreen) pick() tea.Cmd {
+	if s.cursor >= len(s.installs) {
+		return s.typeTarget()
+	}
+	in := s.installs[s.cursor]
+	s.note = fmt.Sprintf("From this machine's record of %s, written %s. Press enter to read the cluster, or edit the fields.", in.ClusterName, writtenOn(in))
+	return s.enterForm(in.ProjectID, in.ClusterName, in.Location, 2)
+}
+
+// enterForm shows the project, cluster and location fields with the values
+// given, focused on field focus.
+func (s *upgradeSourceScreen) enterForm(project, cluster, zone string, focus int) tea.Cmd {
+	s.mode, s.focus, s.errText, s.comp = "target", focus, "", nil
 	s.labels = []string{"Project ID", "Cluster name", "Cluster location"}
 	s.fields = []textinput.Model{
-		newInput(st.ProjectID, "my-project"),
-		newInput(st.ClusterName, "substrate-test"),
-		newInput(st.Zone, "us-west1-c"),
+		newInput(project, "my-project"),
+		newInput(cluster, "substrate-test"),
+		newInput(zone, "us-west1-c"),
 	}
-	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
+	return tea.Batch(s.fields[focus].Focus(), textinput.Blink)
+}
+
+// writtenOn is when a record was written, in the local time zone.
+func writtenOn(in snapshot.Install) string {
+	return in.WrittenAt.Local().Format("2 Jan 2006 15:04")
+}
+
+// installRows lists the records as aligned columns: the cluster first,
+// since it is what the user is looking for, then where it is and when the
+// record was written. The version the record names is not shown: the
+// runbook's deploys rewrite it before the API server runs the new release,
+// and the screen reads the real one off the cluster after the pick.
+func (s *upgradeSourceScreen) installRows() []string {
+	var cluster, project, location int
+	for _, in := range s.installs {
+		cluster, project = max(cluster, len(in.ClusterName)), max(project, len(in.ProjectID))
+		location = max(location, len(in.Location))
+	}
+	index := len(fmt.Sprintf("[%d]", len(s.installs)+1))
+	rows := make([]string, len(s.installs))
+	for i, in := range s.installs {
+		rows[i] = fmt.Sprintf("%-*s %-*s  %-*s  %-*s  %s", index, fmt.Sprintf("[%d]", i+1),
+			cluster, in.ClusterName, project, in.ProjectID, location, in.Location, writtenOn(in))
+	}
+	return rows
 }
 
 // enterManual asks for the installed commit and version.
@@ -184,6 +258,22 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 	switch s.mode {
+	case "records":
+		switch k := key.String(); k {
+		case "esc":
+			return goBack
+		case "up", "k":
+			s.cursor = max(s.cursor-1, 0)
+		case "down", "j":
+			s.cursor = min(s.cursor+1, len(s.installs))
+		case "enter":
+			return s.pick()
+		default:
+			if n, err := strconv.Atoi(k); err == nil && n >= 1 && n <= len(s.installs)+1 {
+				s.cursor = n - 1
+			}
+		}
+		return nil
 	case "reading":
 		switch key.String() {
 		case "r":
@@ -206,7 +296,7 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "esc":
-		if s.mode == "manual" {
+		if s.mode == "manual" || len(s.installs) > 0 {
 			return s.enterTarget()
 		}
 		return goBack
@@ -230,10 +320,22 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 
 func (s *upgradeSourceScreen) View(w int) string {
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Choose the installed cluster") + "\n")
+	b.WriteString(theme.Title.Render(state.UpgradeSource.Title()) + "\n")
 	b.WriteString(theme.Subtle.Render("The cluster to upgrade, and the Substrate it runs today.") + "\n\n")
 
 	switch s.mode {
+	case "records":
+		b.WriteString(theme.Subtle.Render("Clusters this machine installed Substrate on, newest first.") + "\n\n")
+		rows := append(s.installRows(), fmt.Sprintf("[%d] Type a different cluster", len(s.installs)+1))
+		for i, row := range rows {
+			row = truncateTo(row, w-4)
+			if i == s.cursor {
+				b.WriteString(theme.Selected.Render(" "+row+" ") + "\n")
+			} else {
+				b.WriteString(theme.Subtle.Render("  "+row) + "\n")
+			}
+		}
+		return b.String()
 	case "reading":
 		b.WriteString(s.comp.view(w))
 		if s.comp.failed != nil {
@@ -256,6 +358,8 @@ func (s *upgradeSourceScreen) View(w int) string {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
 	case s.mode == "manual" && s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
+	case s.note != "":
+		b.WriteString(theme.Subtle.Width(w - 4).Render(s.note))
 	case s.mode == "manual":
 		b.WriteString(theme.Subtle.Render("The running API server prints both for --version: the version first, then the\ncommit the images were built from."))
 	default:
@@ -406,16 +510,41 @@ func (s *upgradePlanScreen) View(w int) string {
 }
 
 // handOver renders the upgrade hand-over: the runbook as the next step, and
-// the line to run in a panel of its own, at full width because a wrapped
-// line is copied short, with the notes under it.
+// the line to run in a panel of its own, at full width, with the notes under
+// it. A line the panel cannot hold whole is broken at its && joins (see
+// handOverLines) rather than wrapped by the renderer, which breaks inside a
+// word and copies short.
 func handOver(deps *Deps, w int) string {
 	st, builder := deps.Setup, deps.Builder
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Next: run this in the shell you upgrade from, then follow the upgrade runbook from step 1") + "\n")
 	b.WriteString(theme.Accent.Render("  "+builder.RunbookURL()) + "\n\n")
-	b.WriteString(theme.AccentPanel.Width(w-4).Render(builder.UpgradeShellLine(st)) + "\n")
+	inner := w - 4 - theme.AccentPanel.GetHorizontalFrameSize()
+	b.WriteString(theme.AccentPanel.Width(w-4).Render(handOverLines(builder.UpgradeShellLine(st), inner)) + "\n")
 	for _, note := range builder.UpgradeNotes(st) {
 		b.WriteString("\n" + theme.Warning.Width(w-4).Render(note) + "\n")
 	}
 	return b.String()
+}
+
+// handOverLines breaks a hand-over line wider than width at its " && "
+// joins, every line but the last ending in the && that continues it, so the
+// lines paste as the one command and no line ends inside a word. A line
+// that fits is returned as it is; the exit summary prints it whole either
+// way.
+func handOverLines(line string, width int) string {
+	var lines []string
+	cur := ""
+	for _, part := range strings.Split(line, " && ") {
+		switch {
+		case cur == "":
+			cur = part
+		case lipgloss.Width(cur+" && "+part+" &&") <= width:
+			cur += " && " + part
+		default:
+			lines = append(lines, cur+" &&")
+			cur = "  " + part
+		}
+	}
+	return strings.Join(append(lines, cur), "\n")
 }

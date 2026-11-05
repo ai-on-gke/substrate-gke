@@ -21,6 +21,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/monitoring/dashboard/apiv1/dashboardpb"
 	"google.golang.org/api/option"
@@ -52,6 +53,23 @@ type fakeDashboards struct {
 	// the dashboard, so the etag the caller just read is out of date.
 	bumpBeforeUpdate int
 	updates          []string
+	// fail, when set, is asked before each RPC, by method name, for an
+	// error to fail it with; nil lets the RPC proceed.
+	fail  func(method string) error
+	calls map[string]int
+}
+
+// failing returns the error fail wants for method, if any, and counts the
+// call. Callers hold f.mu.
+func (f *fakeDashboards) failing(method string) error {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[method]++
+	if f.fail == nil {
+		return nil
+	}
+	return f.fail(method)
 }
 
 func newFakeDashboards(t *testing.T) *fakeDashboards {
@@ -87,6 +105,9 @@ func (f *fakeDashboards) add(name, displayName string) {
 func (f *fakeDashboards) ListDashboards(context.Context, *dashboardpb.ListDashboardsRequest) (*dashboardpb.ListDashboardsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.failing("ListDashboards"); err != nil {
+		return nil, err
+	}
 	resp := &dashboardpb.ListDashboardsResponse{}
 	for _, name := range f.order {
 		d := proto.Clone(f.dashboards[name]).(*dashboardpb.Dashboard)
@@ -101,6 +122,9 @@ func (f *fakeDashboards) ListDashboards(context.Context, *dashboardpb.ListDashbo
 func (f *fakeDashboards) GetDashboard(_ context.Context, req *dashboardpb.GetDashboardRequest) (*dashboardpb.Dashboard, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.failing("GetDashboard"); err != nil {
+		return nil, err
+	}
 	d, ok := f.dashboards[req.GetName()]
 	if !ok {
 		return nil, status.Error(codes.NotFound, "no such dashboard")
@@ -111,6 +135,9 @@ func (f *fakeDashboards) GetDashboard(_ context.Context, req *dashboardpb.GetDas
 func (f *fakeDashboards) UpdateDashboard(_ context.Context, req *dashboardpb.UpdateDashboardRequest) (*dashboardpb.Dashboard, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.failing("UpdateDashboard"); err != nil {
+		return nil, err
+	}
 	d := req.GetDashboard()
 	cur, ok := f.dashboards[d.GetName()]
 	if !ok {
@@ -134,6 +161,10 @@ func (f *fakeDashboards) UpdateDashboard(_ context.Context, req *dashboardpb.Upd
 
 func (f *fakeDashboards) CreateDashboard(_ context.Context, req *dashboardpb.CreateDashboardRequest) (*dashboardpb.Dashboard, error) {
 	f.mu.Lock()
+	if err := f.failing("CreateDashboard"); err != nil {
+		f.mu.Unlock()
+		return nil, err
+	}
 	name := fmt.Sprintf("projects/p/dashboards/created-%d", len(f.order))
 	f.mu.Unlock()
 	f.add(name, req.GetDashboard().GetDisplayName())
@@ -194,6 +225,100 @@ func TestCreateMonitoringDashboardsGivesUpOnRepeatedAborts(t *testing.T) {
 	err := createMonitoringDashboards(t.Context(), &Config{ProjectID: "p"})
 	if status.Code(err) != codes.Aborted {
 		t.Fatalf("createMonitoringDashboards = %v, want Aborted after %d attempts", err, dashboardUpdateAttempts)
+	}
+}
+
+// failOnce makes the named RPC fail with code the first time it is called.
+func failOnce(method string, code codes.Code) func(string) error {
+	done := false
+	return func(m string) error {
+		if m != method || done {
+			return nil
+		}
+		done = true
+		return status.Error(code, "injected")
+	}
+}
+
+// ai-on-gke/substrate-gke#115: a Monitoring call whose deadline passes, or
+// that finds the service unavailable, is retried rather than failing the
+// last step of bootstrap. DeadlineExceeded is used throughout because the
+// generated client already retries Unavailable on reads, which would hide
+// whether this code did.
+func TestCreateMonitoringDashboardsRetriesTransientErrors(t *testing.T) {
+	orig := dashboardRetryDelay
+	dashboardRetryDelay = time.Millisecond
+	t.Cleanup(func() { dashboardRetryDelay = orig })
+	for _, tc := range []struct {
+		method   string
+		code     codes.Code
+		existing bool // whether the dashboards exist, so updates run instead of creates
+	}{
+		{"ListDashboards", codes.DeadlineExceeded, true},
+		{"GetDashboard", codes.DeadlineExceeded, true},
+		{"UpdateDashboard", codes.DeadlineExceeded, true},
+		{"UpdateDashboard", codes.Unavailable, true},
+		{"CreateDashboard", codes.DeadlineExceeded, false},
+	} {
+		t.Run(fmt.Sprintf("%s %s", tc.method, tc.code), func(t *testing.T) {
+			f := newFakeDashboards(t)
+			if tc.existing {
+				for i, name := range displayNames(t) {
+					f.add(fmt.Sprintf("projects/p/dashboards/%d", i), name)
+				}
+			}
+			f.fail = failOnce(tc.method, tc.code)
+			if err := createMonitoringDashboards(t.Context(), &Config{ProjectID: "p"}); err != nil {
+				t.Fatalf("createMonitoringDashboards: %v", err)
+			}
+			if len(f.order) != len(dashboardFiles) {
+				t.Errorf("dashboards = %v, want exactly one per file", f.order)
+			}
+			if tc.existing && len(f.updates) != len(dashboardFiles) {
+				t.Errorf("updates = %v, want each dashboard updated once", f.updates)
+			}
+			// Exactly one retry: the calls one run makes, plus the failed one.
+			want := 1
+			if tc.method != "ListDashboards" {
+				want = len(dashboardFiles)
+			}
+			if got := f.calls[tc.method]; got != want+1 {
+				t.Errorf("%s called %d times, want %d", tc.method, got, want+1)
+			}
+		})
+	}
+}
+
+// A call that keeps failing gives up after dashboardCallAttempts with that
+// error, and an error a retry cannot fix is not retried at all.
+func TestCreateMonitoringDashboardsGivesUpOnPersistentErrors(t *testing.T) {
+	orig := dashboardRetryDelay
+	dashboardRetryDelay = time.Millisecond
+	t.Cleanup(func() { dashboardRetryDelay = orig })
+	for _, tc := range []struct {
+		code  codes.Code
+		calls int
+	}{
+		{codes.DeadlineExceeded, dashboardCallAttempts},
+		{codes.PermissionDenied, 1},
+	} {
+		t.Run(tc.code.String(), func(t *testing.T) {
+			f := newFakeDashboards(t)
+			f.add("projects/p/dashboards/0", displayNames(t)[0])
+			f.fail = func(m string) error {
+				if m == "UpdateDashboard" {
+					return status.Error(tc.code, "injected")
+				}
+				return nil
+			}
+			err := createMonitoringDashboards(t.Context(), &Config{ProjectID: "p"})
+			if status.Code(err) != tc.code {
+				t.Fatalf("createMonitoringDashboards = %v, want %v", err, tc.code)
+			}
+			if got := f.calls["UpdateDashboard"]; got != tc.calls {
+				t.Errorf("UpdateDashboard called %d times, want %d", got, tc.calls)
+			}
+		})
 	}
 }
 

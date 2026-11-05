@@ -16,6 +16,8 @@ package execx
 
 import (
 	"context"
+	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -53,7 +55,8 @@ func TestCleanNeutralizesTerminalControl(t *testing.T) {
 
 func TestRealStreamsOutputAndExit(t *testing.T) {
 	ch := (&Real{}).Start(context.Background(), Spec{
-		Argv: []string{"sh", "-c", `printf 'one\n\x1b[1;36mtwo\x1b[0m\n'; echo err >&2`},
+		// Octal escapes: POSIX printf (dash, the sh on Ubuntu) has no \x.
+		Argv: []string{"sh", "-c", `printf 'one\n\033[1;36mtwo\033[0m\n'; echo err >&2`},
 	})
 	var stderrLines []string
 	lines := []string{}
@@ -119,5 +122,78 @@ func TestDryRunReplaysSimLines(t *testing.T) {
 	}
 	if len(lines) != 3 || lines[1] != "a" || lines[2] != "b" {
 		t.Fatalf("lines = %v", lines)
+	}
+}
+
+// Every command Real starts holds the gcloud slot (see gcloudSlot): the
+// cluster screen starts one probe per cluster at once, and gcloud crashes
+// when two of it run together on a machine with context-aware client
+// certificates. The slot is process-wide, so two Runners share it too.
+// Each command marks itself busy with an atomic mkdir and reports when it
+// finds the mark already there.
+func TestRealRunsOneCommandAtATime(t *testing.T) {
+	dir := t.TempDir()
+	busy, overlap := dir+"/busy", dir+"/overlap"
+	script := "mkdir '" + busy + "' 2>/dev/null || touch '" + overlap + "'; sleep 0.1; rmdir '" + busy + "'"
+	runners := []*Real{{}, {}}
+	var chans []<-chan Event
+	for i := 0; i < 4; i++ {
+		chans = append(chans, runners[i%2].Start(context.Background(), Spec{Argv: []string{"sh", "-c", script}}))
+	}
+	for _, ch := range chans {
+		if _, final := collect(t, ch); final.Err != nil {
+			t.Errorf("command failed: %v", final.Err)
+		}
+	}
+	if _, err := os.Stat(overlap); err == nil {
+		t.Error("two commands ran at once")
+	}
+}
+
+// A cancelled command whose child outlives it (CommandContext kills only the
+// shell; here sleep keeps the pipe) frees the slot within slotGrace, so the
+// retry that follows is not held for the child's whole life.
+func TestRealFreesTheSlotAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	first := (&Real{}).Start(ctx, Spec{Argv: []string{"sh", "-c", "sleep 20; echo late"}})
+	time.Sleep(100 * time.Millisecond) // let it take the slot and start
+	cancel()
+
+	start := time.Now()
+	_, final := collect(t, (&Real{}).Start(context.Background(), Spec{Argv: []string{"sh", "-c", "echo next"}}))
+	if final.Err != nil {
+		t.Fatalf("retry failed: %v", final.Err)
+	}
+	if d := time.Since(start); d > slotGrace+2*time.Second {
+		t.Errorf("retry waited %v for the cancelled command's child", d)
+	}
+	select {
+	case ev := <-first:
+		if !ev.Done || ev.Err == nil {
+			t.Errorf("cancelled command reported %+v", ev)
+		}
+	default:
+		// Still draining the orphaned sleep's pipe; that is the case the
+		// grace period exists for.
+	}
+}
+
+// A command that is cancelled while queued for the slot reports the
+// cancellation rather than running once the slot frees.
+func TestRealCancelledWhileQueued(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	holder := (&Real{}).Start(ctx, Spec{Argv: []string{"sleep", "20"}})
+	time.Sleep(100 * time.Millisecond)
+
+	qctx, qcancel := context.WithCancel(context.Background())
+	queued := (&Real{}).Start(qctx, Spec{Argv: []string{"sh", "-c", "echo ran"}})
+	time.Sleep(100 * time.Millisecond)
+	qcancel()
+	lines, final := collect(t, queued)
+	if !errors.Is(final.Err, context.Canceled) || len(lines) != 0 {
+		t.Errorf("queued command: lines %v, err %v; want none and context.Canceled", lines, final.Err)
+	}
+	cancel()
+	for range holder { // a cancelled command may close without a Done event
 	}
 }

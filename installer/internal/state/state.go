@@ -98,12 +98,15 @@ func InstallOrder(demo bool) []Step {
 // cluster, asks where the new version comes from with the same images step an
 // install uses, fetches the two source trees upstream's runbook runs from, and
 // sets up ~/ate-upgrade the way the runbook does. The upgrade itself is
-// upstream's docs/upgrade.md.
+// upstream's docs/guides/upgrade.md.
 var UpgradeOrder = []Step{
 	Welcome, CheckSetup, UpgradeSource, Images, UpgradePlan, Complete,
 }
 
-// Title returns the heading shown for a step.
+// Title is a step's label in the step rail, and the name the README's step
+// table uses. The rail is 30 columns and a two-digit step's prefix takes
+// seven of them, so a title is at most 23 columns or it wraps onto a second
+// rail line (TestStepTitlesFitTheRail).
 func (s Step) Title() string {
 	switch s {
 	case Welcome:
@@ -123,9 +126,9 @@ func (s Step) Title() string {
 	case ControlPlane:
 		return "Turn on Substrate"
 	case Sandbox:
-		return "Choose your sandbox runtime"
+		return "Choose sandbox runtime"
 	case FilestoreCSI:
-		return "Install Filestore CSI driver"
+		return "Install Filestore CSI"
 	case Autoscaling:
 		return "Configure autoscaling"
 	case Demo:
@@ -133,7 +136,7 @@ func (s Step) Title() string {
 	case Complete:
 		return "Complete"
 	case UpgradeSource:
-		return "Choose the installed cluster"
+		return "Choose installed cluster"
 	case UpgradePlan:
 		return "Prepare the upgrade"
 	}
@@ -335,7 +338,14 @@ type Setup struct {
 	KoDockerRepo               string
 	ArtifactRegistryRepository string
 
+	// FilestoreCSIDeployed records that the optional Filestore step
+	// installed the driver; FilestoreCSIFailed that it was run, failed, and
+	// was skipped from the failure. Neither set means it was skipped
+	// outright. The summaries tell the three apart because a failed run may
+	// have changed things a skip never does — an IAM grant, a half-applied
+	// gcp-filestore-csi-driver namespace — and "skipped" would hide that.
 	FilestoreCSIDeployed bool
+	FilestoreCSIFailed   bool
 
 	// SandboxClass is the runtime this install sets up: SandboxGVisor or
 	// SandboxMicroVM. MicroVMDeployed records that the micro-VM assets were

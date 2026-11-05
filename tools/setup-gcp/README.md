@@ -166,7 +166,7 @@ create can only fail.
 > is safe to apply to a serving cluster. Node auto-repair, preemption and OOM
 > kills reach the same path and cannot be configured away, so treat the setting
 > as removing the scheduled risk rather than all of it. Change versions through
-> the [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md), which has you suspend
+> the [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/guides/upgrade.md), which has you suspend
 > every actor on a node at your own pace before the node moves.
 
 ```bash
@@ -497,9 +497,11 @@ not remove atelet's snapshot grants from an existing install. Run Substrate at
 a revision whose node plugin gets snapshot credentials from ate-api-server's
 credential exchange first. On an older release, removing these grants makes
 every suspend and resume fail with `403`. Remove those grants after running
-`create bucket` and `create iam`, and after rerunning
-`hack/install-microvm-deps.sh --install` if you use microVM workers, so the
-assets are in the asset bucket. `ATELET` is set as in the manual equivalent
+`create bucket` and `create iam`, and after re-staging the micro-VM assets
+if you use microVM workers (`go run ./cmd/ate-setup deploy sandboxconfig
+--sandbox-classes=gvisor,microvm` from Substrate v1.0.0-rc.2 on,
+`hack/install-microvm-deps.sh --install` before), so the assets are in the
+asset bucket. `ATELET` is set as in the manual equivalent
 above:
 
 ```bash
@@ -576,8 +578,10 @@ go -C tools/setup-gcp run . create repository --project-id <project> --region <r
 [`teardown.sh`](teardown.sh) deletes what `bootstrap` creates, in reverse
 order: dashboards, bucket IAM bindings, the snapshot transfer service
 account, project IAM bindings, the snapshot and asset buckets and their
-contents, the cluster, and then the node service account its nodes ran as.
-It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
+contents, the cluster, and then the Filestore CSI driver's service account
+(`substrate-filestore-csi`, which the installer's Filestore step creates
+through upstream's `deploy.sh` rather than `bootstrap`) and the node service
+account its nodes ran as. It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
 `CLUSTER_NAME`, `CLUSTER_LOCATION`, `BUCKET_NAME`,
 `SNAPSHOT_TRANSFER_GSA_NAME`, default `ate-snapshot-transfer`, and
 `NODE_GSA_NAME`, default `ate-gke-node`) and shells out to `gcloud`. Each step can run alone; see
@@ -588,9 +592,10 @@ It reads the same environment variables (`PROJECT_ID`, `PROJECT_NUMBER`,
 tools/setup-gcp/teardown.sh [--all|--cluster-scoped]
 ```
 
-* `--all` deletes everything, including the dashboards, the snapshot transfer
-  and node service accounts and the node service account's project role, which every
-  Substrate cluster in the project shares.
+* `--all` deletes everything, including the dashboards, the snapshot transfer,
+  Filestore CSI and node service accounts and the project roles of the last
+  two (`roles/file.editor` and `roles/container.defaultNodeServiceAccount`),
+  which every Substrate cluster in the project shares.
 * `--cluster-scoped` deletes only this cluster, its buckets and the bindings on
   them. Use it while other Substrate clusters still use the project.
 
@@ -604,8 +609,13 @@ script exits 1 with a `FAILED:` line per step. A cluster that is not found in
 since GKE answers a wrong location with the same NOT_FOUND as a deleted
 cluster. Checking other locations needs `container.clusters.list`; without
 it, teardown prints a warning and treats the cluster as deleted, so check
-`CLUSTER_LOCATION` if you see that warning. The bucket steps first check
-whether each bucket exists and skip it if it does not.
+`CLUSTER_LOCATION` if you see that warning. IAM answers the deletion of a
+service account that is already gone with `PERMISSION_DENIED ... (or it may
+not exist)`, the same words as a denied deletion of an existing account; the
+service account steps then list the project's accounts (which omits deleted
+ones) to tell the two apart, and warn in the same way when the listing is
+denied. The bucket steps first check whether each bucket exists and skip it
+if it does not.
 
 Image repositories are kept by default, including with `--all`. Add
 `--delete-repository` to delete one, setting `GCE_REGION` and optionally

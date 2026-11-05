@@ -321,24 +321,97 @@ func wrapNames(names []string, width int) []string {
 	return lines
 }
 
-// shellLines breaks a command into lines no wider than width at its " --"
-// flag boundaries, ending every line but the last with " \", so the lines can
-// be copied and run as they are. Word wrapping broke quoted values at their
-// hyphens instead. A flag wider than width gets a line of its own.
+// shellLines breaks a command into lines no wider than width, ending every
+// line but the last with " \", so the lines can be copied and run as they
+// are. Word wrapping broke quoted values at their hyphens instead, and a
+// panel re-wrapping a line wider than itself separated an option from its
+// value. Lines break between an option and the next; within one only when
+// it is wider than width, at its spaces; a single word wider than width
+// gets a line of its own.
 func shellLines(command string, width int) []string {
-	parts := strings.Split(command, " --")
 	var lines []string
-	line := parts[0]
-	for _, p := range parts[1:] {
-		p = "--" + p
-		if lipgloss.Width(line)+1+lipgloss.Width(p)+2 <= width {
-			line += " " + p
+	// A trailing comment goes on its own line above the command: it cannot
+	// follow a continuation, and it was wrapping into the command itself.
+	if i := commentStart(command); i >= 0 {
+		lines = append(lines, strings.TrimSpace(command[i:]))
+		command = strings.TrimRight(command[:i], " ")
+	}
+	// Units are an option with its values ("-a ate-demo-counter",
+	// "--project 'p'") or the command's head, so a line never separates an
+	// option from its value. A unit wider than the width is the exception,
+	// broken at its spaces.
+	var units [][]string
+	for _, word := range splitOutsideQuotes(command) {
+		if len(units) == 0 || (strings.HasPrefix(word, "-") && len(word) > 1) {
+			units = append(units, nil)
+		}
+		units[len(units)-1] = append(units[len(units)-1], word)
+	}
+	line := ""
+	add := func(s string) {
+		switch {
+		case line == "":
+			line = s
+		case lipgloss.Width(line)+1+lipgloss.Width(s)+2 <= width: // room for " \\"
+			line += " " + s
+		default:
+			lines = append(lines, line+" \\")
+			line = "  " + s
+		}
+	}
+	for _, unit := range units {
+		// Room for the continuation indent and " \\" both: a unit that fit
+		// only without the indent came out two columns wide.
+		if joined := strings.Join(unit, " "); lipgloss.Width(joined)+4 <= width || len(unit) == 1 {
+			add(joined)
 			continue
 		}
-		lines = append(lines, line+" \\")
-		line = "  " + p
+		for _, word := range unit {
+			add(word)
+		}
 	}
 	return append(lines, line)
+}
+
+// commentStart is the index of a trailing " #" comment outside single quotes,
+// or -1.
+func commentStart(command string) int {
+	quoted := false
+	for i, r := range command {
+		switch {
+		case r == '\'':
+			quoted = !quoted
+		case r == '#' && !quoted && i > 0 && command[i-1] == ' ':
+			return i
+		}
+	}
+	return -1
+}
+
+// splitOutsideQuotes splits a command at spaces that are not inside single
+// quotes, the quoting ShellQuote produces.
+func splitOutsideQuotes(command string) []string {
+	var words []string
+	var word strings.Builder
+	quoted := false
+	for _, r := range command {
+		switch {
+		case r == '\'':
+			quoted = !quoted
+			word.WriteRune(r)
+		case r == ' ' && !quoted:
+			if word.Len() > 0 {
+				words = append(words, word.String())
+				word.Reset()
+			}
+		default:
+			word.WriteRune(r)
+		}
+	}
+	if word.Len() > 0 {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 // Labels of the new-cluster fields, which submit reads back to ask GKE
@@ -537,9 +610,10 @@ func (s *projectScreen) submit() tea.Cmd {
 		// someone else. The probes in this submit still share one fetch.
 		// This runs here in the Cmd, never on the Update goroutine.
 		s.deps.GCP.ResetToken()
-		// The token does not depend on the project: fetch it while
-		// `projects describe` runs, so the probes below find it cached
-		// instead of paying a second cold gcloud spawn after it.
+		// The token does not depend on the project: queue its fetch now,
+		// so it runs right behind `projects describe` (gcloud processes
+		// are serialized, see execx.LockGcloud) and the probes below find
+		// it cached instead of paying a cold gcloud spawn in turn.
 		go s.deps.GCP.WarmToken(context.Background())
 		msg.number, msg.err = projectNumber(ctx, pid)
 		msg.err = deadlineHit(ctx, msg.err, "looking up project "+pid)
@@ -1126,8 +1200,10 @@ type bgProbeMsg struct {
 }
 
 // bgProbes probes the substrate-ready clusters in the background, one
-// command per cluster so they run concurrently: the list renders
-// immediately and each row picks up its install badge as its result lands.
+// command per cluster: the list renders immediately and each row picks up
+// its install badge as its result lands. The Runner runs them one at a time
+// (gcloud cannot overlap itself, see execx.LockGcloud), so a foreground
+// probe of the selection queues behind the ones already started.
 // Only ready clusters — the others cannot take an install, so their state
 // decides nothing — and a probe that fails (say, kubectl cannot reach the
 // cluster) just leaves its row unbadged; selecting it still runs the
@@ -1178,6 +1254,11 @@ func (s *clusterScreen) logComp() *execComp { return s.comp }
 func (s *clusterScreen) Hints() []Hint {
 	switch s.mode {
 	case "name":
+		// The bar says what [enter] does: on a listed name it selects that
+		// cluster, not create a second one (see Update).
+		if text, bad := s.nameProblem(); text != "" && !bad {
+			return []Hint{{"enter", "select the existing cluster"}, {"esc", "back to list"}}
+		}
 		return []Hint{{"enter", "create with this name"}, {"esc", "back to list"}}
 	case "probing":
 		if s.comp != nil && s.comp.failed != nil {
@@ -1187,7 +1268,9 @@ func (s *clusterScreen) Hints() []Hint {
 		}
 		return []Hint{{"esc", "cancel"}}
 	case "installed":
-		return []Hint{{"t", "tear down and reinstall"}, {"r", "re-probe"}, {"esc", "choose another"}}
+		// Squeezed, the bar hides keys from the right: re-probe goes before
+		// the way back, which goes before the destructive one.
+		return []Hint{{"t", "tear down and reinstall"}, {"esc", "choose another"}, {"r", "re-probe"}}
 	case "partial":
 		return []Hint{{"y", "continue"}, {"r", "re-probe"}, {"esc", "choose another"}}
 	case "teardown-confirm":
@@ -1200,7 +1283,72 @@ func (s *clusterScreen) Hints() []Hint {
 	case "confirm":
 		return []Hint{{"esc", "choose another"}}
 	}
-	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
+	// Last, so a squeezed bar drops it first: at 80 columns the list's
+	// "more" marker names the key too.
+	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}, {"G", "new cluster"}}
+}
+
+// aboutOne reports whether the screen is showing a panel about the cluster
+// under the cursor — the readiness confirmation, the reinstall guard, a
+// teardown — rather than the list to choose from.
+func (s *clusterScreen) aboutOne() bool {
+	switch s.mode {
+	case "confirm", "installed", "partial", "teardown-confirm", "teardown":
+		return true
+	}
+	return false
+}
+
+// exitNotes leaves the reinstall guard's cleanup commands in the terminal
+// when the wizard exits on the guard. The panel's copy is meant to be
+// copied, but it sits in a bordered panel and comes out with the border
+// characters on every line; after the alt screen closes it can be copied
+// clean. The two commands are the exit summary's two options, in its words
+// and order: cluster-scoped first, the complete teardown as the alternative.
+func (s *clusterScreen) exitNotes() []ExitNote {
+	sel, ok := s.selected()
+	if s.mode != "installed" || !ok {
+		return nil
+	}
+	// Neither command deletes an image repository: this run did not
+	// provision one, and cannot tell what else pushes to it. Nor did this
+	// run take the Filestore step, so the complete teardown's lead does not
+	// name its service account; teardown.sh deletes the account anyway when
+	// an earlier install's Filestore step created it.
+	clusterScoped, complete := snapshot.CleanupLeads(false, false)
+	project := s.deps.Setup.ProjectID
+	return []ExitNote{{
+		Lead: append([]string{
+			fmt.Sprintf("Cluster %s already runs Substrate.", sel.Name),
+			"To upgrade it, run the installer again and choose \"Upgrade an installed cluster\".",
+			"To delete it from GCP instead, one of two ways:",
+		}, clusterScoped...),
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", true),
+	}, {
+		Lead:    complete,
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", false),
+		Trail:   "(--bucket, in either: the snapshot bucket that install used)",
+	}}
+}
+
+// nameProblem is what is wrong with the name in the create prompt, shown
+// under the input as it is typed: the rule GKE would reject it for (bad, and
+// [enter] refuses it — the alternative is bootstrap failing on it minutes
+// later), or that a listed cluster already has it (not bad: [enter] then
+// selects that cluster, see Update, so the duplicate is visible before it
+// is pressed rather than a surprise after).
+func (s *clusterScreen) nameProblem() (text string, bad bool) {
+	name := strings.TrimSpace(s.nameInput.Value())
+	if err := gcp.ValidClusterName(name); err != nil {
+		msg := err.Error()
+		return strings.ToUpper(msg[:1]) + msg[1:] + ".", true
+	}
+	for _, c := range s.clusters {
+		if c.Name == name {
+			return "Already exists in " + c.Location + ": [enter] selects it from the list.", false
+		}
+	}
+	return "", false
 }
 
 // selected is the cluster under the cursor, and false on the create-new row.
@@ -1226,8 +1374,13 @@ func (s *clusterScreen) choose(c gcp.Cluster) tea.Cmd {
 }
 
 // probe checks the selection for an existing install, from cache when the
-// cluster was already probed this visit.
+// cluster was already probed this visit. A cluster below the floor is not
+// probed at all: nothing the probe could learn changes the answer, and the
+// guard it would open offers a teardown whose only sequel is the rejection.
 func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
+	if !c.SubstrateReady() {
+		return s.decide(c, snapshot.InstalledProbe{})
+	}
 	if res, ok := s.probed[c.Name+"/"+c.Location]; ok {
 		return s.decide(c, res)
 	}
@@ -1236,20 +1389,25 @@ func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
 	return s.comp.start()
 }
 
-// decide routes a probe result: a running install is blocked, a bare
-// ate-system namespace (an interrupted install — upstream's deploy is
-// documented safe to re-run) asks, and a clean cluster continues through the
-// version check.
+// decide routes a probe result: a cluster below the floor is rejected
+// whatever the probe found, a running install is blocked, a bare ate-system
+// namespace (an interrupted install — upstream's deploy is documented safe
+// to re-run) asks, and a clean cluster is chosen.
+//
+// The floor comes first because the guard's remedy — tear Substrate down and
+// install here — is refused on a cluster below the floor, so a teardown there
+// is the destructive step before the dead end. Seen on a 1.36 control plane
+// and on a 1.37 control plane with a 1.36 pool, both running Substrate.
 func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.Cmd {
 	switch {
+	case !c.SubstrateReady():
+		s.mode = "confirm"
+		return nil
 	case res.Partial():
 		s.mode = "partial"
 		return nil
 	case res.Installed:
 		s.mode, s.installedVersion = "installed", res.Version
-		return nil
-	case !c.SubstrateReady():
-		s.mode = "confirm"
 		return nil
 	}
 	return s.choose(c)
@@ -1372,7 +1530,9 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 				return nil
 			case "enter":
 				name := strings.TrimSpace(s.nameInput.Value())
-				if name == "" {
+				// A name GKE would reject stays on the prompt, which is
+				// showing why (nameProblem).
+				if _, bad := s.nameProblem(); bad {
 					return nil
 				}
 				// A listed cluster typed by name is still that cluster: it
@@ -1494,6 +1654,12 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			if s.cursor < len(s.clusters) {
 				s.cursor++
 			}
+		case "G", "end":
+			// The create row is the last, and in a busy project it is
+			// past the digit keys and, at 80×24, past the window.
+			s.cursor = len(s.clusters)
+		case "g", "home":
+			s.cursor = 0
 		case "r":
 			return s.Init()
 		case "b", "esc", "left":
@@ -1635,11 +1801,27 @@ func truncateTo(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func (s *clusterScreen) View(w int) string {
+func (s *clusterScreen) View(w int) string { return s.ViewSized(w, 0) }
+
+// ViewSized renders the screen to fit h rows, or without a limit when h is
+// 0. The list is the part that gives: it shows the window of rows that
+// holds the cursor (see listWindow), so the selection and the create row
+// can always be seen, and a panel below the list — the name prompt — keeps
+// its rows. Before this, a project with 25 clusters at 80×24 showed rows 1
+// to 15, the cursor went below them with nothing to say the list went on,
+// and the create row could never be seen.
+func (s *clusterScreen) ViewSized(w, h int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
-	// Wrapped to the content width: at 80 columns it ran past the edge.
-	b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render(fmt.Sprintf("GKE clusters in %s (via `gcloud container clusters list`).", s.deps.Setup.ProjectID)) + "\n\n")
+	if s.aboutOne() {
+		// The subtitle is about the list, and a panel about one cluster
+		// needs its rows: at 80×24 they are the difference between the
+		// guard's remedies showing and not.
+		b.WriteString("\n")
+	} else {
+		// Wrapped to the content width: at 80 columns it ran past the edge.
+		b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render(fmt.Sprintf("GKE clusters in %s (via `gcloud container clusters list`).", s.deps.Setup.ProjectID)) + "\n\n")
+	}
 
 	switch {
 	case s.loading:
@@ -1681,33 +1863,87 @@ func (s *clusterScreen) View(w int) string {
 		}
 		badges[i], shorts[i] = badge, short
 	}
-	for i, row := range clusterRows(s.clusters, badges, shorts, w-2) {
-		// The confirmation needs every row the terminal has: at 80×24 the
-		// full list leaves it a handful, and the remedy was being clamped
-		// away. While it is open the list shrinks to the row it is about.
-		if s.mode == "confirm" && i != s.cursor {
-			continue
-		}
+	rows := clusterRows(s.clusters, badges, shorts, w-2)
+	rows = append(rows, fmt.Sprintf("[%d] ＋ Create a new cluster (recommended)", len(s.clusters)+1))
+	for i, row := range rows {
 		if i == s.cursor {
-			b.WriteString(theme.Selected.Render(" "+row+" ") + "\n")
+			rows[i] = theme.Selected.Render(" " + row + " ")
 		} else {
-			b.WriteString(theme.Subtle.Render("  "+row) + "\n")
+			rows[i] = theme.Subtle.Render("  " + row)
 		}
 	}
-	createRow := fmt.Sprintf("[%d] ＋ Create a new cluster (recommended)", len(s.clusters)+1)
-	switch {
-	case s.mode == "confirm":
-	case s.cursor == len(s.clusters):
-		b.WriteString(theme.Selected.Render(" "+createRow+" ") + "\n")
-	default:
-		b.WriteString(theme.Subtle.Render("  "+createRow) + "\n")
+	cursor := s.cursor
+	if s.aboutOne() {
+		// A panel about one cluster needs every row the terminal has: at
+		// 80×24 the full list leaves it a handful, and the remedy — or the
+		// guard's cleanup command — was being clamped away. While one is
+		// open the list shrinks to the row it is about.
+		rows, cursor = rows[cursor:cursor+1], 0
 	}
+	// What goes under the list is rendered first: its rows come out of the
+	// list's budget, not the clamp, so the name prompt stays on screen.
+	tail := s.panelView(w)
+	avail := 0
+	if h > 0 {
+		avail = h - strings.Count(b.String(), "\n") - lipgloss.Height(tail)
+	}
+	top, size := listWindow(len(rows), cursor, avail)
+	if top > 0 {
+		b.WriteString(theme.Fainted.Render(fmt.Sprintf("  ↑ %d more", top)) + "\n")
+	}
+	for _, row := range rows[top : top+size] {
+		b.WriteString(row + "\n")
+	}
+	if below := len(rows) - top - size; below > 0 {
+		b.WriteString(theme.Fainted.Render(fmt.Sprintf("  ↓ %d more · [G] create a new cluster", below)) + "\n")
+	}
+	b.WriteString(tail)
+	return b.String()
+}
 
+// listWindow picks the rows of a list of total rows to show in avail lines
+// so that the cursor's row is one of them: the first row shown and how many.
+// When they all fit that is the whole list; avail of 0 or less is no limit.
+// Otherwise a line on each side that hides rows goes to a marker saying how
+// many, and the window is centred on the cursor, so the list scrolls a row
+// at a time once the cursor passes the middle.
+func listWindow(total, cursor, avail int) (top, size int) {
+	if avail <= 0 || total <= avail {
+		return 0, total
+	}
+	size = max(avail-2, 1)
+	top = min(max(cursor-size/2, 0), total-size)
+	// Only one side hides rows: its marker's line goes back to the list.
+	if top == 0 {
+		size = max(avail-1, 1)
+	} else if top+size == total {
+		size = max(avail-1, 1)
+		top = total - size
+	}
+	return top, size
+}
+
+// panelView is what the list's mode puts under it: the name prompt, the
+// probe's output, the guards and the rejection, or in list mode the note on
+// the version floor.
+func (s *clusterScreen) panelView(w int) string {
+	var b strings.Builder
 	switch s.mode {
 	case "name":
-		b.WriteString("\n" + theme.AccentPanel.Width(min(w-4, 60)).Render(
-			theme.Title.Render("New cluster name")+"\n"+s.nameInput.View()+"\n"+
-				theme.Subtle.Render("Created in "+s.deps.Setup.Zone+" by setup-gcp in the next step.")))
+		panelW := min(w-4, 60)
+		lines := []string{theme.Title.Render("New cluster name"), s.nameInput.View()}
+		// The verdict on the name goes right under it, before the note:
+		// the panel is clamped from the bottom, and the note is the line
+		// to lose.
+		if text, bad := s.nameProblem(); text != "" {
+			style := theme.Warning
+			if bad {
+				style = theme.Bad
+			}
+			lines = append(lines, lipgloss.NewStyle().Width(panelW-2).Render(style.Render(text)))
+		}
+		lines = append(lines, theme.Subtle.Render("Created in "+s.deps.Setup.Zone+" by setup-gcp in the next step."))
+		b.WriteString("\n" + theme.AccentPanel.Width(panelW).Render(strings.Join(lines, "\n")))
 	case "probing":
 		sel := s.clusters[s.cursor]
 		b.WriteString("\n" + theme.Subtle.Render(fmt.Sprintf("Checking %s for existing Substrate installation…", sel.Name)) + "\n\n")
@@ -1725,32 +1961,44 @@ func (s *clusterScreen) View(w int) string {
 		// padding), rather than broken by hand: hand-broken lines wider than
 		// the panel were re-wrapped by it into ragged half-lines, and list
 		// items lost their indent.
+		//
+		// The ways forward come first and the reasoning last: the panel is
+		// clamped from the bottom at 110×26 and 80×24, and what has to
+		// survive is the safe path, not why it is the safe path. The keys
+		// are not repeated — the bottom bar shows them, outside the clamp,
+		// and a second copy with its own wording disagreed with it — and
+		// neither are the cleanup commands: they took rows the remedies
+		// need, and exiting on this panel prints them (exitNotes), where they
+		// can be copied without the panel's borders.
 		panelW := min(w-4, 88)
 		textW := panelW - 2
 		para := lipgloss.NewStyle().Width(textW)
 		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(strings.Join([]string{
 			para.Render(theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))),
 			"",
-			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order:"),
-			hangingIndent("  • ", "The control plane and atelet roll to the new commit at once.", textW),
-			hangingIndent("  • ", "Worker pools stay on the older worker image.", textW),
-			"",
 			theme.Title.Render("Supported paths forward:"),
-			hangingIndent("  1. ", "Upgrade this cluster: exit or restart the installer and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
+			hangingIndent("  1. ", "Upgrade it: exit, run the installer again and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
+			hangingIndent("  2. ", "Tear down and reinstall: "+theme.Key.Render("[t]")+" deletes Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and the install continues here. Exiting instead prints the GCP cleanup commands, cluster-scoped and complete.", textW),
 			"",
-			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
-			"     " + strings.Join(shellLines(snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW-5), "\n     "),
-			hangingIndent("     ", "(--bucket: the snapshot bucket that install used)", textW),
-			"",
-			theme.Key.Render("[t]") + " tear down here   " + theme.Key.Render("[esc]") + " choose another   " + theme.Key.Render("[r]") + " re-probe",
+			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order: the control plane and atelet roll to the new commit at once, while worker pools stay on the older worker image."),
 		}, "\n")))
 	case "teardown-confirm":
 		sel := s.clusters[s.cursor]
+		// Wrapped by the panel; the keys are left to the bottom bar, as on
+		// the guard.
 		panelW := min(w-4, 76)
 		textW := panelW - 2
 		para := lipgloss.NewStyle().Width(textW)
+		// The prompt and its input come right after the title: the panel is
+		// clamped from the bottom, and at 80×24 they were the part cut off,
+		// so the name was typed blind and [enter] did nothing until it
+		// matched, with no reason shown. What goes last is what the guard
+		// has already said: what is kept.
 		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(strings.Join([]string{
 			theme.Warning.Render(fmt.Sprintf("Tear down Substrate on %q?", sel.Name)),
+			"",
+			"Type " + theme.Key.Render(sel.Name) + " to confirm:",
+			s.confirmInput.View(),
 			"",
 			para.Render("Runs `ate-setup delete ate-system` against the cluster. It deletes:"),
 			hangingIndent("  • ", "every actor, whether running, suspended, or crashed", textW),
@@ -1758,11 +2006,6 @@ func (s *clusterScreen) View(w int) string {
 			hangingIndent("  • ", "the control plane, the ate.dev CRDs, and the database volume", textW),
 			"",
 			para.Render("The cluster, its nodes, and the snapshot bucket are kept. The snapshots in the bucket then belong to no actor. The install then continues here."),
-			"",
-			"Type " + theme.Key.Render(sel.Name) + " to confirm:",
-			s.confirmInput.View(),
-			"",
-			theme.Key.Render("[enter]") + " tear it down   " + theme.Key.Render("[esc]") + " back",
 		}, "\n")))
 	case "teardown":
 		sel := s.clusters[s.cursor]
@@ -1770,12 +2013,11 @@ func (s *clusterScreen) View(w int) string {
 		b.WriteString(s.comp.view(w))
 	case "partial":
 		sel := s.clusters[s.cursor]
-		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 76)).Render(
-			theme.Warning.Render(fmt.Sprintf("Cluster %q has an ate-system namespace but no atelet.", sel.Name))+"\n\n"+
-				"That looks like an interrupted install or an unfinished delete, not a\n"+
-				"running Substrate. Re-running the install over it is safe: upstream's\n"+
-				"deploy steps are idempotent.\n\n"+
-				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
+		panelW := min(w-4, 76)
+		para := lipgloss.NewStyle().Width(panelW - 2)
+		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(
+			para.Render(theme.Warning.Render(fmt.Sprintf("Cluster %q has an ate-system namespace but no atelet.", sel.Name)))+"\n\n"+
+				para.Render("That looks like an interrupted install or an unfinished delete, not a running Substrate. Re-running the install over it is safe: upstream's deploy steps are idempotent.")))
 	case "confirm":
 		sel := s.clusters[s.cursor]
 		// Two outcomes, and the control plane picks which. GKE upgrades node

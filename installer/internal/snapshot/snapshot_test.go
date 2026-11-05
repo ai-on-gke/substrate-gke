@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
@@ -211,6 +212,9 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 		"CLUSTER_NAME=" + ShellQuote("substrate-test"),
 		"CLUSTER_LOCATION=" + ShellQuote("us-west1-c"),
 		"NO_DEV_ENV=1 go run ./cmd/ate-setup delete ate-system",
+		// ate-setup fetches its credentials into the installer's kubeconfig,
+		// as the install did, never into the pasting shell's.
+		"KUBECONFIG=" + ShellQuote(KubeconfigPath("acme", "substrate-test", "us-west1-c")),
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("teardown command missing %q:\n%s", want, cmd)
@@ -228,6 +232,34 @@ func TestTeardownCommandStandsAlone(t *testing.T) {
 // The wizard's in-place teardown carries the cluster in its own env, so it
 // can only ever delete from the cluster it names, never whatever context is
 // ambient — and a cluster name with a space must not split it.
+// The installer's teardowns take back the kubeconfig the install left: the
+// guard's [t] removes it after the namespace is gone, never before (the wait
+// reads it), and the pasted delete removes it only when ate-setup succeeded.
+// A failed teardown keeps it, so a retry has the cluster's credentials.
+func TestTeardownRemovesTheInstallersKubeconfig(t *testing.T) {
+	st := testSetup(t)
+	b := NewBuilder("/tmp/substrate-pin", true)
+	path := ShellQuote(KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone))
+
+	del := b.DeleteAteSystem(st.ProjectID, st.ClusterName, st.Zone)
+	script := del.Argv[len(del.Argv)-1]
+	wait, rm := strings.Index(script, "kubectl wait --for=delete namespace/ate-system"), strings.LastIndex(script, `rm -f "$KUBECONFIG"`)
+	if wait < 0 || rm < wait {
+		t.Errorf("[t] teardown does not remove the kubeconfig after the namespace wait:\n%s", script)
+	}
+	if !strings.Contains(script, "export KUBECONFIG="+path) {
+		t.Errorf("[t] teardown removes $KUBECONFIG without exporting it first:\n%s", script)
+	}
+	for name, cmd := range map[string]string{
+		"teardown":          b.TeardownCommand(st, ""),
+		"explicit teardown": b.TeardownCommand(st, "/tmp/substrate"),
+	} {
+		if !strings.Contains(cmd, "delete ate-system && rm -f "+path) {
+			t.Errorf("%s does not remove the kubeconfig after a successful delete:\n%s", name, cmd)
+		}
+	}
+}
+
 func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 	spec := NewBuilder("/tmp/substrate-pin", true).DeleteAteSystem("acme", "prod cluster", "us-west1-c")
 	script := spec.Argv[len(spec.Argv)-1]
@@ -240,7 +272,7 @@ func TestDeleteAteSystemNamesTheCluster(t *testing.T) {
 		// teardown must outlast it, or the immediate re-probe reads (and
 		// caches) the half-deleted install as still installed.
 		"kubectl wait --for=delete namespace/ate-system",
-		`export KUBECONFIG="$kubeconfig_dir/config"`,
+		"export KUBECONFIG=" + ShellQuote(KubeconfigPath("acme", "prod cluster", "us-west1-c")),
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("delete script missing %q:\n%s", want, script)
@@ -368,8 +400,8 @@ func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 }
 
 // Runs the branch the micro-VM staging step takes under real bash, with go
-// and the script stubbed, in a tree with upstream's shell installer (the
-// pinned rc.1) and one without it (core main, from
+// and the script stubbed, in a tree with upstream's shell installer (up to
+// v1.0.0-rc.1) and one without it (the pinned v1.0.0-rc.3, from
 // agent-substrate/substrate#2092 on).
 func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
@@ -426,6 +458,42 @@ func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 	}
 }
 
+// The dry run replays the path the pinned Commit takes. v1.0.0-rc.3 is past
+// agent-substrate/substrate#2092, so it must announce ate-setup, with the
+// image flags of a pre-built install, print the phases the checklist keys
+// off (see steps.MicroVMDeps), and never mention the script.
+func TestInstallMicroVMDepsDryRunFollowsThePin(t *testing.T) {
+	b := NewBuilder(fakeCheckout(t), false)
+	for name, tc := range map[string]struct {
+		st       *state.Setup
+		announce string
+	}{
+		"source":    {testSetup(t), "Staging with: " + microVMATESetup},
+		"pre-built": {prebuiltSetup(t), "Staging with: " + microVMATESetup + " --image-repo " + testImageRepo + " --image-tag " + testImageTag},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.st.SandboxClass = state.SandboxMicroVM
+			lines := b.InstallMicroVMDeps(tc.st).SimLines
+			if !slices.Contains(lines, tc.announce) {
+				t.Errorf("dry run does not announce %q:\n%s", tc.announce, strings.Join(lines, "\n"))
+			}
+			out := strings.Join(lines, "\n")
+			for _, want := range []string{
+				"Assembling microVM assets",
+				"Uploading assets to gs://" + tc.st.BucketName + "-assets/microvm-assets/",
+				"Applying microvm SandboxConfig",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("dry run missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "install-microvm-deps") || strings.Contains(out, "kata-assets") {
+				t.Errorf("dry run replays the pre-#2092 script, which the pin no longer has:\n%s", out)
+			}
+		})
+	}
+}
+
 // From agent-substrate/substrate#2092, deploy ate-system stages micro-VM
 // assets unless told otherwise. The control-plane step must keep to gVisor,
 // so micro-VM stays the opt-in sandbox step and a gVisor-only install never
@@ -467,6 +535,11 @@ func TestInstallMicroVMDepsKeepsTheControlPlaneSettings(t *testing.T) {
 // kind-local one. Both are the script's inputs rather than its defaults, so
 // an inherited ARCH or ATE_INSTALL_KIND from the operator's shell would
 // silently produce a broken install.
+//
+// The upload itself must not use gcloud's parallel composite uploads: on a
+// workstation with context-aware access enabled their worker processes fail
+// on the client certificate file, and the step dies after the download with
+// the SandboxConfig never applied (#111).
 func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
 	st := testSetup(t)
 	st.SandboxClass = state.SandboxMicroVM
@@ -474,7 +547,11 @@ func TestMicroVMDepsPinArchAndStagingTarget(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
 
 	for _, spec := range []execx.Spec{b.InstallMicroVMDeps(st), b.DeployDemo(st, "counter")} {
-		for _, want := range []string{"ARCH=amd64", "ATE_INSTALL_KIND=false"} {
+		for _, want := range []string{
+			"ARCH=amd64",
+			"ATE_INSTALL_KIND=false",
+			"CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False",
+		} {
 			if !slices.Contains(spec.Env, want) {
 				t.Errorf("%s: env missing %q:\n%v", spec.Label, want, spec.Env)
 			}
@@ -1120,6 +1197,12 @@ func TestFindSetupGCP(t *testing.T) {
 	if _, err := FindSetupGCP("", t.TempDir()); err == nil {
 		t.Error("search outside a checkout must fail")
 	}
+	// A binary run from its own directory searches from the same place
+	// twice; the message names it once.
+	outside := t.TempDir()
+	if _, err := FindSetupGCP("", outside, outside); err == nil || strings.Count(err.Error(), outside) != 1 {
+		t.Errorf("FindSetupGCP(%q, %q) = %v; want an error naming the directory once", outside, outside, err)
+	}
 
 	// This repository's own copy must pass the check, from this package's
 	// directory just as from installer/.
@@ -1129,6 +1212,21 @@ func TestFindSetupGCP(t *testing.T) {
 	}
 	if got, err := FindSetupGCP("", "."); err != nil || got != real {
 		t.Errorf("FindSetupGCP from this repository = %q, %v; want %q", got, err, real)
+	}
+}
+
+// The completion screen's verify runs in a log panel that wraps lines at
+// its width, so the listing has to be the default columns: -o wide's node
+// names and IPs made every row wrap mid-field even at 110 columns.
+// The listing is the last line of a script that first points kubectl at the
+// installer's kubeconfig, and the display is that line, the command the user
+// would type.
+func TestVerifyListsDefaultColumns(t *testing.T) {
+	b := NewBuilder(t.TempDir(), true)
+	spec := b.Verify(testSetup(t))
+	lines := strings.Split(spec.Argv[len(spec.Argv)-1], "\n")
+	if got := lines[len(lines)-1]; strings.Contains(got, "wide") || got != spec.Display {
+		t.Errorf("verify runs %q but displays %q", got, spec.Display)
 	}
 }
 
@@ -1316,6 +1414,13 @@ func TestDeploySpecs(t *testing.T) {
 	}
 	if !slices.Contains(filestore.Env, "PROJECT_ID=acme") {
 		t.Errorf("filestore env missing project ID: %v", filestore.Env)
+	}
+
+	// Verify is a script now, so it can be pointed at the installed cluster;
+	// the display stays the command the user would type.
+	verify := b.Verify(st)
+	if verify.Argv[0] != "bash" || !strings.HasSuffix(verify.Argv[2], "\nkubectl get pods -n ate-system") || verify.Display != "kubectl get pods -n ate-system" {
+		t.Errorf("verify argv = %v, display %q", verify.Argv, verify.Display)
 	}
 }
 
@@ -1677,12 +1782,13 @@ func TestRunbookURLNamesTheNewCommit(t *testing.T) {
 }
 
 // runPrepare runs PrepareUpgrade's script with home as HOME, and with gcloud
-// and go stubbed: go records its arguments in ~/go-args.
+// and go stubbed: gcloud writes the kubeconfig it was pointed at, as
+// get-credentials would, and go records its arguments in ~/go-args.
 func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	for name, body := range map[string]string{
-		"gcloud": "#!/bin/sh\n",
+		"gcloud": "#!/bin/sh\nif [ -n \"${KUBECONFIG:-}\" ]; then : > \"$KUBECONFIG\"; fi\n",
 		"go":     "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/go-args\"\n",
 	} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
@@ -1699,8 +1805,13 @@ func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
 // set-up moves new.yaml to the new registry and tag, and the hand-over sets
 // the release the runbook builds worker images from and clears any VERSION
 // that would override the tag; a rollback needs nothing from the shell.
+//
+// The set-up also fetches the cluster's credentials into ~/ate-upgrade, and
+// the hand-over points the shell's kubectl and ate-setup at that file: the
+// runbook's own block would `kubectl config use-context` instead, moving
+// the user's current context for the whole upgrade.
 func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
-	records, home := t.TempDir(), t.TempDir()
+	records, home, old, next := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	t.Setenv("ATE_RECORD_DIR", records)
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	st := testSetup(t)
@@ -1716,7 +1827,11 @@ func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	if err := os.WriteFile(record, []byte("images:\n  repo: registry.example.com/old\n  tag: v0.6.0\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runPrepare(t, b.PrepareUpgrade(st, "/trees/old", "/trees/new"), home); err != nil {
+	prepare := b.PrepareUpgrade(st, old, next)
+	if script := prepare.Argv[len(prepare.Argv)-1]; !strings.Contains(script, `KUBECONFIG="$stage/kubeconfig" gcloud container clusters get-credentials `+ShellQuote(st.ClusterName)) {
+		t.Errorf("set-up fetches credentials somewhere other than the staged ~/ate-upgrade:\n%s", script)
+	}
+	if out, err := runPrepare(t, prepare, home); err != nil {
 		t.Fatalf("set-up: %v\n%s", err, out)
 	}
 	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "new.yaml")); !strings.Contains(string(got), "  repo: "+testImageRepo+"\n  tag: v0.6.1\n") {
@@ -1725,8 +1840,20 @@ func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "old.yaml")); !strings.Contains(string(got), "  repo: registry.example.com/old\n  tag: v0.6.0\n") {
 		t.Errorf("old.yaml should stay the record:\n%s", got)
 	}
-	if line := b.UpgradeShellLine(st); line != "cd ~/ate-upgrade/new && export NEW_RELEASE=v0.6.1 && unset VERSION" {
+	kubeconfig := filepath.Join(home, "ate-upgrade", "kubeconfig")
+	if _, err := os.Stat(kubeconfig); err != nil {
+		t.Errorf("the credentials should land in ~/ate-upgrade with the rest: %v", err)
+	}
+	line := b.UpgradeShellLine(st)
+	if line != "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig && export NEW_RELEASE=v0.6.1 && unset VERSION" {
 		t.Errorf("pre-built hand-over line: %s", line)
+	}
+	// Pasted into a shell, the line has to resolve ~ in the export too.
+	paste := exec.Command("bash", "-c", line+"\nprintf '%s' \"$KUBECONFIG\"")
+	paste.Env = append(os.Environ(), "HOME="+home)
+	out, err := paste.Output()
+	if err != nil || string(out) != kubeconfig {
+		t.Errorf("the hand-over line points kubectl at %q, %v; want %q", out, err, kubeconfig)
 	}
 	if summary := b.UpgradeSummary(st); strings.Contains(summary, "export VERSION") {
 		t.Errorf("a pre-built hand-over should not export a version:\n%s", summary)
@@ -1919,8 +2046,8 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if slices.Contains(spec.SimLines, "Step 2/10: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
 				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
 			}
-			if strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {
-				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st))
+			if strings.Contains(b.CleanupCommand(st, false), "--delete-repository") != tc.create {
+				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st, false))
 			}
 		})
 	}
@@ -1939,9 +2066,14 @@ func TestCleanupCommandRepositoryOptions(t *testing.T) {
 			st := testSetup(t)
 			st.Zone = "europe-west4-a"
 			st.ArtifactRegistryRepository, st.KoDockerRepo, st.ImageRepo = tc.repository, tc.registry, tc.imageRepo
-			want := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) + tc.suffix
-			if got := b.CleanupCommand(st); got != want {
+			base := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, false)
+			if got, want := b.CleanupCommand(st, false), base+tc.suffix; got != want {
 				t.Errorf("cleanup = %q, want %q", got, want)
+			}
+			// The cluster-scoped form keeps the repository options: the
+			// repository, like the cluster, is this install's own.
+			if got, want := b.CleanupCommand(st, true), base+" --cluster-scoped"+tc.suffix; got != want {
+				t.Errorf("cluster-scoped cleanup = %q, want %q", got, want)
 			}
 		})
 	}
@@ -2010,9 +2142,11 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 	root := fakeCheckout(t)
 	b := NewBuilder(root, false)
 
+	// The lead points the shell at the cluster: the install left the user's
+	// kubeconfig alone, so the kubectl commands after it need it.
 	lead, demo := b.NextSteps(st)
 	joined := strings.Join(demo, "\n")
-	if lead != "" || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
+	if lead != KubeconfigExport(st) || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
 		t.Errorf("Envoy without a driver: lead %q, demo %v", lead, demo)
 	}
 	if note := b.RouterNote(st); !strings.Contains(note, "allowlist") || !strings.Contains(note, b.RouterAuthURL()) {
@@ -2022,7 +2156,7 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, CounterDriverDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if lead, demo = b.NextSteps(st); lead != "" || !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter -l app=counter-driver -f"}) {
+	if lead, demo = b.NextSteps(st); lead != KubeconfigExport(st) || !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter -l app=counter-driver -f"}) {
 		t.Errorf("Envoy with the driver: lead %q, demo %v", lead, demo)
 	}
 	st.SandboxClass, st.MicroVMDeployed = state.SandboxMicroVM, true
@@ -2111,7 +2245,9 @@ func TestCordonCheckScript(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			write("gcloud", "exit 0\n")
+			// The check inherits the step's KUBECONFIG; it has no
+			// credentials of its own to fetch.
+			write("gcloud", "echo \"unexpected gcloud $*\" >&2; exit 1\n")
 			kubectl := "case \"$*\" in\n"
 			for label, out := range tc.nodes {
 				kubectl += fmt.Sprintf("  *workloadType=%s*) echo %s ;;\n", label, out)
@@ -2174,7 +2310,9 @@ func TestPlacementCheckScript(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			write("gcloud", "exit 0\n")
+			// The check inherits the step's KUBECONFIG; it has no
+			// credentials of its own to fetch.
+			write("gcloud", "echo \"unexpected gcloud $*\" >&2; exit 1\n")
 			kubectl := "case \"$*\" in\n"
 			kubectl += fmt.Sprintf("  'get pods -n ate-system -l app=ate-api-server '*) printf %%s %s ;;\n", ShellQuote(tc.pods))
 			for node, label := range tc.labels {
@@ -2222,5 +2360,313 @@ func TestDeployAteSystemChecksPlacement(t *testing.T) {
 	st.SharedSystemNodes = true
 	if script := strings.Join(b.DeployAteSystem(st).Argv, " "); strings.Contains(script, "app=ate-api-server") {
 		t.Errorf("shared system nodes still check placement:\n%s", script)
+	}
+}
+
+// The Filestore step must not change anything until it knows the overlay can
+// be applied: the overlay's CSIDriverConfig is written against an API version
+// the cluster may not serve (#114), and deploy.sh grants IAM before it
+// applies. So the clone and the API check come first, and the managed addon
+// update and deploy.sh after, in that order — with no gcloud at all ahead of
+// the check.
+func TestFilestoreScriptChecksTheAPIBeforeChangingAnything(t *testing.T) {
+	script := NewBuilder(fakeCheckout(t), false).DeployFilestoreCSI(testSetup(t)).Argv[2]
+	last := -1
+	for _, want := range []string{
+		"git clone --depth 1 " + FilestoreOverlayRepo,
+		"kubectl get crd csidriverconfigs.ate.dev",
+		"gcloud container clusters describe",
+		"GcpFilestoreCsiDriver=DISABLED",
+		FilestoreAddonOffLine,
+		"./deploy.sh --project-id",
+		"FILESTORE_GSA=substrate-filestore-csi@'acme'.iam.gserviceaccount.com",
+		"gcloud projects get-iam-policy",
+	} {
+		i := strings.Index(script, want)
+		if i < 0 {
+			t.Fatalf("script lacks %q:\n%s", want, script)
+		}
+		if i < last {
+			t.Errorf("%q runs before the step that must precede it:\n%s", want, script)
+		}
+		last = i
+	}
+	// The one gcloud ahead of the check is the get-credentials that writes
+	// the installer's own kubeconfig; it touches nothing on the cluster.
+	st := testSetup(t)
+	before := strings.Replace(script[:strings.Index(script, "kubectl get crd")], getCredentials(st.ProjectID, st.ClusterName, st.Zone), "", 1)
+	if strings.Contains(before, "gcloud") {
+		t.Errorf("gcloud runs before the API check:\n%s", script)
+	}
+}
+
+// filestoreGrantCheck runs as written against a fake gcloud whose policy
+// answers come from a script of per-call results. deploy.sh grants
+// roles/file.editor right after creating the account and ignores the
+// failure IAM propagation causes (kubernetes-sigs/gcp-filestore-csi-driver
+// #1417), so the step reads the policy back: a grant that is there is left
+// alone; one that is missing is re-granted and read again; one that never
+// appears fails the step, naming the role, the account and the command.
+func TestFilestoreGrantCheckRegrantsAMissingRole(t *testing.T) {
+	bin := t.TempDir()
+	// Each get-iam-policy call shifts one line off FAKE_POLICIES, in a
+	// file so the count survives the subshell; add-iam-policy-binding and
+	// every other call succeed silently. sleep is a no-op so the retry's
+	// pauses do not slow the test.
+	fake := `#!/bin/bash
+echo "gcloud $*" >> "$CALLS"
+case "$*" in
+  *get-iam-policy*)
+    answer=$(head -n 1 "$POLICIES")
+    sed -i.bak '1d' "$POLICIES"
+    [ -n "$answer" ] && echo "$answer"
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(bin, "gcloud"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const gsa = "substrate-filestore-csi@acme.iam.gserviceaccount.com"
+	run := func(policies ...string) (out string, calls string, err error) {
+		dir := t.TempDir()
+		policiesFile, callsFile := filepath.Join(dir, "policies"), filepath.Join(dir, "calls")
+		if err := os.WriteFile(policiesFile, []byte(strings.Join(policies, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "-c", "set -euo pipefail\nFILESTORE_PROJECT=acme\nFILESTORE_GSA="+gsa+"\n"+filestoreGrantCheck)
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "POLICIES="+policiesFile, "CALLS="+callsFile)
+		o, err := cmd.CombinedOutput()
+		c, _ := os.ReadFile(callsFile)
+		return string(o), string(c), err
+	}
+	const (
+		read    = "gcloud projects get-iam-policy acme --flatten=bindings[].members --filter=bindings.role=roles/file.editor AND bindings.members=serviceAccount:" + gsa + " --format=value(bindings.role)"
+		regrant = "gcloud projects add-iam-policy-binding acme --member=serviceAccount:" + gsa + " --role=roles/file.editor --condition=None --format=none"
+	)
+
+	out, calls, err := run("roles/file.editor")
+	if err != nil {
+		t.Fatalf("a granted role failed the check: %v\n%s", err, out)
+	}
+	if !strings.Contains(calls, read) || strings.Contains(calls, "add-iam-policy-binding") {
+		t.Errorf("a granted role must be read once and not re-granted; calls:\n%s", calls)
+	}
+	if !strings.Contains(out, FilestoreGrantCheckLine+" ("+gsa+")...") || !strings.Contains(out, "roles/file.editor is granted to "+gsa+".") {
+		t.Errorf("a passing check does not say so:\n%s", out)
+	}
+
+	out, calls, err = run("", "roles/file.editor")
+	if err != nil {
+		t.Fatalf("a role that appeared after the re-grant failed the check: %v\n%s", err, out)
+	}
+	if n := strings.Count(calls, regrant); n != 1 {
+		t.Errorf("re-granted %d times, want 1; calls:\n%s", n, calls)
+	}
+	if n := strings.Count(calls, read); n != 2 {
+		t.Errorf("read the policy %d times, want 2; calls:\n%s", n, calls)
+	}
+	if !strings.Contains(out, "kubernetes-sigs/gcp-filestore-csi-driver#1417") || !strings.Contains(out, "attempt 1 of 6") {
+		t.Errorf("the re-grant does not say why:\n%s", out)
+	}
+
+	out, calls, err = run()
+	if err == nil {
+		t.Fatalf("a role that never appeared passed the check:\n%s", out)
+	}
+	if n := strings.Count(calls, regrant); n != 6 {
+		t.Errorf("re-granted %d times, want 6; calls:\n%s", n, calls)
+	}
+	for _, want := range []string{
+		"error: roles/file.editor is not granted to " + gsa + " on project acme after 6 attempts",
+		"cannot create volumes",
+		"gcloud projects add-iam-policy-binding acme --member=serviceAccount:" + gsa + " --role=roles/file.editor --condition=None",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// filestoreAPICheck runs as written against a fake kubectl. A cluster that
+// serves only v1 must fail an overlay written against v1alpha1 — upstream's
+// state from v1.0.0-rc.1 on, the pin included — naming both versions and saying nothing was
+// changed; pass an overlay on v1, or a cluster that still serves both; and
+// fail a cluster without the CRD.
+func TestFilestoreAPICheckComparesTheOverlayWithTheCluster(t *testing.T) {
+	bin := t.TempDir()
+	fake := "#!/bin/sh\n[ -n \"$FAKE_SERVED\" ] || exit 1\nprintf '%s' \"$FAKE_SERVED\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(apiVersion, served string) (string, error) {
+		overlay := t.TempDir()
+		manifest := "# Substrate CSIDriverConfig (" + apiVersion + ").\napiVersion: " + apiVersion + "\nkind: CSIDriverConfig\n"
+		if err := os.WriteFile(filepath.Join(overlay, "csi_driver_config.yaml"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "-c", "set -euo pipefail\n"+filestoreAPICheck)
+		cmd.Dir = overlay
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FAKE_SERVED="+served)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	out, err := run("ate.dev/v1alpha1", "v1 ")
+	if err == nil {
+		t.Fatalf("an overlay on v1alpha1 passed a cluster serving only v1:\n%s", out)
+	}
+	for _, want := range []string{
+		FilestoreAPICheckLine + " (ate.dev/v1alpha1)",
+		"written against ate.dev/v1alpha1, but this cluster serves csidriverconfigs.ate.dev as: v1",
+		"Nothing was changed",
+		"kubernetes-sigs/gcp-filestore-csi-driver#1416",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure output lacks %q:\n%s", want, out)
+		}
+	}
+	if out, err := run("ate.dev/v1", "v1 "); err != nil {
+		t.Errorf("an overlay on v1 failed a cluster serving v1: %v\n%s", err, out)
+	} else if !strings.Contains(out, "serves csidriverconfigs.ate.dev as: v1\n") {
+		t.Errorf("a passing check does not say what the cluster serves:\n%s", out)
+	}
+	if out, err := run("ate.dev/v1alpha1", "v1alpha1 v1 "); err != nil {
+		t.Errorf("a cluster serving both versions failed: %v\n%s", err, out)
+	}
+	if out, err := run("ate.dev/v1", ""); err == nil || !strings.Contains(out, "no csidriverconfigs.ate.dev CRD") {
+		t.Errorf("a cluster without the CRD: err=%v\n%s", err, out)
+	}
+	if out, err := run("storage.k8s.io/v1", "v1 "); err == nil || !strings.Contains(out, "could not read the CSIDriverConfig apiVersion") {
+		t.Errorf("an overlay whose CSIDriverConfig is not on ate.dev: err=%v\n%s", err, out)
+	}
+}
+
+// ListInstalls offers the records ate-setup wrote, newest first: by when
+// each says it was written, else by the file's time. A record without a
+// gcp block is read off its file name; a file that is no record is left
+// out, and so is a directory nothing was recorded in.
+func TestListInstallsOrdersRecordsNewestFirst(t *testing.T) {
+	records := t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
+	dir := filepath.Join(records, "installs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string, mtime time.Time) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !mtime.IsZero() {
+			if err := os.Chtimes(path, mtime, mtime); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write("gke_acme_us-west1-c_alpha.yaml", "cluster:\n  substrateVersion: v1.0.0\n  writtenAt: \"2026-10-01T10:00:00Z\"\n  writtenBy: ate-setup go.ate.dev/substrate.Version=(devel) commit=unknown\n    darwin/arm64\ngcp:\n  clusterLocation: us-west1-c\n  clusterName: alpha\n  projectID: acme\nkind: SubstrateInstall\n", time.Time{})
+	write("gke_acme_us-east4-a_zeta.yaml", "cluster:\n  writtenAt: \"2026-11-01T10:00:00Z\"\ngcp:\n  clusterLocation: us-east4-a\n  clusterName: zeta\n  projectID: acme\nimages:\n  repo: registry.example.com/substrate\n", time.Time{})
+	// Neither a gcp block nor writtenAt: the file's name and time stand in.
+	write("gke_other_europe-west4_byname.yaml", "kind: SubstrateInstall\n", time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC))
+	write("notes.yaml", "kind: Notes\n", time.Time{})
+	write("gke_acme_us-west1-c_alpha.txt", "", time.Time{})
+	if err := os.Mkdir(filepath.Join(dir, "gke_a_b_c.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ListInstalls()
+	var names []string
+	for _, in := range got {
+		names = append(names, in.ClusterName)
+	}
+	if want := []string{"zeta", "byname", "alpha"}; !slices.Equal(names, want) {
+		t.Fatalf("ListInstalls = %v, want %v", names, want)
+	}
+	if in := got[2]; in.ProjectID != "acme" || in.Location != "us-west1-c" ||
+		!in.WrittenAt.Equal(time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)) || in.Path != filepath.Join(dir, "gke_acme_us-west1-c_alpha.yaml") {
+		t.Errorf("alpha's record misread: %+v", in)
+	}
+	if in := got[1]; in.ProjectID != "other" || in.Location != "europe-west4" ||
+		!in.WrittenAt.Equal(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("a record without a gcp block should be read off its name and time: %+v", in)
+	}
+
+	t.Setenv("ATE_RECORD_DIR", filepath.Join(records, "missing"))
+	if got := ListInstalls(); got != nil {
+		t.Errorf("a directory nothing was recorded in should list nothing: %+v", got)
+	}
+}
+
+// Every step that reaches the cluster does so through the installer's own
+// kubeconfig for it, exported before anything that could read or write a
+// kubeconfig — kubectl, ate-setup, or a script that runs them — so the user's
+// ~/.kube/config is never written and their current context never moves.
+// It is one file for every step and for the pasted teardown, not a throwaway
+// per step: ate-setup records the KUBECONFIG it ran with, and the upgrade
+// runbook's --config reads that record back long after the step is gone.
+func TestClusterStepsUseTheInstallersKubeconfig(t *testing.T) {
+	st := testSetup(t)
+	micro := testSetup(t)
+	micro.SandboxClass, micro.MicroVMDeployed = state.SandboxMicroVM, true
+	b := NewBuilder(fakeCheckout(t), false)
+
+	path := KubeconfigPath(st.ProjectID, st.ClusterName, st.Zone)
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Named for the context gcloud writes, which also names ate-setup's record.
+	if want := filepath.Join(cache, "substrate-gke", "kubeconfig", "gke_acme_us-west1-c_substrate-test.yaml"); path != want {
+		t.Errorf("KubeconfigPath = %s, want %s", path, want)
+	}
+	export := "export KUBECONFIG=" + ShellQuote(path)
+	for _, spec := range []execx.Spec{
+		b.DeployAteSystem(st),
+		b.DeployDemo(st, "counter"),
+		b.InstallMicroVMDeps(micro),
+		b.DeployDemo(micro, "counter"),
+		b.DeployFilestoreCSI(st),
+		b.Verify(st),
+		b.DeleteAteSystem(st.ProjectID, st.ClusterName, st.Zone),
+	} {
+		script := spec.Argv[len(spec.Argv)-1]
+		at := strings.Index(script, export)
+		if at < 0 {
+			t.Errorf("%s: does not export the installer's kubeconfig:\n%s", spec.Label, script)
+			continue
+		}
+		for _, reach := range []string{"kubectl", "ate-setup", "deploy.sh", "install-ate.sh", legacyMicroVMScript} {
+			if i := strings.Index(script, reach); i >= 0 && i < at {
+				t.Errorf("%s: %q runs before the kubeconfig export:\n%s", spec.Label, reach, script)
+			}
+		}
+		if strings.Contains(script, "kubeconfig_dir") {
+			t.Errorf("%s: fetches credentials into a throwaway kubeconfig, which ate-setup would record:\n%s", spec.Label, script)
+		}
+		if err := exec.Command("bash", "-n", "-c", script).Run(); err != nil {
+			t.Errorf("%s: script is not valid shell: %v\n%s", spec.Label, err, script)
+		}
+	}
+	// The pasted teardown sets it on the command alone, so the pasting shell
+	// keeps whatever kubeconfig it had.
+	for name, cmd := range map[string]string{
+		"teardown":          b.TeardownCommand(st, ""),
+		"explicit teardown": b.TeardownCommand(st, "/tmp/substrate"),
+	} {
+		if !strings.Contains(cmd, "KUBECONFIG="+ShellQuote(path)+" PROJECT_ID=") || strings.Contains(cmd, "export") {
+			t.Errorf("%s does not name the installer's kubeconfig for ate-setup alone:\n%s", name, cmd)
+		}
+	}
+	// What the completion screen and the exit summary hand the user: the
+	// same file, and the gcloud alternative that writes their own.
+	if lead, _ := b.NextSteps(st); lead != export {
+		t.Errorf("next steps lead = %q, want %q", lead, export)
+	}
+	if got, want := GetCredentialsCommand(st), "gcloud container clusters get-credentials 'substrate-test' --location 'us-west1-c' --project 'acme'"; got != want {
+		t.Errorf("GetCredentialsCommand = %q, want %q", got, want)
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 )
 
@@ -68,6 +69,15 @@ const probeTimeout = 30 * time.Second
 func output(ctx context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
+	if name == "gcloud" {
+		// The checks run one after another, but a re-run pressed while one
+		// is still out would overlap it; see execx.LockGcloud.
+		release, err := execx.LockGcloud(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
 	out, err := exec.CommandContext(ctx, name, args...).Output()
 	return strings.TrimSpace(string(out)), err
 }
@@ -218,7 +228,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			Run: func(ctx context.Context) Result {
 				if missing := MissingMicroVMTools(); len(missing) > 0 {
 					return Result{Warn,
-						fmt.Sprintf("missing %s; needed only if you select the Micro-VM sandbox", strings.Join(missing, ", ")),
+						fmt.Sprintf("missing %s; needed only if you select the Micro-VM sandbox on a Substrate tree before v1.0.0-rc.2 (the pin stages the assets with ate-setup and needs none of them)", strings.Join(missing, ", ")),
 						// Homebrew installs coreutils g-prefixed (gsha256sum);
 						// upstream's scripts call sha256sum by name, so the
 						// gnubin directory has to be on PATH for them too.
@@ -288,10 +298,11 @@ func gkeAuthPluginFix(sdkRoot string) string {
 }
 
 // MicroVMTools are the host utilities the micro-VM path needs beyond the
-// always-checked ones: sha256sum, zstd and unzip for upstream's asset
-// scripts, and make and jq for the demo on older trees such as v0.1.0.
-// Trees from agent-substrate/substrate#2092 on stage assets in ate-setup and
-// need none of them; see the TODO on snapshot.InstallMicroVMDeps.
+// always-checked ones on trees older than the pin: sha256sum, zstd and unzip
+// for upstream's asset scripts up to v1.0.0-rc.1, and make and jq for the demo
+// on older trees such as v0.1.0. Trees from agent-substrate/substrate#2092 on,
+// the pinned v1.0.0-rc.3 included, stage assets in ate-setup and need none of
+// them; see the TODO on snapshot.InstallMicroVMDeps.
 var MicroVMTools = []string{"sha256sum", "zstd", "unzip", "jq", "make"}
 
 // MissingMicroVMTools returns whichever of MicroVMTools are not on PATH.

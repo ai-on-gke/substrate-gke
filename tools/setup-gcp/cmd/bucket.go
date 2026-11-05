@@ -183,10 +183,11 @@ func createIamPolicyBindings(ctx context.Context, cfg *Config) error {
 			if err == nil {
 				break
 			}
-			if attempt >= 6 {
+			if attempt >= grantAttempts {
 				return fmt.Errorf("set bucket %s iam policy: %w", name, err)
 			}
-			slog.Warn("Setting bucket IAM policy failed, retrying...", slog.String("bucket", name), slog.Int("attempt", attempt), slog.Any("err", err))
+			slog.Info("Bucket IAM policy is not accepted yet (a new service account takes a moment to propagate), retrying",
+				slog.String("bucket", name), slog.String("attempt", attemptOf(attempt, grantAttempts)), slog.Any("err", err))
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

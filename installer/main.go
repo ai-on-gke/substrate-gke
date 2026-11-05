@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/doctor"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
@@ -133,6 +134,14 @@ func main() {
 		return
 	}
 
+	// Everything from here on is the wizard, a Bubble Tea program. Piped or
+	// redirected (`go run . | tee log`, a CI step) it never learns its window
+	// size and repaints "loading…" forever, so refuse up front and say why.
+	if msg := needsTerminal(os.Stdin, os.Stdout); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(2)
+	}
+
 	// Bootstrap runs setup-gcp from this repository, and the deploy adds
 	// deploy/gke by re-running this executable. Resolve all three before the
 	// wizard starts, so a missing one fails here rather than mid-install.
@@ -230,6 +239,20 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	st, b := deps.Setup, deps.Builder
 	if !app.Completed {
 		fmt.Println("Setup exited early — nothing to summarize. Re-running the installer is safe.")
+		// A screen's own parting words: the reinstall guard's cleanup
+		// command, which its panel's borders made awkward to copy.
+		for _, n := range app.ExitNotes() {
+			fmt.Println()
+			for _, l := range n.Lead {
+				fmt.Println(theme.Subtle.Render("  " + l))
+			}
+			if n.Command != "" {
+				fmt.Println("  " + theme.CommandLine.Render(n.Command))
+			}
+			if n.Trail != "" {
+				fmt.Println(theme.Subtle.Render("  " + n.Trail))
+			}
+		}
 		if deps.LogPath != "" {
 			fmt.Printf("\nDetailed command log written to:\n  %s\n", theme.Accent.Render(deps.LogPath))
 		}
@@ -259,8 +282,13 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	if deps.LogPath != "" {
 		fmt.Printf("  log        %s\n", deps.LogPath)
 	}
-	if st.FilestoreCSIDeployed {
+	switch {
+	case st.FilestoreCSIDeployed:
 		fmt.Println("  filestore  CSI driver deployed (gcp-filestore-csi-driver)")
+	case st.FilestoreCSIFailed:
+		// Not "skipped": the run may have left an IAM grant or a partial
+		// namespace behind, and the log says which (see FilestoreSummary).
+		fmt.Println("  filestore  CSI driver install failed and was skipped; see the log, and check namespace gcp-filestore-csi-driver for a partial apply")
 	}
 	if st.AutoscaleEnabled {
 		fmt.Printf("  autoscale  %s, %d–%d nodes\n", st.NodePool, st.AutoscaleMin, st.AutoscaleMax)
@@ -276,9 +304,15 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// unquoted.
 	section("Source tree")
 	teardown := b.TeardownCommand(st, "")
+	// Why the tree was fetched depends on the image source: a pre-built
+	// install builds nothing and used it for its deploy manifests only.
+	fetchedFor := "to build your images"
+	if st.Prebuilt() {
+		fetchedFor = "for its deploy manifests"
+	}
 	switch {
 	case b.Managed && cleaned:
-		note("The substrate tree was fetched to build your images and has been removed;",
+		note("The substrate tree was fetched "+fetchedFor+" and has been removed;",
 			"re-running the installer fetches it again. Develop against your own clone.")
 	case b.Managed:
 		note("The substrate tree, if fetched, is cached at "+b.Root+";",
@@ -288,35 +322,76 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		teardown = b.TeardownCommand(st, b.Root)
 	}
 
-	// Two teardown depths: delete only the control plane (keep the cluster),
-	// or delete everything this install created and stop the charges. The
-	// cleanup invocation carries the wizard's own answers so it can be run
-	// from a fresh clone weeks later.
+	// The install fetched its credentials into a kubeconfig of its own and
+	// left the user's alone, so a shell has to be pointed at the cluster
+	// before any kubectl below works. The export keeps it that way; the
+	// gcloud alternative is for a user who would rather have the cluster in
+	// their own kubeconfig, and says what that does to their context.
+	section("Reaching the cluster")
+	note("The installer kept its credentials in a kubeconfig of its own; ~/.kube/config",
+		"and your current context are as they were. To point a shell at the cluster:")
+	command(snapshot.KubeconfigExport(st))
+	note("Or add the cluster to your own kubeconfig, which also makes it your current context:")
+	command(snapshot.GetCredentialsCommand(st))
+
+	// Delete only the control plane (keep the cluster), or delete the
+	// install from GCP in one of two ways — cluster-scoped, or the complete
+	// teardown — which snapshot.CleanupLeads words as alternatives, the
+	// cluster-scoped one first. The cleanup invocations carry the wizard's
+	// own answers so they can be run from a fresh clone weeks later.
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	resources := "snapshot and asset buckets, snapshot transfer service account, IAM bindings, and dashboards"
-	if st.CreatesArtifactRepository() {
-		resources = "snapshot and asset buckets, snapshot transfer service account, IAM bindings, dashboards, and the image repository"
-	}
-	note("Delete everything this install created in GCP — the cluster, the", resources+":")
-	command(b.CleanupCommand(st))
+	note("Or delete the install from GCP, one of two ways:")
+	// A Filestore run that failed may still have created the account and
+	// its project role (#143), so it is named for a failed run too.
+	clusterScoped, complete := snapshot.CleanupLeads(st.CreatesArtifactRepository(), st.FilestoreCSIDeployed || st.FilestoreCSIFailed)
+	note(clusterScoped...)
+	command(b.CleanupCommand(st, true))
+	note(complete...)
+	command(b.CleanupCommand(st, false))
 
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
-	// install leaves a written copy behind.
+	// install leaves a written copy behind. The panel's lead is the export
+	// line, already printed above.
 	if st.DemoDeployed {
 		section("Next steps — try the " + ui.DemoName(st) + " demo")
-		lead, demo := b.NextSteps(st)
-		if lead != "" {
-			command(lead)
-		}
+		_, demo := b.NextSteps(st)
 		for _, cmd := range demo {
 			command(cmd)
 		}
-		if routerNote := b.RouterNote(st); routerNote != "" {
-			note(routerNote)
-		}
 	}
+
+	// The wizard's panel links to the router's documentation as a terminal
+	// hyperlink, which not every terminal opens; the URL is printed here in
+	// full, where it can be copied.
+	section("Reaching actors through the ingress router")
+	note(b.RouterNote(st))
+}
+
+// needsTerminal returns the refusal to print when the wizard cannot run
+// because stdin or stdout is not a terminal, or "" when both are. The
+// message names the log the installer writes, since a log is what piping
+// the wizard through tee was after, and the issue that tracks a mode for
+// automation, which this check is not a substitute for.
+func needsTerminal(stdin, stdout *os.File) string {
+	in, out := term.IsTerminal(stdin.Fd()), term.IsTerminal(stdout.Fd())
+	if in && out {
+		return ""
+	}
+	which := "input and output are"
+	switch {
+	case in:
+		which = "output is"
+	case out:
+		which = "input is"
+	}
+	msg := "The installer is an interactive terminal program, but its " + which + " not a terminal. " +
+		"Run it directly in a terminal rather than piping or redirecting it."
+	if dir, err := execx.DefaultLogDir(); err == nil {
+		msg += " To keep a record of a run, use the log it writes under " + dir + " (see README, Logs)."
+	}
+	return msg + " For automation see https://github.com/ai-on-gke/substrate-gke/issues/107."
 }
 
 // absPath returns path made absolute, or path itself if that fails.

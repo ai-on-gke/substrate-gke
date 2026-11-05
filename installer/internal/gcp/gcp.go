@@ -22,11 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 )
 
 // RequiredBetaAPIs are the Kubernetes beta PodCertificate APIs that setup-gcp's
@@ -66,6 +69,41 @@ type Release struct{ Major, Minor int }
 // version and resolves it to the newest patch it serves, so it is also safe to
 // print into a command.
 func (r Release) String() string { return fmt.Sprintf("%d.%d", r.Major, r.Minor) }
+
+// clusterNameRE is GKE's rule for a cluster name, as its rejection quotes
+// it: a lowercase letter, then lowercase letters, digits and hyphens, not
+// ending with a hyphen. The length cap is separate (MaxClusterNameLength).
+// tools/setup-gcp/cmd/cluster.go has the same pair; a change to one is a
+// change to both.
+var clusterNameRE = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+// MaxClusterNameLength is the longest cluster name GKE accepts.
+const MaxClusterNameLength = 40
+
+// ValidClusterName reports why GKE would reject name as a cluster name, or
+// nil. The cluster screen asks as the name is typed, so the create fails on
+// the form rather than minutes later in bootstrap, and each message names
+// the one rule the name broke.
+func ValidClusterName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("a cluster name is required")
+	case len(name) > MaxClusterNameLength:
+		return fmt.Errorf("cluster name %q is %d characters; GKE allows at most %d", name, len(name), MaxClusterNameLength)
+	case clusterNameRE.MatchString(name):
+		return nil
+	case name[0] < 'a' || name[0] > 'z':
+		return fmt.Errorf("cluster name %q must start with a lowercase letter", name)
+	case strings.HasSuffix(name, "-"):
+		return fmt.Errorf("cluster name %q must not end with a hyphen", name)
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("cluster name %q contains %q: only lowercase letters, digits and hyphens are allowed", name, r)
+		}
+	}
+	return fmt.Errorf("cluster name %q is not a valid GKE cluster name", name)
+}
 
 // Cluster is one GKE cluster as listed by gcloud.
 type Cluster struct {
@@ -190,7 +228,24 @@ type NodePool struct {
 	Name        string
 	MachineType string
 	Autoscaled  bool
+	// WorkloadType is the pool's ate.dev/workloadType node label: the marker
+	// setup-gcp puts on the fixed-size pools it creates for Substrate's
+	// system components (ate-system-infra) and bundled PostgreSQL
+	// (ate-postgres), which ate-setup pins those workloads to by the same
+	// label and taint. Worker pools never carry it.
+	WorkloadType string
 }
+
+// workloadTypeLabel is the node label setup-gcp and ate-setup agree on for
+// the system pools; see tools/setup-gcp/cmd/systempools.go.
+const workloadTypeLabel = "ate.dev/workloadType"
+
+// System reports whether the pool is one of Substrate's pinned system pools,
+// which the installer must not resize or autoscale. It goes by the label
+// rather than the pool name because setup-gcp has labeled these pools since
+// it first created them, so a user pool that happens to share a name stays
+// eligible and a renamed system pool stays protected.
+func (p NodePool) System() bool { return p.WorkloadType != "" }
 
 // Client shells out to gcloud. With DryRun set it returns canned data so the
 // wizard can be exercised without a GCP project.
@@ -306,6 +361,15 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	defer c.end()
 	ctx, stop := c.bound(ctx)
 	defer stop()
+	// One gcloud at a time, installer-wide (see execx.LockGcloud): this run
+	// queues behind the Runner's commands and the other runs, the token
+	// fetch included. The wait is bounded by the caller's ctx and Close, not
+	// by cmdTimeout, which times gcloud itself.
+	release, err := execx.LockGcloud(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcloud %s: %w", strings.Join(args, " "), err)
+	}
+	defer release()
 	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gcloud", args...)
@@ -579,7 +643,8 @@ func ParseNodePools(data []byte) ([]NodePool, error) {
 	var raw []struct {
 		Name   string `json:"name"`
 		Config struct {
-			MachineType string `json:"machineType"`
+			MachineType string            `json:"machineType"`
+			Labels      map[string]string `json:"labels"`
 		} `json:"config"`
 		Autoscaling struct {
 			Enabled bool `json:"enabled"`
@@ -591,9 +656,10 @@ func ParseNodePools(data []byte) ([]NodePool, error) {
 	pools := make([]NodePool, 0, len(raw))
 	for _, r := range raw {
 		pools = append(pools, NodePool{
-			Name:        r.Name,
-			MachineType: r.Config.MachineType,
-			Autoscaled:  r.Autoscaling.Enabled,
+			Name:         r.Name,
+			MachineType:  r.Config.MachineType,
+			Autoscaled:   r.Autoscaling.Enabled,
+			WorkloadType: r.Config.Labels[workloadTypeLabel],
 		})
 	}
 	return pools, nil

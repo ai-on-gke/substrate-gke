@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -22,10 +23,86 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/ui"
 )
+
+// With mainArgsEnv set, the test binary runs the installer's main instead
+// of the tests, so a test can start the real program with its output piped
+// and see what a user piping it through tee would see.
+const mainArgsEnv = "SUBSTRATE_GKE_INSTALLER_TEST_MAIN_ARGS"
+
+func TestMain(m *testing.M) {
+	if args, ok := os.LookupEnv(mainArgsEnv); ok {
+		os.Args = append(os.Args[:1], strings.Fields(args)...)
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// Piped or redirected, Bubble Tea never gets a window size and the wizard
+// repaints "loading…" forever. It must fail at once and say why, and point
+// at the log file as the record a tee capture was meant to be.
+func TestWizardRefusesToRunWithoutATerminal(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), mainArgsEnv+"=--dry-run")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("piped wizard: err %v, want exit status 2\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("piped wizard wrote to stdout, which should carry nothing but the wizard:\n%s", stdout.String())
+	}
+	logDir, err := execx.DefaultLogDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"interactive terminal program", "not a terminal", logDir, "issues/107"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal is missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// The refusal names the stream that is wrong, so a user who piped only
+// stdout is not told to fix stdin.
+func TestNeedsTerminalNamesTheStream(t *testing.T) {
+	pipe, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipe.Close()
+	defer w.Close()
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		t.Skip("no controlling terminal:", err)
+	}
+	defer tty.Close()
+
+	if got := needsTerminal(tty, tty); got != "" {
+		t.Errorf("needsTerminal(tty, tty) = %q, want no refusal", got)
+	}
+	if got := needsTerminal(tty, w); !strings.Contains(got, "its output is not a terminal") {
+		t.Errorf("piped stdout: %q", got)
+	}
+	if got := needsTerminal(pipe, tty); !strings.Contains(got, "its input is not a terminal") {
+		t.Errorf("piped stdin: %q", got)
+	}
+	if got := needsTerminal(pipe, w); !strings.Contains(got, "its input and output are not a terminal") {
+		t.Errorf("both piped: %q", got)
+	}
+}
 
 // After a managed install the tree is gone, so the summary must not tell the
 // user to cd into it.
@@ -42,6 +119,27 @@ func TestSummaryDoesNotPointAtTheRemovedCache(t *testing.T) {
 	}
 	if !strings.Contains(out, snapshot.NewBuilder(root, true).TeardownCommand(st, "")) {
 		t.Errorf("summary does not offer a self-contained teardown:\n%s", out)
+	}
+}
+
+// A pre-built install builds nothing, so its summary must not say the tree
+// was fetched to build images; a source build's must.
+func TestSummarySaysWhyTheTreeWasFetched(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "substrate-4a2cb262dd62")
+	for _, tc := range []struct{ name, imageRepo, want, wantNot string }{
+		{"source build", "", "fetched to build your images", "deploy manifests"},
+		{"pre-built images", "ghcr.io/agent-substrate/substrate", "fetched for its deploy manifests", "to build your images"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := state.NewSetup()
+			st.ImageRepo = tc.imageRepo
+			out := captureStdout(t, func() {
+				printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(root, true)}, true)
+			})
+			if !strings.Contains(out, tc.want) || strings.Contains(out, tc.wantNot) {
+				t.Errorf("summary should say %q and not %q:\n%s", tc.want, tc.wantNot, out)
+			}
+		})
 	}
 }
 
@@ -118,7 +216,11 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 // Users get stuck with leftover charges unless the summary hands them a
-// complete GCP cleanup, carrying their own answers, quoted for pasting.
+// complete GCP cleanup, carrying their own answers, quoted for pasting. It
+// offers two: the cluster-scoped form first — the dashboards and the
+// transfer and node service accounts are shared by every Substrate cluster
+// in the project — and the complete teardown second, worded as the
+// alternative rather than as a second step ("to also remove…" read as one).
 func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	st := state.NewSetup()
 	st.ProjectID = "acme"
@@ -128,16 +230,55 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(t.TempDir(), true)}, true)
 	})
 
+	var cleanups []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "./tools/cleanup-gcp") {
+			cleanups = append(cleanups, line)
+		}
+	}
+	if len(cleanups) != 2 {
+		t.Fatalf("summary printed %d cleanup commands, want the cluster-scoped and the project-wide one:\n%s", len(cleanups), out)
+	}
 	for _, want := range []string{
-		"./tools/cleanup-gcp",
 		"--project " + snapshot.ShellQuote("acme"),
 		"--cluster " + snapshot.ShellQuote(st.ClusterName),
 		"--location " + snapshot.ShellQuote(st.Zone),
 		"--bucket " + snapshot.ShellQuote(st.BucketName),
 		"--delete-repository",
 	} {
+		for _, cleanup := range cleanups {
+			if !strings.Contains(cleanup, want) {
+				t.Errorf("summary cleanup line missing %q: %s", want, cleanup)
+			}
+		}
+	}
+	if !strings.Contains(cleanups[0], "--cluster-scoped") {
+		t.Errorf("the first cleanup command is not cluster-scoped: %s", cleanups[0])
+	}
+	if strings.Contains(cleanups[1], "--cluster-scoped") {
+		t.Errorf("the second cleanup command must be the project-wide one: %s", cleanups[1])
+	}
+	for _, want := range []string{
+		"one of two ways:",
+		"Option 1 — cluster-scoped (safe when other clusters share the project)",
+		"image repository:",
+		"Option 2 — complete teardown (only if no other Substrate cluster uses this project)",
+		"the dashboards and the",
+		"snapshot transfer and node service accounts:",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("summary cleanup line missing %q:\n%s", want, out)
+			t.Errorf("summary does not present the two cleanups as alternatives (%q):\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "To also") {
+		t.Errorf("the complete teardown reads as a step after the cluster-scoped one:\n%s", out)
+	}
+	// The two options' wording is shared with the reinstall guard's exit
+	// note, so the summary prints the helper's lines as they are.
+	clusterScoped, complete := snapshot.CleanupLeads(true, false)
+	for _, line := range append(clusterScoped, complete...) {
+		if !strings.Contains(out, line) {
+			t.Errorf("summary lacks the shared line %q:\n%s", line, out)
 		}
 	}
 }
@@ -148,14 +289,16 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 // does not exist.
 func TestSummaryRecapsTheDemoNextSteps(t *testing.T) {
 	builder := snapshot.NewBuilder(t.TempDir(), true)
-	portForward, demo := builder.NextSteps(nil)
-
 	st := state.NewSetup()
 	st.DemoDeployed = true
+	// The lead points a shell at the cluster, which the summary prints for
+	// every install; the demo steps follow it.
+	lead, demo := builder.NextSteps(st)
+
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: builder}, true)
 	})
-	for _, want := range append([]string{portForward}, demo...) {
+	for _, want := range append([]string{lead}, demo...) {
 		if !strings.Contains(out, want) {
 			t.Errorf("demo summary is missing next step %q:\n%s", want, out)
 		}
@@ -324,12 +467,39 @@ func TestSummaryForAnUpgrade(t *testing.T) {
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, deps, false)
 	})
-	for _, want := range []string{"Upgrade prepared", "github.com/agent-substrate/substrate/blob/" + snapshot.Commit + "/docs/guides/upgrade.md", "cd ~/ate-upgrade/new && export VERSION=", "export VERSION=substrate-0123456789ab there"} {
+	for _, want := range []string{"Upgrade prepared", "github.com/agent-substrate/substrate/blob/" + snapshot.Commit + "/docs/guides/upgrade.md", "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig && export VERSION=", "export VERSION=substrate-0123456789ab there"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("upgrade summary is missing %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "Substrate installed") {
 		t.Errorf("upgrade summary reads like an install:\n%s", out)
+	}
+}
+
+// The exit summary tells a Filestore run that failed from one that was
+// skipped: the failed run may have left an IAM grant or a partial namespace
+// behind, and "skipped" would hide that (#114).
+func TestSummaryReportsAFailedFilestoreStep(t *testing.T) {
+	builder := snapshot.NewBuilder(t.TempDir(), true)
+	st := state.NewSetup()
+	st.FilestoreCSIFailed = true
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: builder}, true)
+	})
+	if !strings.Contains(out, "filestore  CSI driver install failed") || !strings.Contains(out, "gcp-filestore-csi-driver") {
+		t.Errorf("summary does not report the failed Filestore step:\n%s", out)
+	}
+	// The teardown lead names the account deploy.sh created, which the
+	// failed run may have left behind with its project role (#143).
+	if !strings.Contains(out, "snapshot transfer, Filestore CSI and node service accounts") {
+		t.Errorf("teardown lead does not name the Filestore CSI service account after a failed run:\n%s", out)
+	}
+
+	out = captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: state.NewSetup(), Builder: builder}, true)
+	})
+	if strings.Contains(out, "filestore  CSI driver") || strings.Contains(out, "Filestore CSI service account") {
+		t.Errorf("summary has a Filestore line for an install that skipped the step:\n%s", out)
 	}
 }

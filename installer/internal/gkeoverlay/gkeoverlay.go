@@ -137,8 +137,10 @@ func Find(explicit string, starts ...string) (string, error) {
 			dir = parent
 		}
 	}
+	// Name each start once: a binary run from its own directory has the
+	// working directory and the executable's directory the same.
 	return "", fmt.Errorf("cannot find %s above %s; run the installer from a substrate-gke checkout or pass --gke-overlay",
-		Dir, strings.Join(starts, " or "))
+		Dir, strings.Join(slices.Compact(slices.Clone(starts)), " or "))
 }
 
 // check reports whether dir holds the deploy/gke layout Add copies from.

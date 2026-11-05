@@ -17,10 +17,12 @@
 # cleanup-gcp deletes the GCP resources the installer's provision step
 # (`setup-gcp bootstrap`) creates: monitoring dashboards, IAM bindings, the
 # snapshot transfer and node service accounts, the snapshot and micro-VM asset buckets,
-# and the GKE cluster. Image repositories are kept unless --delete-repository
-# is given. With --cluster-scoped it deletes only the cluster, its buckets and
-# the bindings on them, and keeps what every Substrate cluster in the project
-# shares (dashboards, transfer and node service accounts).
+# and the GKE cluster; and the Filestore CSI driver's service account, which
+# the optional Filestore step creates. Image repositories are kept unless
+# --delete-repository is given. With --cluster-scoped it deletes only the
+# cluster, its buckets and the bindings on them, and keeps what every
+# Substrate cluster in the project shares (dashboards, transfer, Filestore CSI
+# and node service accounts).
 #
 # It is a thin wrapper: the deletions themselves live in
 # tools/setup-gcp/teardown.sh, next to the bootstrap they reverse, so a new
@@ -54,8 +56,8 @@ usage() {
   cat >&2 <<'EOF'
 Usage: tools/cleanup-gcp --project ID --cluster NAME --location LOCATION --bucket NAME [options]
 
-Deletes the GKE cluster, snapshot and asset buckets, snapshot transfer and node service accounts,
-IAM bindings, and monitoring dashboards.
+Deletes the GKE cluster, snapshot and asset buckets, snapshot transfer, Filestore CSI and node
+service accounts, IAM bindings, and monitoring dashboards.
 Image repositories are kept unless --delete-repository is given.
 
 Options:
@@ -64,8 +66,8 @@ Options:
   --delete-repository     Also delete the repository and its images
   --keep-repository       Keep the repository (default); overrides an earlier --delete-repository
   --cluster-scoped        Delete only the cluster, its buckets and their bindings; keep the
-                          dashboards and the transfer and node service accounts
-                          that other Substrate clusters in the project share
+                          dashboards and the transfer, Filestore CSI and node service
+                          accounts that other Substrate clusters in the project share
   --yes                   Skip the confirmation prompt
 
 The installer prints a command with the values for your installation.
@@ -136,6 +138,7 @@ else
   - the Substrate monitoring dashboards
   - the setup-gcp IAM bindings
   - the snapshot transfer service account
+  - the Filestore CSI driver's service account (if the Filestore step created it)
   - the GKE node service account
 EOF
 fi
@@ -145,7 +148,7 @@ cat <<EOF
   - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
 EOF
 if ${CLUSTER_SCOPED}; then
-  echo "  The dashboards and the snapshot transfer and node service accounts will be kept."
+  echo "  The dashboards and the snapshot transfer, Filestore CSI and node service accounts will be kept."
 fi
 if ${KEEP_REPOSITORY}; then
   echo "  Image repositories will be kept."

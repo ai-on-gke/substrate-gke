@@ -1550,9 +1550,134 @@ func (r noRecordRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx
 	return ch
 }
 
+// Outside --dry-run the form names no cluster until one is typed: the
+// install track's defaults are examples, shown as placeholders, since shown
+// as values they were submitted as a cluster nobody has.
+func TestUpgradeSourceFormStartsEmptyOutsideDryRun(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter") // upgrade track; the doctor's checks run simulated
+	app.deps.DryRun = false
+	press("enter") // doctor → installed cluster
+	scr, ok := app.cur.(*upgradeSourceScreen)
+	if !ok || scr.mode != "target" {
+		t.Fatalf("after doctor: %v %T", app.mach.Current(), app.cur)
+	}
+	for i, want := range []string{"my-project", "substrate-test", "us-west1-c"} {
+		if v, p := scr.fields[i].Value(), scr.fields[i].Placeholder; v != "" || p != want {
+			t.Errorf("field %d = %q with placeholder %q, want empty with placeholder %q", i, v, p, want)
+		}
+	}
+	if view := app.View(); !strings.Contains(view, "my-project") {
+		t.Errorf("the placeholder should show:\n%s", view)
+	}
+	press("enter", "enter", "enter")
+	if app.mach.Current() != state.UpgradeSource || scr.mode != "target" || scr.focus != 0 || scr.errText != "A project ID is required." {
+		t.Fatalf("an empty form should be refused: %v mode=%s focus=%d err=%q", app.mach.Current(), scr.mode, scr.focus, scr.errText)
+	}
+	typeText(t, app, "acme")
+	press("enter")
+	typeText(t, app, "prod")
+	press("enter")
+	typeText(t, app, "us-east1-b")
+	press("enter")
+	if app.mach.Current() != state.Images {
+		t.Fatalf("after the cluster is typed: %v mode=%s err=%q", app.mach.Current(), scr.mode, scr.errText)
+	}
+	if st := app.deps.Setup; st.ProjectID != "acme" || st.ClusterName != "prod" || st.Zone != "us-east1-b" {
+		t.Fatalf("the typed cluster was not recorded: %+v", st)
+	}
+}
+
+// With records of the installs this machine made, the screen offers them
+// newest first; a pick fills the form, and the row past them types a
+// different cluster, from empty fields.
+func TestUpgradeSourceOffersThisMachinesInstalls(t *testing.T) {
+	records := t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
+	// Named so the older sorts first by file name.
+	writeInstallRecord(t, records, "acme", "us-west1-c", "alpha", "v1.0.0", "2026-10-01T10:00:00Z")
+	writeInstallRecord(t, records, "acme", "us-east4-a", "zeta", "v1.1.0", "2026-11-01T10:00:00Z")
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	press := func(keys ...string) {
+		for _, k := range keys {
+			pump(t, app, key(k))
+		}
+	}
+	press("3", "enter")
+	app.deps.DryRun = false
+	press("enter")
+	scr, ok := app.cur.(*upgradeSourceScreen)
+	if !ok || scr.mode != "records" || len(scr.installs) != 2 || scr.installs[0].ClusterName != "zeta" {
+		t.Fatalf("after doctor: %v %T mode=%s installs=%+v", app.mach.Current(), app.cur, scr.mode, scr.installs)
+	}
+	view := app.View()
+	if zi, ai := strings.Index(view, "zeta"), strings.Index(view, "alpha"); zi < 0 || ai < 0 || zi > ai || !strings.Contains(view, "[3] Type a different cluster") {
+		t.Fatalf("the records should be listed newest first, then the row to type one:\n%s", view)
+	}
+	// The version a record names is whatever the last deploy wrote, so a
+	// row does not show it; the real one is read off the cluster after the pick.
+	if strings.Contains(view, "v1.1.0") || strings.Contains(view, "v1.0.0") {
+		t.Fatalf("a record's row should not show the version it names:\n%s", view)
+	}
+
+	press("3", "enter") // type a different cluster
+	if scr.mode != "target" || scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" {
+		t.Fatalf("typing a different cluster should start empty: mode=%s %q %q %q", scr.mode, scr.value(0), scr.value(1), scr.value(2))
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if scr.mode != "records" || scr.cursor != 0 {
+		t.Fatalf("esc from the form should return to the records: mode=%s cursor=%d", scr.mode, scr.cursor)
+	}
+
+	pump(t, app, tea.KeyMsg{Type: tea.KeyDown})
+	pump(t, app, tea.KeyMsg{Type: tea.KeyUp})
+	press("enter") // the newest
+	if scr.mode != "target" || scr.value(0) != "acme" || scr.value(1) != "zeta" || scr.value(2) != "us-east4-a" || scr.focus != 2 {
+		t.Fatalf("picking a record should fill the form: mode=%s %q %q %q focus=%d", scr.mode, scr.value(0), scr.value(1), scr.value(2), scr.focus)
+	}
+	if view := app.View(); !strings.Contains(view, "record of zeta") {
+		t.Errorf("the form should say where its values came from:\n%s", view)
+	}
+	press("enter") // read it
+	if app.mach.Current() != state.Images {
+		t.Fatalf("after the pick: %v mode=%s err=%q", app.mach.Current(), scr.mode, scr.errText)
+	}
+	if st := app.deps.Setup; st.ProjectID != "acme" || st.ClusterName != "zeta" || st.Zone != "us-east4-a" {
+		t.Fatalf("the picked cluster was not recorded: %+v", st)
+	}
+}
+
+// writeInstallRecord writes a record like ate-setup's of an install, under
+// the records directory.
+func writeInstallRecord(t *testing.T, records, project, location, cluster, version, writtenAt string) {
+	t.Helper()
+	dir := filepath.Join(records, "installs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("apiVersion: install.ate.dev/v1alpha1\ncluster:\n  context: gke_%[1]s_%[2]s_%[3]s\n  outcome: succeeded\n  substrateVersion: %[4]s\n  writtenAt: %[5]q\ngcp:\n  clusterLocation: %[2]s\n  clusterName: %[3]s\n  projectID: %[1]s\nkind: SubstrateInstall\n",
+		project, location, cluster, version, writtenAt)
+	if err := os.WriteFile(filepath.Join(dir, "gke_"+project+"_"+location+"_"+cluster+".yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A cluster that cannot be read can still be upgraded: the installed commit
 // and version are typed in instead.
 func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.Runner = noRecordRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -1607,6 +1732,7 @@ func (r unreportedBuildRunner) Start(ctx context.Context, spec execx.Spec) <-cha
 // An API server that does not report its build sends the track to the form,
 // with a note saying why.
 func TestUpgradeTrackAsksWhenTheAPIServerCannotSay(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.Runner = unreportedBuildRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -1648,6 +1774,11 @@ func TestUpgradeTrackRefusesAnUnsupportedUpgrade(t *testing.T) {
 			}
 		}
 		press("3", "enter", "enter")
+		// The second walk finds the record the first left, and types the
+		// cluster in past it.
+		if scr := app.cur.(*upgradeSourceScreen); scr.mode == "records" {
+			press("2", "enter")
+		}
 		typeText(t, app, "acme")
 		press("enter", "enter", "enter", "m")
 		typeText(t, app, snapshot.Commit)
@@ -1747,6 +1878,7 @@ func (r *hangingRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx
 // A read that hangs can be cancelled with esc, which ends the process behind
 // it rather than leaving a late get-credentials to retarget kubectl.
 func TestUpgradeTrackCancelsAHangingRead(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	runner := &hangingRunner{inner: execx.DryRun{Delay: time.Millisecond}}
@@ -1795,6 +1927,7 @@ func (r failsForRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx
 // cluster whose read fails must not offer the first cluster's facts as the
 // second's.
 func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.Runner = failsForRunner{inner: execx.DryRun{Delay: time.Millisecond}, cluster: "other-cluster"}
@@ -1833,6 +1966,7 @@ func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
 // Backing out of the final screen takes its summary with it: what is printed
 // on exit describes the screen the user left from.
 func TestBackFromCompleteClearsCompleted(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
@@ -1864,12 +1998,13 @@ type installedClusterRunner struct {
 }
 
 // installedLine is what CheckInstalled prints for a running install whose API
-// server reports version, or for a bare namespace when version is empty.
+// server runs an image tagged version, or for a bare namespace when version
+// is empty.
 func installedLine(version string) string {
 	if version == "" {
 		return "SUBSTRATE_GKE_INSTALLED true"
 	}
-	return "SUBSTRATE_GKE_INSTALLED true atelet " + version + " commit=" + snapshot.Commit + " built=2026-10-22T00:00:00Z linux/amd64"
+	return "SUBSTRATE_GKE_INSTALLED true atelet image=ghcr.io/agent-substrate/substrate/ate-api-server:" + version + "@sha256:" + strings.Repeat("0", 64)
 }
 
 func (r installedClusterRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
@@ -1912,18 +2047,21 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, version: "substrate-71e7623", calls: &calls}
 	press := pressToCluster(t, app)
 	// The list load already background-probed the four substrate-ready
-	// clusters (substrate-ga is ready through v1); legacy-prod is not ready,
-	// so selecting it probes fresh.
+	// clusters (substrate-ga is ready through v1). substrate-poc's verdict is
+	// dropped so that selecting it probes fresh — the path a cluster whose
+	// background probe failed takes. (A cluster below the floor is rejected
+	// before any probe, so only a ready one can reach the guard.)
 	if calls != 4 {
 		t.Fatalf("background probes on load = %d, want 4", calls)
 	}
+	scr := app.cur.(*clusterScreen)
+	delete(scr.probed, "substrate-poc/us-west1-c")
 
-	press("2", "enter") // pick legacy-prod (us-central1)
+	press("1", "enter") // pick substrate-poc (us-west1-c)
 	// Must NOT advance to Provision! Must stay at Cluster and enter "installed" mode
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("wizard should remain on Cluster step when installed, got: %v", app.mach.Current())
 	}
-	scr := app.cur.(*clusterScreen)
 	if scr.mode != "installed" {
 		t.Fatalf("clusterScreen mode = %q, want %q", scr.mode, "installed")
 	}
@@ -1932,12 +2070,20 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	if !strings.Contains(view, "already runs Substrate") || !strings.Contains(view, "substrate-71e7623") {
 		t.Errorf("view missing installed version warning:\n%s", view)
 	}
-	// The panel wraps its text to fit, so the phrase may span a line break.
-	if !strings.Contains(flat(view), "Upgrade an installed cluster") {
-		t.Errorf("view missing upgrade track recommendation:\n%s", view)
+	// The panel wraps its text to fit, so the phrase may span a line break;
+	// flattened from the screen alone, since in the whole view the sidebar's
+	// rows would fall between the halves.
+	if panel := flat(scr.View(87)); !strings.Contains(panel, "Upgrade an installed cluster") {
+		t.Errorf("view missing upgrade track recommendation:\n%s", panel)
 	}
-	if !strings.Contains(view, "cleanup-gcp") {
-		t.Errorf("view missing cleanup-gcp recommendation:\n%s", view)
+	// The cleanup commands themselves are printed when the wizard exits on
+	// the guard, where they can be copied without the panel's borders; the
+	// panel says so and the exit notes carry them.
+	if !strings.Contains(flat(view), "prints the GCP cleanup commands") {
+		t.Errorf("view missing the pointer to the cleanup commands:\n%s", view)
+	}
+	if notes := app.ExitNotes(); len(notes) != 2 || !strings.Contains(notes[0].Command, "cleanup-gcp") || !strings.Contains(notes[1].Command, "cleanup-gcp") {
+		t.Errorf("exit notes on the guard = %+v, want the two cleanup-gcp commands", notes)
 	}
 
 	// Pressing esc returns to cluster list
@@ -1946,7 +2092,7 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 		t.Errorf("after esc: mode = %q, want list", scr.mode)
 	}
 	// An aborted selection must leave nothing behind: neither the rejected
-	// cluster's name and zone nor a bucket derived from them.
+	// cluster's name nor a bucket derived from it.
 	st := app.deps.Setup
 	if st.ClusterName != "substrate-test" || st.Zone != "us-west1-c" || st.BucketName != "" {
 		t.Errorf("aborted selection leaked into Setup: cluster=%q zone=%q bucket=%q",
@@ -1970,6 +2116,98 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	press("r")
 	if scr.mode != "installed" || calls != 6 {
 		t.Errorf("re-probe: mode=%q probes=%d, want installed after 6 probes", scr.mode, calls)
+	}
+}
+
+// specLabelRunner records the label of every spec it is asked to run.
+type specLabelRunner struct {
+	inner  execx.Runner
+	labels *[]string
+}
+
+func (r specLabelRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	*r.labels = append(*r.labels, spec.Label)
+	return r.inner.Start(ctx, spec)
+}
+
+// A cluster below the floor that already runs Substrate gets the rejection,
+// not the reinstall guard. The guard's remedy — [t], type the name, tear
+// Substrate down, install here — would end at the rejection anyway, after
+// the teardown: the destructive step before the dead end. Seen on a 1.36
+// control plane and on a 1.37 control plane with a 1.36 pool, both running
+// Substrate. The probe does not run on such a cluster — nothing it could
+// find changes the answer — and a verdict already cached is not consulted
+// either.
+func TestUnsupportedInstalledClusterIsRejectedBeforeTheGuard(t *testing.T) {
+	for _, tc := range []struct{ row, name, location string }{
+		{"2", "legacy-prod", "us-central1"}, // 1.33 control plane
+		{"3", "ml-staging", "us-central1"},  // 1.37 control plane, 1.36 pools
+	} {
+		for _, cached := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cached=%v", tc.name, cached), func(t *testing.T) {
+				app := testApp(t)
+				calls := 0
+				var labels []string
+				app.deps.Runner = specLabelRunner{labels: &labels, inner: installedClusterRunner{
+					inner: execx.DryRun{Delay: time.Millisecond}, version: "v0.6.0-41", calls: &calls}}
+				press := pressToCluster(t, app)
+				scr := app.cur.(*clusterScreen)
+				if cached {
+					scr.probed[tc.name+"/"+tc.location] = snapshot.InstalledProbe{Installed: true, Atelet: true, Version: "v0.6.0-41"}
+				}
+				probes := calls
+
+				press(tc.row, "enter")
+				if scr.mode != "confirm" {
+					t.Fatalf("%s running Substrate: mode = %q, want the rejection", tc.name, scr.mode)
+				}
+				if calls != probes {
+					t.Errorf("the install probe ran on a cluster below the floor (%d probes, had %d)", calls, probes)
+				}
+				view := flat(app.View())
+				floor := gcp.MinSupportedRelease.String()
+				if !strings.Contains(view, tc.name+" is below "+floor) {
+					t.Errorf("rejection missing from the view:\n%s", view)
+				}
+				if strings.Contains(view, "already runs Substrate") || strings.Contains(view, "[t]") {
+					t.Errorf("the rejection reads like the guard, teardown offer included:\n%s", view)
+				}
+				if hints := scr.Hints(); len(hints) != 1 || hints[0].Key != "esc" {
+					t.Errorf("hints on the rejection = %+v, want only esc", hints)
+				}
+
+				// The guard's path from here: [t], the cluster's name, enter.
+				// None of it may reach a teardown.
+				press("t")
+				if scr.mode == "teardown-confirm" {
+					t.Fatal("[t] on the rejection opened the teardown prompt")
+				}
+				for _, r := range tc.name {
+					press(string(r))
+				}
+				press("enter")
+				if scr.mode == "teardown-confirm" || scr.mode == "teardown" {
+					t.Errorf("after [t], the name and enter: mode = %q", scr.mode)
+				}
+				if slices.Contains(labels, "ate-setup delete ate-system") {
+					t.Errorf("a teardown ran on a cluster below the floor: %v", labels)
+				}
+				if app.mach.Current() != state.Cluster {
+					t.Errorf("left the cluster step: %v", app.mach.Current())
+				}
+
+				// Typed by name on the create row, it is the same cluster
+				// and gets the same rejection.
+				pump(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+				scr.cursor = len(scr.clusters)
+				press("enter")
+				scr.nameInput.SetValue(tc.name)
+				press("enter")
+				if scr.mode != "confirm" || calls != probes {
+					t.Errorf("typed %s: mode = %q, probes = %d (had %d), want the rejection without a probe", tc.name, scr.mode, calls, probes)
+				}
+			})
+		}
 	}
 }
 
@@ -2710,13 +2948,94 @@ func TestTypedInstalledClusterNameIsStillGuarded(t *testing.T) {
 	if scr.mode != "name" {
 		t.Fatalf("mode = %q, want name", scr.mode)
 	}
-	scr.nameInput.SetValue("legacy-prod")
+	scr.nameInput.SetValue("substrate-poc")
 	press("enter")
 	if app.mach.Current() != state.Cluster || scr.mode != "installed" {
 		t.Fatalf("typed installed cluster: step=%v mode=%q, want Cluster/installed", app.mach.Current(), scr.mode)
 	}
 	if app.deps.Setup.ClusterName != "substrate-test" || app.deps.Setup.ClusterIsNew {
 		t.Errorf("blocked name leaked into Setup: %q (new=%v)", app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
+	}
+}
+
+// The create prompt checks the name against GKE's rule as it is typed and
+// names the rule broken; [enter] on a bad name stays on the prompt instead of
+// failing minutes later in bootstrap with GKE's regex (#128).
+func TestCreateFormRejectsInvalidClusterName(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("enter") // cursor defaults to "Create a new cluster" -> name mode
+	scr := app.cur.(*clusterScreen)
+	if scr.mode != "name" {
+		t.Fatalf("mode = %q, want name", scr.mode)
+	}
+	// Typed, not set: the verdict has to follow the keystrokes.
+	scr.nameInput.SetValue("my-cluster")
+	if view := flat(app.View()); strings.Contains(view, "Cluster name \"") {
+		t.Fatalf("valid name flagged:\n%s", view)
+	}
+	press("_")
+	if view := flat(app.View()); !strings.Contains(view, "Cluster name \"my-cluster_\" contains '_': only lowercase letters, digits and hyphens are allowed.") {
+		t.Fatalf("typed underscore not flagged:\n%s", view)
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"My-Cluster", "must start with a lowercase letter"},
+		{"1st-cluster", "must start with a lowercase letter"},
+		{"my-cluster-", "must not end with a hyphen"},
+		{"my cluster", "contains ' '"},
+		{"", "A cluster name is required."},
+	} {
+		scr.nameInput.SetValue(tc.name)
+		if view := flat(app.View()); !strings.Contains(view, tc.want) {
+			t.Errorf("name %q: want %q in view:\n%s", tc.name, tc.want, view)
+		}
+		press("enter")
+		if app.mach.Current() != state.Cluster || scr.mode != "name" {
+			t.Fatalf("name %q: enter advanced: step=%v mode=%q", tc.name, app.mach.Current(), scr.mode)
+		}
+		if app.deps.Setup.ClusterIsNew || app.deps.Setup.ClusterName != "substrate-test" {
+			t.Fatalf("name %q leaked into Setup: %q (new=%v)", tc.name, app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
+		}
+	}
+}
+
+// A valid name shows no verdict and [enter] creates with it.
+func TestCreateFormAcceptsValidClusterName(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("enter")
+	scr := app.cur.(*clusterScreen)
+	scr.nameInput.SetValue("agents-2")
+	if view := flat(app.View()); strings.Contains(view, "Cluster name \"") || strings.Contains(view, "Already exists") {
+		t.Fatalf("valid new name flagged:\n%s", view)
+	}
+	press("enter")
+	if app.mach.Current() != state.Provision {
+		t.Fatalf("after a valid name: %v (mode %q)", app.mach.Current(), scr.mode)
+	}
+	if !app.deps.Setup.ClusterIsNew || app.deps.Setup.ClusterName != "agents-2" {
+		t.Errorf("Setup = %q (new=%v), want agents-2 new", app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
+	}
+}
+
+// A name already in the list is said to be, with where, before [enter] turns
+// it into a selection of that cluster (TestTypedInstalledClusterNameIsStillGuarded).
+func TestCreateFormFlagsListedClusterName(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("enter")
+	scr := app.cur.(*clusterScreen)
+	scr.nameInput.SetValue("substrate-ga")
+	view := flat(app.View())
+	for _, want := range []string{"Already exists in us-west1-c: [enter] selects it from the list.", "select the existing cluster"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("listed name: want %q in view:\n%s", want, view)
+		}
+	}
+	press("enter")
+	if app.mach.Current() != state.Provision || app.deps.Setup.ClusterIsNew || app.deps.Setup.ClusterName != "substrate-ga" {
+		t.Fatalf("typed listed name: step=%v mode=%q cluster=%q new=%v, want substrate-ga selected",
+			app.mach.Current(), scr.mode, app.deps.Setup.ClusterName, app.deps.Setup.ClusterIsNew)
 	}
 }
 
@@ -3070,6 +3389,78 @@ func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	}
 	if view := app.View(); !strings.Contains(view, "counter-microvm") {
 		t.Errorf("Complete view should mention counter-microvm:\n%s", view)
+	}
+}
+
+// TestAutoscalingStepSkipsSystemPools: the pools setup-gcp creates for
+// Substrate's system components and bundled PostgreSQL (labeled
+// ate.dev/workloadType) are listed so the user sees why, but never offered:
+// the cursor cannot reach them. With no other pool the step says so and
+// leaves only the skip row.
+func TestAutoscalingStepSkipsSystemPools(t *testing.T) {
+	app := testApp(t)
+	system := []gcp.NodePool{
+		{Name: "ate-postgres", MachineType: "e2-standard-4", WorkloadType: "ate-postgres"},
+		{Name: "ate-system-infra", MachineType: "e2-standard-4", WorkloadType: "ate-system-infra"},
+	}
+	worker := gcp.NodePool{Name: "substrate-node-pool", MachineType: "c3-standard-4"}
+
+	scr := newAutoscalingScreen(app.deps)
+	scr.Update(poolsMsg{owner: scr, pools: append(slices.Clone(system), worker)})
+	out := scr.View(100)
+	for _, want := range []string{
+		"[1] Enable autoscaling on substrate-node-pool  (c3-standard-4)",
+		"ate-postgres  (e2-standard-4) — system pool, managed by setup-gcp",
+		"ate-system-infra  (e2-standard-4) — system pool, managed by setup-gcp",
+		"[2] Skip — keep a fixed node count",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("autoscaling view should contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Enable autoscaling on ate-") || strings.Contains(out, "No node pool here is eligible") {
+		t.Errorf("system pools must not be offered:\n%s", out)
+	}
+	// The worker pool is preselected; down goes to skip and no further, so
+	// the two system pools are never under the cursor.
+	if scr.cursor != 0 {
+		t.Fatalf("cursor should start on the worker pool, got %d", scr.cursor)
+	}
+	scr.Update(key("j"))
+	scr.Update(key("j"))
+	if scr.cursor != 1 {
+		t.Fatalf("cursor should stop on the skip row (1), got %d", scr.cursor)
+	}
+	scr.Update(key("k"))
+	scr.Update(key("enter"))
+	if scr.mode != "bounds" || app.deps.Setup.NodePool != "substrate-node-pool" {
+		t.Fatalf("enter on the worker pool should open bounds for it: mode=%s pool=%s", scr.mode, app.deps.Setup.NodePool)
+	}
+
+	// Only system pools: nothing to choose, and enter skips the step.
+	scr = newAutoscalingScreen(app.deps)
+	scr.Update(poolsMsg{owner: scr, pools: system})
+	out = scr.View(100)
+	for _, want := range []string{
+		"No node pool here is eligible for autoscaling.",
+		"ate-postgres  (e2-standard-4) — system pool, managed by setup-gcp",
+		"[1] Skip — keep a fixed node count",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("autoscaling view with only system pools should contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Enable autoscaling on") {
+		t.Errorf("nothing should be offered with only system pools:\n%s", out)
+	}
+	if scr.cursor != 0 {
+		t.Fatalf("cursor should be on the skip row, got %d", scr.cursor)
+	}
+	if msgs := runCmd(scr.Update(key("enter"))); len(msgs) != 1 || msgs[0] != navNext {
+		t.Fatalf("enter with only system pools should skip the step, got %v", msgs)
+	}
+	if app.deps.Setup.AutoscaleEnabled {
+		t.Error("skipping must not record autoscaling as enabled")
 	}
 }
 
@@ -3665,21 +4056,82 @@ func TestImagesScreenSaysUnmanagedImagesMustMatchTheTree(t *testing.T) {
 // quoted values at their hyphens and indented the continuation, so the copied
 // command no longer ran; it is broken at flags instead, with continuations.
 func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
-	command := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "")
-	for _, width := range []int{36, 50, 80, 200} {
-		lines := shellLines(command, width)
-		for _, line := range lines {
-			// A single flag wider than the panel is allowed its own line.
-			if lipgloss.Width(line) > width && strings.Count(line, "--") > 1 {
-				t.Errorf("width %d: line %q is wider than the panel", width, line)
+	cleanup := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "", false)
+	// The completion screen's Next steps at 80 columns (39 columns of
+	// text): the head of the second command is wider than the panel, and
+	// the first carries a comment. Before, the panel re-wrapped the head and
+	// a copied first line ran without -a's value.
+	install := "go install ./cmd/kubectl-ate    # run inside your substrate checkout"
+	create := "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter"
+	// The managed tree's install clones upstream into a temp dir first; its
+	// URL and commit are single words wider than 39 columns, which is
+	// allowed, but nothing else may be: a unit that fit only without the
+	// continuation indent used to come out two columns too wide.
+	managed := snapshot.NewBuilder(t.TempDir(), true).KubectlAteInstall()
+	for _, tc := range []struct {
+		command string
+		widths  []int
+	}{
+		{cleanup, []int{36, 50, 80, 200}},
+		{install, []int{39, 69}},
+		{create, []int{39, 69}},
+		{managed, []int{39, 69}},
+	} {
+		for _, width := range tc.widths {
+			lines := shellLines(tc.command, width)
+			for _, line := range lines {
+				// A single word wider than the panel is allowed its own line.
+				if lipgloss.Width(line) > width && len(strings.Fields(strings.TrimSuffix(line, " \\"))) > 1 {
+					t.Errorf("width %d: line %q is wider than the panel", width, line)
+				}
+				if strings.Count(line, "'")%2 != 0 {
+					t.Errorf("width %d: line %q breaks inside a quoted value", width, line)
+				}
+				if strings.HasSuffix(strings.TrimSuffix(line, " \\"), " -a") {
+					t.Errorf("width %d: line %q separates -a from its value", width, line)
+				}
 			}
-			if strings.Count(line, "'")%2 != 0 {
-				t.Errorf("width %d: line %q breaks inside a quoted value", width, line)
+			want := tc.command
+			if i := strings.Index(tc.command, " #"); i >= 0 {
+				// The comment moves to a line of its own, above the command.
+				if lines[0] != strings.TrimSpace(tc.command[i:]) {
+					t.Errorf("width %d: first line %q, want the comment on its own", width, lines[0])
+				}
+				lines, want = lines[1:], strings.TrimSpace(tc.command[:i])
+			}
+			joined := strings.Join(lines, "\n")
+			if got := strings.Join(strings.Fields(strings.ReplaceAll(joined, " \\\n", " ")), " "); got != want {
+				t.Errorf("width %d: rejoined command = %q, want %q", width, got, want)
 			}
 		}
-		joined := strings.Join(lines, "\n")
-		if got := strings.Join(strings.Fields(strings.ReplaceAll(joined, " \\\n", " ")), " "); got != command {
-			t.Errorf("width %d: rejoined command = %q, want %q", width, got, command)
+	}
+}
+
+// The guard and the teardown prompt behind it are clamped from the bottom
+// at ordinary terminal sizes, and what used to be clamped away was the part
+// that mattered: at 110×26 the guard's second remedy and at 80×24 every
+// remedy, and the teardown prompt's "type the name" line and input, so the
+// name was typed blind. Both have to show within the rows those sizes
+// leave; the teardown prompt is the destructive dialog, so its name prompt
+// and the list of what goes must survive too.
+func TestGuardRemediesSurviveSmallTerminals(t *testing.T) {
+	for _, size := range [][2]int{{110, 26}, {80, 24}} {
+		app := testApp(t)
+		press := pressToCluster(t, app)
+		pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		press("5", "enter") // substrate-installed: the reinstall guard
+		view := flat(app.View())
+		for _, want := range []string{"Supported paths forward", "Upgrade it", "[t] deletes Substrate on this cluster"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("at %dx%d the guard lost %q:\n%s", size[0], size[1], want, app.View())
+			}
+		}
+		press("t") // the teardown prompt
+		view = flat(app.View())
+		for _, want := range []string{"Type substrate-installed to confirm", "every actor", "ActorTemplate, atespace, and WorkerPool", "database volume"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("at %dx%d the teardown prompt lost %q:\n%s", size[0], size[1], want, app.View())
+			}
 		}
 	}
 }
@@ -3703,6 +4155,189 @@ func TestHintBarFitsTheGuardAt80Columns(t *testing.T) {
 		if !strings.Contains(bar, k) {
 			t.Errorf("hint bar lost %s: %q", k, bar)
 		}
+	}
+}
+
+// The reinstall guard is a panel about one cluster, like the readiness
+// confirmation: while it is open the list shrinks to that cluster's row so
+// the panel gets the terminal's height, and the panel does not repeat the
+// bottom bar's keys with its own wording. Exiting on it leaves the cleanup
+// commands in the terminal, where they can be copied without panel borders:
+// the exit summary's two options, cluster-scoped first and the complete
+// teardown as the alternative, worded the same way (not as a second step).
+func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	press("5", "enter") // substrate-installed: the reinstall guard
+	scr := app.cur.(*clusterScreen)
+	if scr.mode != "installed" {
+		t.Fatalf("mode = %q, want installed", scr.mode)
+	}
+	view := flat(scr.View(110))
+	for _, other := range []string{"substrate-poc", "legacy-prod", "Create a new cluster"} {
+		if strings.Contains(view, other) {
+			t.Errorf("the guard still lists %s:\n%s", other, view)
+		}
+	}
+	if !strings.Contains(view, "[5] substrate-installed") {
+		t.Errorf("the guard lost its own cluster's row:\n%s", view)
+	}
+	if strings.Contains(view, "tear down here") {
+		t.Errorf("the guard panel repeats the keys:\n%s", view)
+	}
+	notes := app.ExitNotes()
+	if len(notes) != 2 {
+		t.Fatalf("exit notes on the guard = %+v, want the cluster-scoped and the complete cleanup", notes)
+	}
+	for i, n := range notes {
+		for _, want := range []string{"./tools/cleanup-gcp", "--cluster 'substrate-installed'", "--location 'us-west1-c'", "--bucket <snapshot-bucket>"} {
+			if !strings.Contains(n.Command, want) {
+				t.Errorf("exit note %d's command lacks %q: %s", i+1, want, n.Command)
+			}
+		}
+		if strings.Contains(n.Command, "--delete-repository") {
+			t.Errorf("exit note %d deletes an image repository this run did not provision: %s", i+1, n.Command)
+		}
+	}
+	if !strings.Contains(notes[0].Command, "--cluster-scoped") || strings.Contains(notes[1].Command, "--cluster-scoped") {
+		t.Errorf("exit notes = %+v, want the cluster-scoped command first and the complete one second", notes)
+	}
+	clusterScoped, complete := snapshot.CleanupLeads(false, false)
+	if lead := strings.Join(notes[0].Lead, " "); !strings.HasPrefix(lead, "Cluster substrate-installed already runs Substrate.") || !strings.HasSuffix(lead, strings.Join(clusterScoped, " ")) {
+		t.Errorf("exit note 1's lead = %q, want the guard's verdict and then the summary's cluster-scoped option", lead)
+	}
+	if lead := strings.Join(notes[1].Lead, " "); lead != strings.Join(complete, " ") {
+		t.Errorf("exit note 2's lead = %q, want the summary's complete-teardown option", lead)
+	}
+	for i, want := range []string{"Option 1 — cluster-scoped", "Option 2 — complete teardown (only if no other Substrate cluster uses this project)"} {
+		if !strings.Contains(strings.Join(notes[i].Lead, " "), want) {
+			t.Errorf("exit note %d's lead lacks %q: %v", i+1, want, notes[i].Lead)
+		}
+	}
+	if !strings.Contains(notes[1].Trail, "--bucket") {
+		t.Errorf("exit note 2's trail = %q, want the --bucket placeholder explained", notes[1].Trail)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the list
+	if notes := app.ExitNotes(); len(notes) != 0 {
+		t.Errorf("exit notes off the guard = %+v, want none", notes)
+	}
+}
+
+// manyClusters is a project busy enough to overflow the list at 80×24: 25
+// clusters, none of them ready, so the create row is [26] and no background
+// probe runs.
+func manyClusters(t *testing.T) []gcp.Cluster {
+	t.Helper()
+	base, err := (&gcp.Client{DryRun: true}).ListClusters(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(base, func(c gcp.Cluster) bool { return !c.SubstrateReady() })
+	if i < 0 {
+		t.Fatal("the dry-run list has no cluster below the floor")
+	}
+	var many []gcp.Cluster
+	for n := 1; n <= 25; n++ {
+		c := base[i]
+		c.Name = fmt.Sprintf("cluster-%02d", n)
+		many = append(many, c)
+	}
+	return many
+}
+
+// A busy project at 80×24 (#110): 26 rows in a body of 19. The list scrolls
+// with the cursor and says how many rows are out of view, the note under it
+// keeps its rows, and the create row — [26], past the digit keys and the
+// window — is one key away and visible when selected, with the name prompt
+// under it.
+func TestClusterListScrollsToTheCursorAt80x24(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	scr := app.cur.(*clusterScreen)
+	pump(t, app, clustersMsg{owner: scr, clusters: manyClusters(t)})
+	pump(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	press("g")
+	for i := 0; i <= 25; i++ {
+		if scr.cursor != i {
+			t.Fatalf("cursor = %d, want %d", scr.cursor, i)
+		}
+		frame := app.View()
+		if want := fmt.Sprintf("[%d]", i+1); !strings.Contains(frame, want) {
+			t.Errorf("cursor on row %s: the frame does not show it:\n%s", want, frame)
+		}
+		if !strings.Contains(frame, " more") {
+			t.Errorf("cursor on row %d: nothing says rows are out of view:\n%s", i+1, frame)
+		}
+		if !strings.Contains(frame, "Substrate needs") {
+			t.Errorf("cursor on row %d: the list ran over the note under it:\n%s", i+1, frame)
+		}
+		press("j")
+	}
+	if frame := app.View(); !strings.Contains(frame, "[26]") || !strings.Contains(frame, "Create a new cluster") {
+		t.Errorf("the create row is selected and not shown:\n%s", frame)
+	}
+
+	press("g")
+	if scr.cursor != 0 {
+		t.Errorf("after g: cursor = %d, want 0", scr.cursor)
+	}
+	press("G")
+	if scr.cursor != 25 {
+		t.Errorf("after G: cursor = %d, want the create row", scr.cursor)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyHome})
+	if scr.cursor != 0 {
+		t.Errorf("after home: cursor = %d, want 0", scr.cursor)
+	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEnd})
+	if scr.cursor != 25 {
+		t.Errorf("after end: cursor = %d, want the create row", scr.cursor)
+	}
+	press("enter")
+	if scr.mode != "name" {
+		t.Fatalf("mode = %q, want name", scr.mode)
+	}
+	frame := app.View()
+	for _, want := range []string{"[26]", "New cluster name", "↑ "} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("the name prompt frame lacks %q:\n%s", want, frame)
+		}
+	}
+}
+
+// Without a height the list is whole, as the screen tests render it; with
+// one the window holds the cursor, uses every line it has — a marker on
+// each side with hidden rows, the list on the rest — and shows the whole
+// list when it fits.
+func TestListWindowKeepsTheCursorAndFillsTheLines(t *testing.T) {
+	const total = 26
+	for avail := 1; avail <= 30; avail++ {
+		for cursor := 0; cursor < total; cursor++ {
+			top, size := listWindow(total, cursor, avail)
+			if cursor < top || cursor >= top+size {
+				t.Errorf("avail %d: cursor %d is outside rows %d..%d", avail, cursor, top, top+size-1)
+			}
+			lines := size
+			if top > 0 {
+				lines++
+			}
+			if top+size < total {
+				lines++
+			}
+			switch {
+			case total <= avail && (top != 0 || size != total):
+				t.Errorf("avail %d: %d rows fit, got rows %d..%d", avail, total, top, top+size-1)
+			case total > avail && avail > 2 && lines != avail:
+				t.Errorf("avail %d cursor %d: rows %d..%d take %d lines", avail, cursor, top, top+size-1, lines)
+			}
+		}
+	}
+	if top, size := listWindow(total, 13, 0); top != 0 || size != total {
+		t.Errorf("no limit: rows %d..%d, want them all", top, top+size-1)
+	}
+	s, _, _ := drivenClusterScreen(t)
+	if whole := flat(s.View(110)); !strings.Contains(whole, "[1]") || !strings.Contains(whole, "Create a new cluster") {
+		t.Errorf("View without a height does not show the whole list:\n%s", whole)
 	}
 }
 
@@ -3811,5 +4446,114 @@ func TestSeparateSystemNodesField(t *testing.T) {
 	}
 	if got := separateSystemNodesField(true).input.Value(); got != "no" {
 		t.Errorf("field for shared nodes shows %q, want no", got)
+	}
+}
+
+// filestoreFailRunner fails the Filestore step the way the v1.0.0-rc.1 run
+// did (#114): the API check finds the overlay written against v1alpha1.
+type filestoreFailRunner struct{ inner execx.Runner }
+
+func (r filestoreFailRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+	if spec.Label != "deploy filestore csi driver" {
+		return r.inner.Start(ctx, spec)
+	}
+	ch := make(chan execx.Event, 4)
+	ch <- execx.Event{Line: "Cloning into 'gcp-filestore-csi-driver'..."}
+	ch <- execx.Event{Line: snapshot.FilestoreAPICheckLine + " (ate.dev/v1alpha1)..."}
+	ch <- execx.Event{Line: "error: the Filestore overlay's CSIDriverConfig is written against ate.dev/v1alpha1, but this cluster serves csidriverconfigs.ate.dev as: v1", Stderr: true}
+	ch <- execx.Event{Done: true, Err: errors.New("exit status 1")}
+	close(ch)
+	return ch
+}
+
+// A Filestore run that fails and is skipped from the failure is not one that
+// was skipped outright: it may have changed things. The Setup records the
+// difference, the completion panel says "failed", and a later run that
+// succeeds clears it (#114).
+func TestFilestoreSkippedAfterAFailureIsReportedAsFailed(t *testing.T) {
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  filestoreFailRunner{inner: execx.DryRun{Delay: time.Millisecond}},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	deps.Setup.ProjectID, deps.Setup.ClusterName = "acme", "prod"
+	var scr *filestoreScreen
+	drive := func(first tea.Msg) {
+		queue := []tea.Msg{first}
+		for steps := 0; len(queue) > 0; steps++ {
+			if steps > 1000 {
+				t.Fatal("the Filestore screen did not converge")
+			}
+			msg := queue[0]
+			queue = append(queue[1:], runCmd(scr.Update(msg))...)
+		}
+	}
+
+	scr = newFilestoreScreen(deps)
+	drive(key("enter")) // [1] install
+	if scr.comp == nil || scr.comp.failed == nil {
+		t.Fatal("the run should have failed")
+	}
+	if deps.Setup.FilestoreCSIFailed || deps.Setup.FilestoreCSIDeployed {
+		t.Fatal("nothing is recorded before the user decides what to do about the failure")
+	}
+	if scr.Update(key("s")) == nil {
+		t.Fatal("[s] after a failure should move on")
+	}
+	if !deps.Setup.FilestoreCSIFailed || deps.Setup.FilestoreCSIDeployed {
+		t.Errorf("skip after failure: failed=%v deployed=%v", deps.Setup.FilestoreCSIFailed, deps.Setup.FilestoreCSIDeployed)
+	}
+	if got := FilestoreSummary(deps.Setup); !strings.HasPrefix(got, "failed") {
+		t.Errorf("FilestoreSummary = %q, want it to lead with failed", got)
+	}
+	if view := flat(newCompleteScreen(deps).View(120)); !strings.Contains(view, "filestore failed") || strings.Contains(view, "filestore skipped") {
+		t.Errorf("the completion panel should say the Filestore step failed:\n%s", view)
+	}
+
+	deps.Runner = execx.DryRun{Delay: time.Millisecond}
+	scr = newFilestoreScreen(deps)
+	drive(key("enter"))
+	if !scr.comp.ok() {
+		t.Fatalf("the dry-run install should succeed: %v", scr.comp.failed)
+	}
+	scr.Update(key("enter"))
+	if deps.Setup.FilestoreCSIFailed || !deps.Setup.FilestoreCSIDeployed {
+		t.Errorf("after a run that succeeded: failed=%v deployed=%v", deps.Setup.FilestoreCSIFailed, deps.Setup.FilestoreCSIDeployed)
+	}
+	if got := FilestoreSummary(deps.Setup); got != "installed" {
+		t.Errorf("FilestoreSummary after an install = %q", got)
+	}
+	if got := FilestoreSummary(state.NewSetup()); got != "skipped" {
+		t.Errorf("FilestoreSummary of a step never run = %q", got)
+	}
+}
+
+// The upgrade hand-over outgrew one panel line once it exported the
+// kubeconfig. Wider than the panel it breaks at its && joins, every line but
+// the last ending in the && that continues it, so the lines paste as the one
+// command; narrower, it stays whole.
+func TestHandOverLinesBreakAtTheJoins(t *testing.T) {
+	line := "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig && export NEW_RELEASE=v0.6.1 && unset VERSION"
+	if got := handOverLines(line, 120); got != line {
+		t.Errorf("a line that fits was changed:\n%s", got)
+	}
+	got := handOverLines(line, 72)
+	if want := "cd ~/ate-upgrade/new && export KUBECONFIG=~/ate-upgrade/kubeconfig &&\n  export NEW_RELEASE=v0.6.1 && unset VERSION"; got != want {
+		t.Errorf("at 72 columns got\n%s\nwant\n%s", got, want)
+	}
+	for width := 30; width <= 120; width++ {
+		lines := strings.Split(handOverLines(line, width), "\n")
+		for i, l := range lines {
+			if lipgloss.Width(l) > width && strings.Contains(l, " && ") {
+				t.Errorf("width %d: line %d is %d wide and could have been broken: %q", width, i, lipgloss.Width(l), l)
+			}
+			if i < len(lines)-1 && !strings.HasSuffix(l, " &&") {
+				t.Errorf("width %d: line %d does not continue with &&: %q", width, i, l)
+			}
+		}
+		if joined := strings.ReplaceAll(strings.Join(lines, "\n"), " &&\n  ", " && "); joined != line {
+			t.Errorf("width %d: the lines do not paste back to the command:\n%s", width, joined)
+		}
 	}
 }

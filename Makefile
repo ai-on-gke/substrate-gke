@@ -48,8 +48,11 @@ build:
 # installer does not pull in the GCP client libraries.
 MODULES := installer tools/setup-gcp
 
+# installer/internal/ui runs for about 9 minutes, close to go test's default
+# 10 minute limit: its wizard walks wait on real cursor-blink and spinner
+# timers.
 test:
-	for m in $(MODULES); do (cd $$m && go test ./...) || exit 1; done
+	for m in $(MODULES); do (cd $$m && go test -timeout 20m ./...) || exit 1; done
 
 fmt:
 	for m in $(MODULES); do (cd $$m && gofmt -w .) || exit 1; done

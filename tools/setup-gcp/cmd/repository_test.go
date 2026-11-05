@@ -182,7 +182,9 @@ func TestBootstrapRepositoryOptIn(t *testing.T) {
 		for i, arg := range os.Args {
 			if arg == "--" {
 				rootCmd.SetArgs(os.Args[i+1:])
+				// As main does: cobra no longer prints the error itself.
 				if err := Execute(); err != nil {
+					fmt.Fprintln(os.Stderr, err)
 					os.Exit(1)
 				}
 				os.Exit(0)

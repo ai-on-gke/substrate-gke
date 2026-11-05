@@ -31,16 +31,17 @@ export NETWORK=default
 export SUBNETWORK=default
 
 export CLUSTER_NAME=substrate-poc
-# Substrate needs GKE 1.36 with the beta PodCertificate APIs, which setup-gcp
-# enables, or 1.37 and later, which serve them under v1. GKE serves a version
-# only in the release channels that carry it; at the time of writing 1.37 is
-# only on rapid. Empty values create the cluster at GKE's default version and
-# channel. See tools/setup-gcp/README.md ("Create Cluster").
+# Substrate needs GKE 1.37 or later, on the control plane and every node pool,
+# which serve the PodCertificate APIs under v1. GKE serves a version only in
+# the release channels that carry it; at the time of writing 1.37 is only on
+# rapid. Left empty, setup-gcp uses 1.37 and GKE's default channel; it rejects
+# a version below 1.37. See tools/setup-gcp/README.md ("Create Cluster").
 export CLUSTER_VERSION=1.37
 export RELEASE_CHANNEL=rapid
 # Only teardown.sh reads this: --delete-gvisor-node-pool needs it, and --all
-# and --cluster-scoped delete the pool on its own when it is set.
-export NODE_POOL_NAME=gvisor-pool
+# and --cluster-scoped delete the pool on its own when it is set. setup-gcp
+# names the pool it creates substrate-node-pool.
+export NODE_POOL_NAME=substrate-node-pool
 export NODE_MACHINE_TYPE=c3-standard-4
 # Nested virtualization exposes /dev/kvm, which microVM workers need.
 export ENABLE_NESTED_VIRTUALIZATION=true

@@ -16,6 +16,7 @@ package gcp
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -202,13 +203,15 @@ func TestParseNodePools(t *testing.T) {
 	data := `[
 	  {"name": "substrate-node-pool", "config": {"machineType": "c3-standard-4"},
 	   "autoscaling": {"enabled": true}},
-	  {"name": "default-pool", "config": {"machineType": "e2-medium"}, "autoscaling": {}}
+	  {"name": "default-pool", "config": {"machineType": "e2-medium"}, "autoscaling": {}},
+	  {"name": "ate-postgres", "config": {"machineType": "e2-standard-4",
+	   "labels": {"ate.dev/workloadType": "ate-postgres"}}, "autoscaling": {}}
 	]`
 	pools, err := ParseNodePools([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pools) != 2 {
+	if len(pools) != 3 {
 		t.Fatalf("got %d pools", len(pools))
 	}
 	if pools[0].Name != "substrate-node-pool" || !pools[0].Autoscaled || pools[0].MachineType != "c3-standard-4" {
@@ -216,6 +219,12 @@ func TestParseNodePools(t *testing.T) {
 	}
 	if pools[1].Autoscaled {
 		t.Error("default-pool should not report autoscaling")
+	}
+	if pools[0].System() || pools[1].System() {
+		t.Error("pools without the ate.dev/workloadType label must not be system pools")
+	}
+	if pools[2].WorkloadType != "ate-postgres" || !pools[2].System() {
+		t.Errorf("ate-postgres should be a system pool: %+v", pools[2])
 	}
 }
 
@@ -379,6 +388,42 @@ func TestChannelVersionsAndCarries(t *testing.T) {
 	} {
 		if got := ChannelCarries(carried[tc.channel], tc.version); got != tc.want {
 			t.Errorf("%s carries %s = %v, want %v", tc.channel, tc.version, got, tc.want)
+		}
+	}
+}
+
+// ValidClusterName is GKE's rule — [a-z]([-a-z0-9]*[a-z0-9])?, at most 40
+// characters — and each rejection names the one rule the name broke, since
+// the form shows the message as the name is typed.
+func TestValidClusterName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string // substring of the error; "" means valid
+	}{
+		{"substrate-poc", ""},
+		{"a", ""},
+		{"a1", ""},
+		{"c3-standard-4", ""},
+		{strings.Repeat("a", 40), ""},
+		{"", "a cluster name is required"},
+		{strings.Repeat("a", 41), "is 41 characters; GKE allows at most 40"},
+		{"1cluster", "must start with a lowercase letter"},
+		{"-cluster", "must start with a lowercase letter"},
+		{"Cluster", "must start with a lowercase letter"},
+		{"cluster-", "must not end with a hyphen"},
+		{"my_cluster", `contains '_': only lowercase letters, digits and hyphens are allowed`},
+		{"myCluster", `contains 'C': only lowercase letters, digits and hyphens are allowed`},
+		{"my cluster", `contains ' ': only lowercase letters, digits and hyphens are allowed`},
+		{"my.cluster", `contains '.': only lowercase letters, digits and hyphens are allowed`},
+	} {
+		err := ValidClusterName(tc.name)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("ValidClusterName(%q) = %v, want nil", tc.name, err)
+		case tc.want != "" && err == nil:
+			t.Errorf("ValidClusterName(%q) = nil, want error containing %q", tc.name, tc.want)
+		case tc.want != "" && !strings.Contains(err.Error(), tc.want):
+			t.Errorf("ValidClusterName(%q) = %q, want containing %q", tc.name, err, tc.want)
 		}
 	}
 }

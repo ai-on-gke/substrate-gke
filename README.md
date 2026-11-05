@@ -19,6 +19,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 - [Where the images come from](#where-the-images-come-from)
 - [How Substrate itself is obtained](#how-substrate-itself-is-obtained)
 - [Logs](#logs)
+- [Your kubeconfig](#your-kubeconfig)
 - [Upgrading an installed cluster](#upgrading-an-installed-cluster)
 - [Tearing down](#tearing-down)
 - [Development](#development)
@@ -31,7 +32,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Tool | Notes |
 |---|---|
 | `gcloud` | Authenticated, with [application-default credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) |
-| Go | Version checked automatically — run `make substrate-pin-check` if unsure |
+| Go | 1.27.3 or later: the pinned Substrate release's `go.mod` names that toolchain for `go run ./cmd/ate-setup` (the installer itself builds with 1.26.4). An older Go works only when `GOTOOLCHAIN=auto` can download the newer one. Checked automatically — run `make substrate-pin-check` if unsure |
 | `git` | — |
 | `kubectl` | — |
 | `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin`, or the `google-cloud-cli-gke-gcloud-auth-plugin` package when gcloud came from apt or dnf |
@@ -72,14 +73,14 @@ A terminal wizard walks the steps below, running the real command it shows and s
 |---|---|---|
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images from a registry you name, or build your own from a commit (the pin by default) — see [Where the images come from](#where-the-images-come-from) |
-| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
+| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. When Docker is needed, checks the image registry here too: one you named, or the default regional one guessed from the zone, whose failures are advisory because provision checks the final host again once the cluster is known |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel, and turn off the separate system node pools). New clusters get only a DNS-based control plane endpoint and require `container.clusters.connect` in IAM in addition to Kubernetes RBAC. Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, the node service account, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
 | 7 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router gets the client allowlist from step 6. Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
-| 8 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
+| 8 | 💾 Install Filestore CSI *(optional)* | Deploys the GCP Filestore CSI Driver from upstream's Substrate overlay. Before changing anything it checks that the cluster serves the API version the overlay's CSIDriverConfig uses, and fails there otherwise — the overlay still targets `ate.dev/v1alpha1`, which Substrate has not served since before v1.0.0-rc.1 ([kubernetes-sigs/gcp-filestore-csi-driver#1416](https://github.com/kubernetes-sigs/gcp-filestore-csi-driver/issues/1416)), so on this pin the step stops before touching IAM: skip it. If an existing cluster has GKE's managed Filestore driver on, installing turns it off first; skipping keeps it |
 | 9 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
-| 10 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
+| 10 | 📦 Choose sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
 | 11 | 🎬 Deploy a demo workload *(`make run-demo` only)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
 
 > [!NOTE]
@@ -115,12 +116,12 @@ A terminal wizard walks the steps below, running the real command it shows and s
 
 ## Sandbox runtimes
 
-Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
+Substrate runs each actor inside a sandbox, and step 10 chooses which kind.
 
 | | gVisor | Micro-VM |
 |---|---|---|
 | Isolation | syscall interception in userspace | hardware virtualization (kata + cloud-hypervisor) |
-| Installed by | the control-plane step, always | step 9, on request |
+| Installed by | the control-plane step, always | step 10, on request |
 | Node requirement | none | **`/dev/kvm` on the node** |
 
 **gVisor** is the default and needs nothing extra: `ate-setup` applies the
@@ -128,18 +129,19 @@ cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
 guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
-rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
+rather than baked into the worker image. Step 10 (`Choose sandbox runtime`) reports
 whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
 stages those five assets and applies a cluster-wide `SandboxConfig` named `microvm` that
 points at them. How it stages them depends on the Substrate tree:
 
-- **Up to v1.0.0-rc.1** (the current pin): upstream's `hack/install-microvm-deps.sh
-  --install` assembles the assets for amd64 and uploads them under `kata-assets/` (in the
-  snapshot bucket up to Substrate v0.5.0, in `<bucket>-assets` after).
+- **Up to v1.0.0-rc.1**: upstream's `hack/install-microvm-deps.sh --install` assembles
+  the assets for amd64 and uploads them under `kata-assets/` (in the snapshot bucket up
+  to Substrate v0.5.0, in `<bucket>-assets` after).
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
-  on** (upstream `main` and `release-1.0`, so from v1.0.0-rc.2): `ate-setup deploy
-  sandboxconfig` with `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets
-  for both amd64 and arm64 and uploads them to `<bucket>-assets` under
+  on** (v1.0.0-rc.2 and later, v1.0.0-rc.3 being the current pin, and upstream `main`
+  and `release-1.0`): `ate-setup deploy sandboxconfig` with
+  `ATE_INSTALL_SANDBOX_CLASSES=gvisor,microvm` downloads the assets for both amd64 and
+  arm64 and uploads them with `gcloud` to `<bucket>-assets` under
   `microvm-assets/<arch>/<sha256>`. It passes the control-plane step's settings and image
   flags too, because every ate-setup deploy replaces the install record that `--upgrade`
   reads. The control-plane step passes `ATE_INSTALL_SANDBOX_CLASSES=gvisor`, so a
@@ -218,9 +220,16 @@ re-staged from the new tree:
   record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster) for where
   it is). Without `--config`, the run replaces that record with one that lacks the
   control plane's settings.
-- Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. Target the cluster's kube
-  context and run `NO_DEV_ENV=1 ARCH=amd64 BUCKET_NAME=<bucket>
-  hack/install-microvm-deps.sh --install`.
+- Up to v1.0.0-rc.1: the upgrade flow does not re-stage them. With `KUBECONFIG` pointed
+  at the cluster (see [Your kubeconfig](#your-kubeconfig)), run `NO_DEV_ENV=1 ARCH=amd64
+  BUCKET_NAME=<bucket> hack/install-microvm-deps.sh --install`.
+
+Both upload with `gcloud storage cp`. Run them with
+`CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False` in the environment, as the
+installer does: on a workstation with gcloud's context-aware access enabled, parallel
+composite uploads fail with `[SSL] PEM lib` and `Temporary components were not uploaded
+correctly`, leaving half the assets in the bucket and the `SandboxConfig` unapplied
+(#111).
 
 Full teardown (`ate-setup delete ate-system`) removes the `SandboxConfig` CRD and all
 `SandboxConfig` resources automatically. To drop micro-VM without tearing anything else
@@ -299,7 +308,7 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** | **Build from source** |
 |---|---|---|
 | **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
-| **Default value** | Registry `ghcr.io/agent-substrate/substrate` and tag `v1.0.0-rc.1`, the pin's release; the commit defaults to the pin, upstream's [`v1.0.0-rc.1`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1) tag | The pin, upstream's [`v1.0.0-rc.1`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1) tag |
+| **Default value** | Registry `ghcr.io/agent-substrate/substrate` and tag `v1.0.0-rc.3`, the pin's release; the commit defaults to the pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag | The pin, upstream's [`v1.0.0-rc.3`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.3) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
 
@@ -310,6 +319,15 @@ The images step chooses between two ways of getting the Substrate control-plane 
 > demo images, so with these the counter demo step fails; skip it, or build
 > from source to run the demo. The GKE release registry
 > (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated.
+
+> [!TIP]
+> If you want to avoid pulling the published images directly from `ghcr.io`, you
+> can put an Artifact Registry [remote repository](https://cloud.google.com/artifact-registry/docs/repositories/remote-overview)
+> in front of it and give
+> `<region>-docker.pkg.dev/<project>/<repo>/agent-substrate/substrate` as the
+> pre-built registry. See
+> [Create remote repositories](https://cloud.google.com/artifact-registry/docs/repositories/remote-repo)
+> for setup.
 
 For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
@@ -361,16 +379,24 @@ GCP provisioning is the exception: the `setup-gcp bootstrap` step runs this repo
 
 ## Logs
 
-Every command's full output is written to a timestamped log under `<user cache dir>/substrate-gke/logs/`. Press `v` in the wizard for a scrollable log viewer; failures show the extracted cause and the log path.
+Every command's full output is written to a timestamped log under `<user cache dir>/substrate-gke/logs/` (`~/.cache` on Linux, `~/Library/Caches` on macOS; the temp dir when no cache dir resolves). Press `v` in the wizard for a scrollable log viewer; failures show the extracted cause and the log path.
+
+That log is the record to keep: the wizard is an interactive terminal program, and started with its input or output piped or redirected (`go run . | tee log`, a CI step) it exits with a message instead of running. Driving it without a terminal is [#107](https://github.com/ai-on-gke/substrate-gke/issues/107).
+
+## Your kubeconfig
+
+The installer never writes `~/.kube/config` or changes your current context. Everything that reaches the cluster — the cluster probes, `ate-setup`, the Filestore step, and the completion screen's `[y]` verify — runs with `KUBECONFIG` pointed at a kubeconfig of the installer's own, `<user cache dir>/substrate-gke/kubeconfig/gke_<project>_<location>_<cluster>.yaml`, and the `ate-setup delete ate-system` command in the exit summary uses the same file. ate-setup records that path in its install record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster)), so leave the file where it is for as long as the cluster runs. Teardown removes it: the `ate-setup delete ate-system` commands (the wizard's `[t]` and the pasted one) after a delete that succeeds, and `tools/cleanup-gcp` (with or without `--cluster-scoped`) once the cluster is gone, so a destroyed cluster leaves no credential file behind.
+
+To work with the cluster from a shell, run the `export KUBECONFIG=...` line the completion screen and the exit summary print, or add the cluster to your own kubeconfig with `gcloud container clusters get-credentials <cluster> --location <location> --project <project>`, which also makes it your current context.
 
 ## Upgrading an installed cluster
 
 > [!CAUTION]
 > Do not re-run the install track against a cluster that already runs Substrate (the wizard blocks it). Run the installer and choose **Upgrade an installed cluster** instead.
 
-From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md) moves a cluster to a later patch release or to the next minor release.
+From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/guides/upgrade.md) moves a cluster to a later patch release or to the next minor release.
 
-The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster, reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, installs the installed release's `kubectl ate`, and creates the snapshot transfer service account new releases use. It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree and sets `NEW_RELEASE` (or `VERSION` for a build from source), and follow the runbook from step 1. **Nothing on the cluster changes until you do.**
+The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster — picked from the installs this machine recorded, newest first, or typed in — reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, fetches the cluster's credentials into `~/ate-upgrade/kubeconfig`, installs the installed release's `kubectl ate`, and runs `setup-gcp create iam`, which creates the snapshot transfer service account new releases use and re-applies the node service account and bucket grants (it only adds bindings). It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree, points its `kubectl` and `ate-setup` at that kubeconfig (in place of the runbook's `kubectl config use-context`, so your own current context stays put), and sets `NEW_RELEASE` (or `VERSION` for a build from source); then follow the runbook from step 1. **Nothing on the cluster changes until you do.**
 
 ate-setup writes that record on every deploy, under `ATE_RECORD_DIR` or by default at `<user cache dir>/ate-setup/installs/gke_<project>_<location>_<cluster>.yaml`. On a machine without it, write one from the settings the cluster was installed with ([operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/operator-install.md) lists them).
 
@@ -378,7 +404,7 @@ The flow refuses an upgrade the runbook does not support, including a move betwe
 
 ## Tearing down
 
-An install creates **billable resources**: the GKE cluster, the snapshot and micro-VM asset buckets, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
+An install creates **billable resources**: the GKE cluster, the snapshot and micro-VM asset buckets, service accounts and IAM bindings (including the Filestore CSI driver's, if that step ran), monitoring dashboards, and any image repository provisioned for a source build.
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
@@ -387,11 +413,11 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 ```
 
 > [!TIP]
-> The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
+> The exit summary from your install prints this invocation pre-filled, as two alternatives — the `--cluster-scoped` form, and the complete teardown — copy the one you want from there rather than retyping values.
 
 The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
 
-This deletes the dashboards and the snapshot transfer and node service accounts too, which every Substrate cluster in the project shares. If other Substrate clusters still use the project, add `--cluster-scoped` (or `CLUSTER_SCOPED=true` with `make teardown`): it deletes only this cluster, its buckets and the bindings on them.
+This deletes the dashboards and the snapshot transfer, Filestore CSI and node service accounts too (with the project roles of the last two), which every Substrate cluster in the project shares. If other Substrate clusters still use the project, add `--cluster-scoped` (or `CLUSTER_SCOPED=true` with `make teardown`): it deletes only this cluster, its buckets and the bindings on them.
 
 Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line.
 

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -298,6 +299,9 @@ func createClusterInternal(ctx context.Context, cfg *Config, client *container.C
 }
 
 func createClusterIdempotent(ctx context.Context, cfg *Config) error {
+	if err := validateClusterName(cfg); err != nil {
+		return err
+	}
 	if err := validateClusterLocation(cfg); err != nil {
 		return err
 	}
@@ -601,6 +605,41 @@ func validateBootDisk(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// clusterNameRE is GKE's rule for a cluster name, as its rejection quotes
+// it: a lowercase letter, then lowercase letters, digits and hyphens, not
+// ending with a hyphen, and at most maxClusterNameLength characters. The
+// installer's internal/gcp has the same pair, so its form and this tool
+// agree; a change to one is a change to both.
+var clusterNameRE = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+const maxClusterNameLength = 40
+
+// validateClusterName rejects a cluster name GKE would, before the create
+// is sent: GKE's own rejection arrives after the API round trip and names
+// the regex, not the character. Each message names the one rule broken.
+func validateClusterName(cfg *Config) error {
+	cfg.ClusterName = strings.TrimSpace(cfg.ClusterName)
+	name := cfg.ClusterName
+	switch {
+	case name == "":
+		return errors.New("a cluster name is required")
+	case len(name) > maxClusterNameLength:
+		return fmt.Errorf("cluster name %q is %d characters; GKE allows at most %d", name, len(name), maxClusterNameLength)
+	case clusterNameRE.MatchString(name):
+		return nil
+	case name[0] < 'a' || name[0] > 'z':
+		return fmt.Errorf("cluster name %q must start with a lowercase letter", name)
+	case strings.HasSuffix(name, "-"):
+		return fmt.Errorf("cluster name %q must not end with a hyphen", name)
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("cluster name %q contains %q: only lowercase letters, digits and hyphens are allowed", name, r)
+		}
+	}
+	return fmt.Errorf("cluster name %q is not a valid GKE cluster name", name)
 }
 
 // validateClusterLocation ensures ClusterLocation is set and compatible with Region.
