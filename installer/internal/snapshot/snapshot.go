@@ -58,12 +58,12 @@ const (
 	// images, which have to have been built from it.
 	//
 	// It is a release commit rather than a commit of main: the commit
-	// upstream's v1.0.0-rc.3 tag names. Releases from v1.0.0-rc.1 on publish
+	// upstream's v1.0.0 tag names. Releases from v1.0.0-rc.1 on publish
 	// their images (ghcr.io/agent-substrate/substrate).
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "4ee8f66ac237adfc3303086b12275aefc150fd6f"
+	Commit = "b34fbee742906494b5eb4f1f36987176bf8770a4"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -91,7 +91,7 @@ const (
 	//
 	// Both are defaults, not limits: the images step takes any registry and
 	// tag, along with the commit those images were built from.
-	ReleaseVersion = "v1.0.0-rc.3"
+	ReleaseVersion = "v1.0.0"
 )
 
 // TransferGSAName is the snapshot transfer service account's name: what
@@ -1343,7 +1343,7 @@ func microVMEnv(base []string) []string {
 // the checkout selects how InstallMicroVMDeps stages the assets:
 // agent-substrate/substrate#2092 ported it into ate-setup (`deploy
 // sandboxconfig --sandbox-classes`) and deleted it in the same commit, so the
-// script and the flag never coexist. The pinned Commit (v1.0.0-rc.3) is past
+// script and the flag never coexist. The pinned Commit (v1.0.0) is past
 // #2092 and takes the ate-setup branch; v1.0.0-rc.1 and the older commits the
 // images step accepts still have the script.
 const legacyMicroVMScript = "hack/install-microvm-deps.sh"
