@@ -573,10 +573,11 @@ func (b *Builder) FetchLabel() string {
 }
 
 // CleanupCommand preserves the cluster and repository targets used by this
-// install. clusterScoped adds --cluster-scoped, the form the exit summary
-// leads with (see CleanupLeads).
-func (b *Builder) CleanupCommand(st *state.Setup, clusterScoped bool) string {
-	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, clusterScoped)
+// install, at the given scope (see CleanupScope): the exit summary offers
+// --keep-cluster alone for a cluster the install did not create, and the
+// cluster-scoped and complete forms for one it did (see CleanupLeads).
+func (b *Builder) CleanupCommand(st *state.Setup, scope CleanupScope) string {
+	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, scope)
 	if st.CreatesArtifactRepository() {
 		if st.RepositoryName() != "ate-images" {
 			command += " --repository " + ShellQuote(st.RepositoryName())

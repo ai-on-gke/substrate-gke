@@ -22,7 +22,10 @@
 # --delete-repository is given. With --cluster-scoped it deletes only the
 # cluster, its buckets and the bindings on them, and keeps what every
 # Substrate cluster in the project shares (dashboards, transfer, Filestore CSI
-# and node service accounts).
+# and node service accounts). With --keep-cluster it deletes only the buckets
+# and the bindings on them, and keeps the cluster too: the cleanup for a
+# cluster the install did not create, where bootstrap created no cluster or
+# node pool to take back.
 #
 # It is a thin wrapper: the deletions themselves live in
 # tools/setup-gcp/teardown.sh, next to the bootstrap they reverse, so a new
@@ -50,6 +53,7 @@ GCE_REGION=""
 ARTIFACT_REGISTRY_REPOSITORY="ate-images"
 KEEP_REPOSITORY=true
 CLUSTER_SCOPED=false
+KEEP_CLUSTER=false
 ASSUME_YES=false
 
 usage() {
@@ -68,6 +72,9 @@ Options:
   --cluster-scoped        Delete only the cluster, its buckets and their bindings; keep the
                           dashboards and the transfer, Filestore CSI and node service
                           accounts that other Substrate clusters in the project share
+  --keep-cluster          Delete only the snapshot and asset buckets and their bindings; keep
+                          the cluster and everything on it (for a cluster the installer did
+                          not create). Delete the Substrate control plane from it first
   --yes                   Skip the confirmation prompt
 
 The installer prints a command with the values for your installation.
@@ -95,6 +102,7 @@ while [[ "$#" -gt 0 ]]; do
     --delete-repository) KEEP_REPOSITORY=false ;;
     --keep-repository) KEEP_REPOSITORY=true ;;
     --cluster-scoped) CLUSTER_SCOPED=true ;;
+    --keep-cluster) KEEP_CLUSTER=true ;;
     --yes) ASSUME_YES=true ;;
     *) usage ;;
   esac
@@ -107,6 +115,10 @@ for var in PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION BUCKET_NAME; do
     usage
   fi
 done
+if ${KEEP_CLUSTER} && ${CLUSTER_SCOPED}; then
+  echo "--keep-cluster and --cluster-scoped are alternatives; give one" >&2
+  usage
+fi
 if [[ ! "${ARTIFACT_REGISTRY_REPOSITORY}" =~ ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
   echo "invalid repository name: ${ARTIFACT_REGISTRY_REPOSITORY}" >&2
   exit 1
@@ -121,7 +133,9 @@ if [ ! -x "${TEARDOWN}" ]; then
   echo "cannot find ${TEARDOWN}; run cleanup-gcp from a substrate-gke checkout" >&2
   exit 1
 fi
-if ${CLUSTER_SCOPED}; then
+if ${KEEP_CLUSTER}; then
+  set -- --delete-iam-policy-bindings --delete-snapshot-bucket
+elif ${CLUSTER_SCOPED}; then
   set -- --cluster-scoped
 else
   set -- --all
@@ -131,7 +145,7 @@ if ! ${KEEP_REPOSITORY}; then
 fi
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
 echo "About to delete from project ${PROJECT_ID}:"
-if ${CLUSTER_SCOPED}; then
+if ${CLUSTER_SCOPED} || ${KEEP_CLUSTER}; then
   echo "  - the setup-gcp IAM bindings on the two buckets below"
 else
   cat <<EOF
@@ -145,9 +159,14 @@ fi
 cat <<EOF
   - gs://${BUCKET_NAME} and every snapshot in it
   - gs://${BUCKET_NAME}-assets and the micro-VM assets in it
-  - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
 EOF
-if ${CLUSTER_SCOPED}; then
+if ${KEEP_CLUSTER}; then
+  echo "  GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION} will be kept, with every workload on it."
+  echo "  Delete the Substrate control plane from it first (ate-setup delete ate-system): it snapshots to these buckets."
+else
+  echo "  - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}, and every workload on it"
+fi
+if ${CLUSTER_SCOPED} || ${KEEP_CLUSTER}; then
   echo "  The dashboards and the snapshot transfer, Filestore CSI and node service accounts will be kept."
 fi
 if ${KEEP_REPOSITORY}; then

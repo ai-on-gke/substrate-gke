@@ -31,7 +31,8 @@ teardown:
 		$(if $(and $(filter command line,$(origin ARTIFACT_REGISTRY_REPOSITORY)),$(ARTIFACT_REGISTRY_REPOSITORY)),--repository "$(ARTIFACT_REGISTRY_REPOSITORY)") \
 		$(if $(filter true,$(DELETE_REPOSITORY)),--delete-repository) \
 		$(if $(filter true,$(KEEP_REPOSITORY)),--keep-repository) \
-		$(if $(filter true,$(CLUSTER_SCOPED)),--cluster-scoped)
+		$(if $(filter true,$(CLUSTER_SCOPED)),--cluster-scoped) \
+		$(if $(filter true,$(KEEP_CLUSTER)),--keep-cluster)
 
 # Run the preflight checks only.
 doctor:

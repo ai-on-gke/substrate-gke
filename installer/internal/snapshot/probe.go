@@ -219,28 +219,52 @@ func simBuild() string {
 	return "substrate-" + ShortCommit() + " commit=" + Commit + " built=2026-01-01T00:00:00Z linux/amd64"
 }
 
+// CleanupScope is how much of an install a cleanup-gcp command deletes.
+type CleanupScope int
+
+const (
+	// CleanupComplete deletes the cluster, its buckets and their bindings,
+	// and the resources every Substrate cluster in the project shares: the
+	// dashboards and the snapshot transfer, Filestore CSI and node service
+	// accounts (cleanup-gcp with no scope flag, teardown.sh --all).
+	CleanupComplete CleanupScope = iota
+	// CleanupClusterScoped deletes the cluster, its buckets and their
+	// bindings, and keeps the shared resources (--cluster-scoped).
+	CleanupClusterScoped
+	// CleanupKeepCluster deletes only the buckets and their bindings, and
+	// keeps the cluster and the shared resources (--keep-cluster). It is the
+	// only GCP cleanup for a cluster the install did not create: on an
+	// existing cluster, bootstrap creates no cluster or node pool, so there
+	// is nothing of the cluster's for the install to take back.
+	CleanupKeepCluster
+)
+
 // CleanupCommand renders cluster cleanup while keeping image repositories.
-// An unknown bucket is left as a placeholder for the user to fill in.
-// clusterScoped adds --cluster-scoped, which keeps what every Substrate
-// cluster in the project shares — the dashboards and the snapshot transfer
-// and node service accounts (see CleanupLeads).
-func CleanupCommand(projectID, cluster, location, bucket string, clusterScoped bool) string {
+// An unknown bucket is left as a placeholder for the user to fill in. scope
+// adds the flag that selects how much is deleted (see CleanupScope).
+func CleanupCommand(projectID, cluster, location, bucket string, scope CleanupScope) string {
 	quoted := "<snapshot-bucket>"
 	if bucket != "" {
 		quoted = ShellQuote(bucket)
 	}
 	command := fmt.Sprintf("./tools/cleanup-gcp --project %s --cluster %s --location %s --bucket %s",
 		ShellQuote(projectID), ShellQuote(cluster), ShellQuote(location), quoted)
-	if clusterScoped {
+	switch scope {
+	case CleanupClusterScoped:
 		command += " --cluster-scoped"
+	case CleanupKeepCluster:
+		command += " --keep-cluster"
 	}
 	return command
 }
 
-// CleanupLeads introduces the two GCP cleanup commands, as lines to print
-// ahead of each: the cluster-scoped form first, then the complete teardown.
-// They are alternatives, each a whole teardown on its own, and the copy
-// numbers them so that the second does not read as a step after the first.
+// CleanupLeads introduces the two GCP cleanup commands that delete the
+// cluster, as lines to print ahead of each: the cluster-scoped form first, then the
+// complete teardown. They are alternatives, each a whole teardown on its own,
+// and the copy numbers them so that the second does not read as a step after
+// the first. Both say in so many words that they delete the cluster and every
+// workload on it: pasted into a shell for a cluster someone else's workloads
+// run on, either one takes those workloads down after a single prompt.
 //
 // The cluster-scoped form leads because the dashboards and the snapshot
 // transfer and node service accounts are shared by every Substrate cluster
@@ -253,27 +277,41 @@ func CleanupCommand(projectID, cluster, location, bucket string, clusterScoped b
 // created (a run that failed may have created it too); teardown.sh deletes
 // it in either case, as an account that was never created counts as
 // already deleted.
-func CleanupLeads(repository, filestore bool) (clusterScoped, complete []string) {
+func CleanupLeads(cluster string, repository, filestore bool) (clusterScoped, complete []string) {
+	deletes := "deletes cluster " + cluster + " and every workload on it"
 	clusterScoped = []string{
-		"Option 1 — cluster-scoped (safe when other clusters share the project): delete only",
-		"this cluster, its snapshot and asset buckets, and the IAM bindings on them:",
+		"Option 1 — cluster-scoped (for a project other Substrate clusters share):",
+		deletes + ", its snapshot and asset buckets,",
+		"and the IAM bindings on them:",
 	}
 	if repository {
-		clusterScoped = []string{
-			clusterScoped[0],
-			"this cluster, its snapshot and asset buckets, the IAM bindings on them, and the",
-			"image repository:",
-		}
+		clusterScoped[2] = "the IAM bindings on them, and the image repository:"
 	}
 	complete = []string{
 		"Option 2 — complete teardown (only if no other Substrate cluster uses this project):",
-		"delete this cluster and the shared resources in one go — the dashboards and the",
-		"snapshot transfer and node service accounts:",
+		deletes + ", and the shared resources —",
+		"the dashboards and the snapshot transfer and node service accounts:",
 	}
 	if filestore {
-		complete[2] = "snapshot transfer, Filestore CSI and node service accounts:"
+		complete[2] = "the dashboards and the snapshot transfer, Filestore CSI and node service accounts:"
 	}
 	return clusterScoped, complete
+}
+
+// KeepClusterLead introduces the --keep-cluster cleanup, which deletes what
+// an install added to GCP and keeps the cluster (see CleanupKeepCluster). It
+// follows the control plane's own teardown: the buckets it deletes are the
+// ones a running control plane snapshots to. repository reports whether it
+// also deletes the image repository the install provisioned.
+func KeepClusterLead(cluster string, repository bool) []string {
+	what := "its snapshot and asset buckets and the IAM bindings on them:"
+	if repository {
+		what = "its snapshot and asset buckets, the IAM bindings on them, and the image repository:"
+	}
+	return []string{
+		"Then delete what the install added in GCP, keeping cluster " + cluster + ":",
+		what,
+	}
 }
 
 // ParseInstalled reads what CheckInstalled printed.
