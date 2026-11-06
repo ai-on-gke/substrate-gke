@@ -326,6 +326,8 @@ a pod: it reaches the API through a port forward, which the NetworkPolicy does n
 Upstream's [authentication guide](https://github.com/agent-substrate/substrate/blob/v1.0.0/docs/guides/authentication.md)
 covers how an in-cluster client authenticates and verifies the server's certificate.
 
+To let Google Cloud Workload Identity Federation verify actor JWTs — or let actors call Google Cloud APIs such as Cloud Storage and Vertex AI via `credprovider-token-exchange` — see [Federating actor JWTs with Google Cloud](docs/actor-jwt-federation.md).
+
 ## Where the images come from
 
 The images step chooses between two ways of getting the Substrate control-plane images. Both name a commit of [`agent-substrate/substrate`](https://github.com/agent-substrate/substrate) — `ate-setup` reads deployment manifests from that source tree either way. The repository is fixed; the commit is yours to choose.
