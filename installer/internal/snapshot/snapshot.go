@@ -1441,10 +1441,11 @@ const FilestoreAddonOffLine = "The managed GKE Filestore CSI Driver addon is off
 
 // filestoreAPICheck runs in the overlay directory, before anything is
 // changed, and fails the step when the cluster does not serve the apiVersion
-// of the overlay's CSIDriverConfig. The overlay is written against
+// of the overlay's CSIDriverConfig. The overlay was written against
 // ate.dev/v1alpha1, which agent-substrate/substrate#2996 stopped serving
-// before v1.0.0-rc.1 (kubernetes-sigs/gcp-filestore-csi-driver#1416); left
-// to deploy.sh, that was found at the Kustomize apply, after it had granted
+// before v1.0.0-rc.1 (kubernetes-sigs/gcp-filestore-csi-driver#1416), until
+// kubernetes-sigs/gcp-filestore-csi-driver#1420 moved it to ate.dev/v1. Left
+// to deploy.sh, a mismatch was found at the Kustomize apply, after it had granted
 // roles/file.editor and the step had turned the managed addon off, and the
 // apply itself had already created the namespace, Deployment and DaemonSet
 // (#114). The version is read from the clone rather than assumed, so the
@@ -1463,7 +1464,7 @@ fi
 if [[ " ${served} " != *" ${want#ate.dev/} "* ]]; then
   echo "error: the Filestore overlay's CSIDriverConfig is written against ${want}, but this cluster serves csidriverconfigs.ate.dev as: ${served% }" >&2
   echo "Nothing was changed: no IAM binding was granted and the managed Filestore addon was left as it is." >&2
-  echo "The overlay has to move to a served version upstream (kubernetes-sigs/gcp-filestore-csi-driver#1416); skip this step until it has." >&2
+  echo "The overlay and this Substrate disagree on the CSIDriverConfig version; skip this step, or install a Substrate that serves ${want}." >&2
   exit 1
 fi
 echo "The cluster serves csidriverconfigs.ate.dev as: ${served% }"`
