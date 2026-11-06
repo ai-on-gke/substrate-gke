@@ -283,6 +283,12 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		fmt.Printf("  log        %s\n", deps.LogPath)
 	}
 	switch {
+	case st.TokenExchangeDeployed:
+		fmt.Printf("  token-ex   credprovider-token-exchange (%s)\n", ui.TokenExchangeSummary(st))
+	case st.TokenExchangeFailed:
+		fmt.Println("  token-ex   credprovider-token-exchange install failed and was skipped; see the log")
+	}
+	switch {
 	case st.FilestoreCSIDeployed:
 		fmt.Println("  filestore  CSI driver deployed (gcp-filestore-csi-driver)")
 	case st.FilestoreCSIFailed:
@@ -344,7 +350,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		// A cluster the user brought: the install created no cluster or
 		// node pool on it, so nothing printed here may delete it. Both
 		// other cleanups do, together with every workload on it.
-		note(snapshot.KeepClusterLead(st.ClusterName, st.CreatesArtifactRepository())...)
+		note(snapshot.KeepClusterLead(st.ClusterName, st.ProvisionedArtifactRepository())...)
 		command(b.CleanupCommand(st, snapshot.CleanupKeepCluster))
 		note("This install did not create cluster "+st.ClusterName+", so no command here deletes it.",
 			"The dashboards and the shared service accounts stay; see \"Tearing down\" in the README.")
@@ -356,7 +362,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		note("Or delete the install from GCP, one of two ways:")
 		// A Filestore run that failed may still have created the account
 		// and its project role (#143), so it is named for a failed run too.
-		clusterScoped, complete := snapshot.CleanupLeads(st.ClusterName, st.CreatesArtifactRepository(), st.FilestoreCSIDeployed || st.FilestoreCSIFailed)
+		clusterScoped, complete := snapshot.CleanupLeads(st.ClusterName, st.ProvisionedArtifactRepository(), st.FilestoreCSIDeployed || st.FilestoreCSIFailed)
 		note(clusterScoped...)
 		command(b.CleanupCommand(st, snapshot.CleanupClusterScoped))
 		note(complete...)

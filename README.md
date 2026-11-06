@@ -68,7 +68,7 @@ make run-demo     # or: install and deploy the counter demo
 
 ## What the installer does
 
-A terminal wizard walks the steps below, running the real command it shows and streaming its output as it goes. `make run` walks steps 1–10; `make run-demo` adds step 11:
+A terminal wizard walks the steps below, running the real command it shows and streaming its output as it goes. `make run` walks steps 1–11; `make run-demo` adds step 12:
 
 | # | Step | What happens |
 |---|---|---|
@@ -79,10 +79,11 @@ A terminal wizard walks the steps below, running the real command it shows and s
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, the node service account, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
 | 7 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router gets the client allowlist from step 6. Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
-| 8 | 💾 Install Filestore CSI *(optional)* | Deploys the GCP Filestore CSI Driver from upstream's Substrate overlay. Before changing anything it checks that the cluster serves the API version the overlay's CSIDriverConfig uses, and fails there otherwise, so a mismatch stops the step before it touches IAM. The overlay registers `ate.dev/v1`, which the pin serves ([kubernetes-sigs/gcp-filestore-csi-driver#1420](https://github.com/kubernetes-sigs/gcp-filestore-csi-driver/pull/1420)); before that it targeted `ate.dev/v1alpha1`, which Substrate stopped serving in v1.0.0-rc.1. If an existing cluster has GKE's managed Filestore driver on, installing turns it off first; skipping keeps it |
-| 9 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
-| 10 | 📦 Choose sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
-| 11 | 🎬 Deploy a demo workload *(`make run-demo` only)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
+| 8 | 🔑 Install token exchange *(optional)* | Builds and deploys [`credprovider-token-exchange`](https://github.com/agent-substrate-plugins/credprovider-token-exchange) with `ko`, configures a Google Cloud STS profile for your Workload Identity Pool provider, and redeploys `ate-api-server` and `atenet` to register it alongside the existing credential provider. On a pre-built install it also grants the cluster nodes pull access to the `ko` registry (provisioning `ate-images` when none is given) |
+| 9 | 💾 Install Filestore CSI *(optional)* | Deploys the GCP Filestore CSI Driver from upstream's Substrate overlay. Before changing anything it checks that the cluster serves the API version the overlay's CSIDriverConfig uses, and fails there otherwise, so a mismatch stops the step before it touches IAM. The overlay registers `ate.dev/v1`, which the pin serves ([kubernetes-sigs/gcp-filestore-csi-driver#1420](https://github.com/kubernetes-sigs/gcp-filestore-csi-driver/pull/1420)); before that it targeted `ate.dev/v1alpha1`, which Substrate stopped serving in v1.0.0-rc.1. If an existing cluster has GKE's managed Filestore driver on, installing turns it off first; skipping keeps it |
+| 10 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
+| 11 | 📦 Choose sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
+| 12 | 🎬 Deploy a demo workload *(`make run-demo` only)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
 
 > [!NOTE]
 > Exiting and re-running is safe; every step is idempotent. A cluster that already runs Substrate is blocked from reinstall by the wizard's guard (preventing broken, mixed-version states); the wizard offers an in-place teardown or points at [Upgrading an installed cluster](#upgrading-an-installed-cluster) instead.
@@ -110,19 +111,19 @@ A terminal wizard walks the steps below, running the real command it shows and s
 
   New clusters are created at 1.37 on the Rapid channel, so none of this applies to them. Advanced setup can pick a newer version or a different channel, like Regular; the installer rejects a version below 1.37, checks with GKE that the channel offers the version, and warns if it doesn't.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
-- **Sandbox runtime comes right before the demo** so steps 1–9 finish setting up the cluster, storage, and node pools first, and on `make run-demo` step 11 immediately deploys the matching demo (`counter` or `counter-microvm`).
+- **Sandbox runtime comes right before the demo** so steps 1–10 finish setting up the cluster, storage, and node pools first, and on `make run-demo` step 12 immediately deploys the matching demo (`counter` or `counter-microvm`).
 - **An existing cluster keeps its own network.** Provision's `setup-gcp bootstrap` warns when an existing cluster's network, subnetwork, or Dataplane V2 setting differs from what it's given, so the installer hands it the cluster's own values; the advanced track's network fields apply to new clusters only.
 
 </details>
 
 ## Sandbox runtimes
 
-Substrate runs each actor inside a sandbox, and step 10 chooses which kind.
+Substrate runs each actor inside a sandbox, and step 11 chooses which kind.
 
 | | gVisor | Micro-VM |
 |---|---|---|
 | Isolation | syscall interception in userspace | hardware virtualization (kata + cloud-hypervisor) |
-| Installed by | the control-plane step, always | step 10, on request |
+| Installed by | the control-plane step, always | step 11, on request |
 | Node requirement | none | **`/dev/kvm` on the node** |
 
 **gVisor** is the default and needs nothing extra: `ate-setup` applies the
@@ -130,7 +131,7 @@ cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
 guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
-rather than baked into the worker image. Step 10 (`Choose sandbox runtime`) reports
+rather than baked into the worker image. Step 11 (`Choose sandbox runtime`) reports
 whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
 stages those five assets and applies a cluster-wide `SandboxConfig` named `microvm` that
 points at them. How it stages them depends on the Substrate tree:

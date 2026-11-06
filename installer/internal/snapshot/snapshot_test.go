@@ -576,6 +576,7 @@ func TestSpecsBlankAnInheritedKubectlContext(t *testing.T) {
 	for _, spec := range []execx.Spec{
 		b.Bootstrap(st),
 		b.DeployAteSystem(st),
+		b.DeployTokenExchange(st),
 		b.DeployDemo(st, "counter"),
 		b.DeployFilestoreCSI(st),
 		b.InstallMicroVMDeps(micro),
@@ -2633,6 +2634,7 @@ func TestClusterStepsUseTheInstallersKubeconfig(t *testing.T) {
 	export := "export KUBECONFIG=" + ShellQuote(path)
 	for _, spec := range []execx.Spec{
 		b.DeployAteSystem(st),
+		b.DeployTokenExchange(st),
 		b.DeployDemo(st, "counter"),
 		b.InstallMicroVMDeps(micro),
 		b.DeployDemo(micro, "counter"),
@@ -2675,5 +2677,87 @@ func TestClusterStepsUseTheInstallersKubeconfig(t *testing.T) {
 	}
 	if got, want := GetCredentialsCommand(st), "gcloud container clusters get-credentials 'substrate-test' --location 'us-west1-c' --project 'acme'"; got != want {
 		t.Errorf("GetCredentialsCommand = %q, want %q", got, want)
+	}
+}
+
+func TestTokenExchangeConfigAndCredentialProviderMerge(t *testing.T) {
+	for _, tc := range []struct {
+		base, want string
+	}{
+		{"", `[{"name":"k8s.io"},{"name":"sts","address":"credprovider-token-exchange.ate-system.svc:50051"}]`},
+		{`{"enabled":false}`, `[{"name":"sts","address":"credprovider-token-exchange.ate-system.svc:50051"}]`},
+		{`[{"name":"k8s.io"},{"name":"sts","address":"old:50051"}]`, `[{"name":"k8s.io"},{"name":"sts","address":"credprovider-token-exchange.ate-system.svc:50051"}]`},
+	} {
+		got, err := TokenExchangeCredentialProviderJSON(tc.base)
+		if err != nil || got != tc.want {
+			t.Errorf("TokenExchangeCredentialProviderJSON(%q) = %q, %v; want %q", tc.base, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{`[]`, `{"name":"custom"}`, `[{"enabled":false}]`, `not-json`} {
+		if _, err := TokenExchangeCredentialProviderJSON(bad); err == nil {
+			t.Errorf("TokenExchangeCredentialProviderJSON(%q) accepted invalid input", bad)
+		}
+	}
+	if got, want := TokenExchangeExtraSPIFFEIDs(" spiffe://cluster.local/ns/x/sa/y , "+TokenExchangeSPIFFEID),
+		"spiffe://cluster.local/ns/x/sa/y,"+TokenExchangeSPIFFEID; got != want {
+		t.Errorf("TokenExchangeExtraSPIFFEIDs = %q, want %q", got, want)
+	}
+
+	st := testSetup(t)
+	st.TokenExchangeAudience = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/oidc"
+	cm := RenderTokenExchangeConfigMap(st)
+	if !strings.Contains(cm, "atespaces: {}") || !strings.Contains(cm, strconv.Quote(st.TokenExchangeAudience)) {
+		t.Errorf("unexpected ConfigMap without atespaces:\n%s", cm)
+	}
+	st.TokenExchangeAtespaces = []string{"default", "agents"}
+	cm = RenderTokenExchangeConfigMap(st)
+	if !strings.Contains(cm, `"default": ["gcp"]`) || !strings.Contains(cm, `"agents": ["gcp"]`) {
+		t.Errorf("unexpected ConfigMap with atespaces:\n%s", cm)
+	}
+}
+
+func TestDeployTokenExchangeAndInstallRecordPreservation(t *testing.T) {
+	t.Setenv("ATE_EGRESS_GATEWAY_EXTRA_SPIFFE_IDS", "spiffe://cluster.local/ns/other/sa/p")
+	b := NewBuilder(fakeCheckout(t), false)
+	b.SetupGCP = "/repo/tools/setup-gcp"
+
+	source := testSetup(t)
+	source.TokenExchangeAudience = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/oidc"
+	spec := b.DeployTokenExchange(source)
+	script := spec.Argv[len(spec.Argv)-1]
+	for _, want := range []string{
+		"git clone --depth 1 " + TokenExchangeRepo,
+		"credprovider-token-exchange-config",
+		`VERSION="" ` + tokenExchangeKo + ` apply --base-import-paths -f -`,
+		"kubectl rollout status deployment/credprovider-token-exchange -n ate-system",
+		"go run ./cmd/ate-setup deploy apiserver",
+		"go run ./cmd/ate-setup deploy atenet",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("source DeployTokenExchange missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "create image-pull") {
+		t.Errorf("source install should not run create image-pull:\n%s", script)
+	}
+
+	prebuilt := prebuiltSetup(t)
+	prebuilt.TokenExchangeAudience = source.TokenExchangeAudience
+	preScript := b.DeployTokenExchange(prebuilt).Argv[2]
+	if !strings.Contains(preScript, "CREATE_ARTIFACT_REPOSITORY=true go -C '/repo/tools/setup-gcp' run . create image-pull") {
+		t.Errorf("pre-built DeployTokenExchange missing create image-pull:\n%s", preScript)
+	}
+	prebuilt.TokenExchangeCreatedRepo = true
+	if cmd := b.CleanupCommand(prebuilt, CleanupComplete); !strings.Contains(cmd, "--delete-repository") {
+		t.Errorf("CleanupCommand missing --delete-repository after TokenExchangeCreatedRepo:\n%s", cmd)
+	}
+
+	source.TokenExchangeDeployed = true
+	source.SandboxClass = state.SandboxMicroVM
+	microEnv := b.InstallMicroVMDeps(source).Env
+	wantCred := `ATE_CREDENTIAL_PROVIDER=[{"name":"k8s.io"},{"name":"sts","address":"credprovider-token-exchange.ate-system.svc:50051"}]`
+	wantSPIFFE := "ATE_EGRESS_GATEWAY_EXTRA_SPIFFE_IDS=spiffe://cluster.local/ns/other/sa/p," + TokenExchangeSPIFFEID
+	if !slices.Contains(microEnv, wantCred) || !slices.Contains(microEnv, wantSPIFFE) {
+		t.Errorf("InstallMicroVMDeps dropped token-exchange settings:\n%v", microEnv)
 	}
 }
