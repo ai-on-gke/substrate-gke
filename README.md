@@ -16,6 +16,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 - [What the installer does](#what-the-installer-does)
 - [Sandbox runtimes](#sandbox-runtimes)
 - [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router)
+- [Calling the Substrate API from inside the cluster](#calling-the-substrate-api-from-inside-the-cluster)
 - [Where the images come from](#where-the-images-come-from)
 - [How Substrate itself is obtained](#how-substrate-itself-is-obtained)
 - [Logs](#logs)
@@ -253,7 +254,9 @@ spiffe://cluster.local/ns/<namespace>/sa/<service-account>
 The trust domain `cluster.local` is fixed by Substrate's pod identity signer, so an ID
 is known before the install. Clients are the workloads that send requests to actors,
 usually your application's frontend or backend service. `kubectl ate` talks to the API
-server, not the router, and needs no entry; neither do Substrate's own components.
+server, not the router, and needs no entry; neither do Substrate's own components. A
+workload in the cluster that calls the API server instead needs its namespace labelled;
+see [Calling the Substrate API from inside the cluster](#calling-the-substrate-api-from-inside-the-cluster).
 
 The installer sets the allowlist at step 6, before it turns Substrate on. It is
 exported as `ATE_INGRESS_ALLOWED_SPIFFE_IDS` for the run, replacing any value you
@@ -300,6 +303,28 @@ The installer deploys the Envoy router only. `ate-setup` also offers agentgatewa
 through `ATE_ATENET_DATAPLANE`, but it has no support policy for GKE installs, so the
 setup check (step 1) fails if `ATE_ATENET_DATAPLANE` is set to anything other than
 `envoy`.
+
+## Calling the Substrate API from inside the cluster
+
+The router's allowlist is for requests to actors. A workload that calls the Substrate API
+itself, to create, suspend or resume actors (an SDK client, or a gateway running
+`kubectl ate --endpoint api.ate-system.svc:443`), reaches `ate-api-server` at
+`api.ate-system.svc:443` instead. Substrate's `ate-system` NetworkPolicy admits
+connections to it only from Substrate's own components and from pods in namespaces
+labelled `ate.dev/api-access=true`, and never from worker pods.
+From any other namespace, the connection times out with no error that says why.
+
+Label the client's namespace:
+
+```bash
+kubectl label namespace <namespace> ate.dev/api-access=true
+```
+
+The label only opens the network path: `ate-api-server` still authenticates and authorizes
+every request. `kubectl ate` without `--endpoint` is not affected, from your machine or from
+a pod: it reaches the API through a port forward, which the NetworkPolicy does not see.
+Upstream's [authentication guide](https://github.com/agent-substrate/substrate/blob/v1.0.0/docs/guides/authentication.md)
+covers how an in-cluster client authenticates and verifies the server's certificate.
 
 ## Where the images come from
 
