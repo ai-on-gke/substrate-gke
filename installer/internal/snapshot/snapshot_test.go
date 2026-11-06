@@ -401,7 +401,7 @@ func TestInstallMicroVMDepsTargetsTheChosenCluster(t *testing.T) {
 
 // Runs the branch the micro-VM staging step takes under real bash, with go
 // and the script stubbed, in a tree with upstream's shell installer (up to
-// v1.0.0-rc.1) and one without it (the pinned v1.0.0-rc.3, from
+// v1.0.0-rc.1) and one without it (the pinned v1.0.0, from
 // agent-substrate/substrate#2092 on).
 func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 	b := NewBuilder(fakeCheckout(t), false)
@@ -458,7 +458,7 @@ func TestInstallMicroVMDepsBranchesOnTheTree(t *testing.T) {
 	}
 }
 
-// The dry run replays the path the pinned Commit takes. v1.0.0-rc.3 is past
+// The dry run replays the path the pinned Commit takes. v1.0.0 is past
 // agent-substrate/substrate#2092, so it must announce ate-setup, with the
 // image flags of a pre-built install, print the phases the checklist keys
 // off (see steps.MicroVMDeps), and never mention the script.
@@ -1941,6 +1941,10 @@ func TestCheckUpgrade(t *testing.T) {
 		{"v0.6.1", "v0.6.5", true},
 		{"v1.0.0-rc.1", "v1.0.0-rc.2", true},
 		{"v1.0.0-rc.2", "v1.0.0", true},
+		// Every earlier pin of this installer moves to the v1.0.0 pin: a
+		// pre-release sorts before its release.
+		{"v1.0.0-rc.1", "v1.0.0", true},
+		{"v1.0.0-rc.3", "v1.0.0", true},
 		{"v1.0.0-rc.9", "v1.0.0-rc.10", true},
 		{"v1.0.3", "v1.1.0", true},
 		{"substrate-0123456789", "substrate-abcdef0123", true},
