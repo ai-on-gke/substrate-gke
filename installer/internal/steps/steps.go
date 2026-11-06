@@ -103,6 +103,24 @@ func Deploy(prebuilt bool) []ChecklistItem {
 	})
 }
 
+// TokenExchange tracks snapshot.DeployTokenExchange.
+func TokenExchange(fetchLabel string, prebuilt bool) []ChecklistItem {
+	items := []ChecklistItem{
+		{fetchLabel, containsAny(snapshot.FetchLine, snapshot.CachedLine)},
+		{"Clone credprovider-token-exchange repository", contains("Cloning into")},
+	}
+	if prebuilt {
+		items = append(items, ChecklistItem{
+			"Grant cluster nodes image pull access", contains("Granting GKE Node image pull permissions"),
+		})
+	}
+	return append(items,
+		ChecklistItem{"Build and deploy credprovider-token-exchange (ko)", contains(snapshot.TokenExchangeDeployLine)},
+		ChecklistItem{"Redeploy ate-api-server with plugin SPIFFE ID", contains("deploy_ate_apiserver")},
+		ChecklistItem{"Redeploy atenet with token-exchange provider", contains("deploy_atenet")},
+	)
+}
+
 // FilestoreCSI tracks the phases of deploying the Filestore CSI driver
 // substrate overlay, in the order snapshot.DeployFilestoreCSI runs them: the
 // fetch and the API check first, since neither changes anything, and the

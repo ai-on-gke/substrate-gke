@@ -132,7 +132,8 @@ func run(out string) (err error) {
 
 	w.press("enter")      // provision → ingress clients
 	w.press("enter")      // the demo drivers' IDs → control plane
-	w.press("enter")      // control plane → filestore CSI
+	w.press("enter")      // control plane → token exchange
+	w.press("s")          // skip token exchange → filestore CSI
 	w.press("s")          // skip filestore
 	w.press("s")          // skip autoscaling → sandbox runtime
 	w.press("enter")      // gVisor is the default choice → demo

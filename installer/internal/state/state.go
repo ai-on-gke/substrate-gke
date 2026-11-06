@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -41,6 +42,7 @@ const (
 	Provision
 	IngressClients
 	ControlPlane
+	TokenExchange
 	Sandbox
 	FilestoreCSI
 	Autoscaling
@@ -75,13 +77,13 @@ const (
 // deploys the counter demo matching the chosen runtime.
 var Order = []Step{
 	Welcome, CheckSetup, Images, Project, Cluster, Provision,
-	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Complete,
+	IngressClients, ControlPlane, TokenExchange, FilestoreCSI, Autoscaling, Sandbox, Complete,
 }
 
 // DemoOrder is the install flow of a demo run (--demo, `make run-demo`).
 var DemoOrder = []Step{
 	Welcome, CheckSetup, Images, Project, Cluster, Provision,
-	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
+	IngressClients, ControlPlane, TokenExchange, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
 }
 
 // InstallOrder is the install flow for a run, DemoOrder for a demo run and
@@ -125,6 +127,8 @@ func (s Step) Title() string {
 		return "Allow ingress clients"
 	case ControlPlane:
 		return "Turn on Substrate"
+	case TokenExchange:
+		return "Install token exchange"
 	case Sandbox:
 		return "Choose sandbox runtime"
 	case FilestoreCSI:
@@ -347,6 +351,13 @@ type Setup struct {
 	FilestoreCSIDeployed bool
 	FilestoreCSIFailed   bool
 
+	TokenExchangeAudience     string
+	TokenExchangeAtespaces    []string
+	TokenExchangeKoDockerRepo string
+	TokenExchangeDeployed     bool
+	TokenExchangeFailed       bool
+	TokenExchangeCreatedRepo  bool
+
 	// SandboxClass is the runtime this install sets up: SandboxGVisor or
 	// SandboxMicroVM. MicroVMDeployed records that the micro-VM assets were
 	// staged and the SandboxConfig applied, which the completion screen uses
@@ -438,12 +449,35 @@ func (s *Setup) CreatesArtifactRepository() bool {
 	return !s.Prebuilt() && s.KoDockerRepo == ""
 }
 
+// ProvisionedArtifactRepository reports whether bootstrap or the token-exchange
+// step provisioned the default Artifact Registry repository.
+func (s *Setup) ProvisionedArtifactRepository() bool {
+	return s.CreatesArtifactRepository() || s.TokenExchangeCreatedRepo
+}
+
 // BuildRepository resolves the image destination for this install.
 func (s *Setup) BuildRepository() string {
 	if s.KoDockerRepo != "" {
 		return s.KoDockerRepo
 	}
 	return s.Region() + "-docker.pkg.dev/" + s.ProjectID + "/" + s.RepositoryName()
+}
+
+const (
+	TokenExchangeProvider       = "sts"
+	TokenExchangeProfile        = "gcp"
+	maxTokenExchangeAudienceLen = 512
+)
+
+func (s *Setup) TokenExchangeBuildRepository() string {
+	if s.Prebuilt() && s.TokenExchangeKoDockerRepo != "" {
+		return s.TokenExchangeKoDockerRepo
+	}
+	return s.BuildRepository()
+}
+
+func (s *Setup) TokenExchangeCreatesRepository() bool {
+	return s.Prebuilt() && s.TokenExchangeKoDockerRepo == ""
 }
 
 // ImageSummary describes where this install's images come from.
@@ -545,4 +579,36 @@ func (s *Setup) RepositoryName() string {
 		return s.ArtifactRegistryRepository
 	}
 	return "ate-images"
+}
+
+var dns1123LabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func ValidateTokenExchangeAudience(aud string) error {
+	if aud == "" {
+		return fmt.Errorf("a Workload Identity Pool provider audience is required")
+	}
+	if len(aud) > maxTokenExchangeAudienceLen {
+		return fmt.Errorf("audience is %d bytes; at most %d bytes are allowed", len(aud), maxTokenExchangeAudienceLen)
+	}
+	if strings.ContainsAny(aud, "\r\n") {
+		return fmt.Errorf("audience must not contain newlines")
+	}
+	return nil
+}
+
+func ParseAtespaces(value string) ([]string, error) {
+	var out []string
+	for _, raw := range strings.Split(value, ",") {
+		a := strings.TrimSpace(raw)
+		if a == "" {
+			continue
+		}
+		if !dns1123LabelRE.MatchString(a) {
+			return nil, fmt.Errorf("atespace %q must be a lowercase DNS-1123 label (1–63 letters, digits, or '-')", a)
+		}
+		if !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }

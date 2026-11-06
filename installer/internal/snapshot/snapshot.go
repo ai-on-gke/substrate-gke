@@ -578,7 +578,7 @@ func (b *Builder) FetchLabel() string {
 // cluster-scoped and complete forms for one it did (see CleanupLeads).
 func (b *Builder) CleanupCommand(st *state.Setup, scope CleanupScope) string {
 	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, scope)
-	if st.CreatesArtifactRepository() {
+	if st.ProvisionedArtifactRepository() {
 		if st.RepositoryName() != "ate-images" {
 			command += " --repository " + ShellQuote(st.RepositoryName())
 		}
@@ -1055,6 +1055,9 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 // replaces ate-setup's install record, which the upgrade flow reads, so a
 // partial deploy must pass the same settings as the full one.
 func (b *Builder) controlPlaneEnv(st *state.Setup) []string {
+	if st.TokenExchangeDeployed {
+		return b.controlPlaneEnvWithTokenExchange(st)
+	}
 	return slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv())
 }
 

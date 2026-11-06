@@ -180,6 +180,7 @@ type controlPlaneScreen struct {
 }
 
 func newControlPlaneScreen(deps *Deps) *controlPlaneScreen {
+	deps.Setup.TokenExchangeDeployed = false
 	return &controlPlaneScreen{
 		deps: deps,
 		comp: newExecComp(deps.Runner, deps.Builder.DeployAteSystem(deps.Setup), steps.Deploy(deps.Setup.Prebuilt()), deps.LogPath),
@@ -1102,6 +1103,7 @@ func (s *completeScreen) View(w int) string {
 		{"sandbox", SandboxSummary(st)},
 		{"bucket", "gs://" + st.BucketName},
 		{"images", st.ImageSummary()},
+		{"token-ex", TokenExchangeSummary(st)},
 		{"filestore", FilestoreSummary(st)},
 		{"autoscale", map[bool]string{true: fmt.Sprintf("on (%d–%d nodes, %s)", st.AutoscaleMin, st.AutoscaleMax, st.NodePool), false: "off"}[st.AutoscaleEnabled]},
 		{"demo", DemoSummary(st)},

@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/spf13/cobra"
 	artifactregistry "google.golang.org/api/artifactregistry/v1"
 	"google.golang.org/api/googleapi"
 )
@@ -50,6 +51,62 @@ func grantNodeImagePull(ctx context.Context, cfg *Config, accounts []string) err
 		members = append(members, "serviceAccount:"+sa)
 	}
 	return grantImagePull(ctx, cfg, "the nodes", members)
+}
+
+// grantClusterNodeImagePull grants image pull access to every node pool's
+// service account on the cluster and to the node GSA.
+func grantClusterNodeImagePull(ctx context.Context, cfg *Config) error {
+	// The cluster's own node pools, so a cluster the user brought can
+	// pull too, whatever its nodes run as.
+	nodeAccounts, err := readClusterNodeServiceAccounts(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	// And the node service account, which the system pools that
+	// warnMissingSystemPools suggests for an existing cluster run as.
+	if !slices.Contains(nodeAccounts, nodeGSAEmail(cfg)) {
+		nodeAccounts = append(nodeAccounts, nodeGSAEmail(cfg))
+	}
+	return grantNodeImagePull(ctx, cfg, nodeAccounts)
+}
+
+func runCreateImagePull(ctx context.Context, cfg *Config) error {
+	if err := resolveProjectID(ctx, cfg); err != nil {
+		return err
+	}
+	if cfg.ClusterLocation == "" {
+		return errors.New("--cluster-location is required")
+	}
+	if cfg.ClusterName == "" {
+		return errors.New("--cluster-name is required")
+	}
+	if cfg.CreateArtifactRepository {
+		if err := validateRepositoryFlags(ctx, cfg); err != nil {
+			return err
+		}
+		if err := createArtifactRepository(ctx, cfg); err != nil {
+			return err
+		}
+	}
+	slog.Info("Granting GKE Node image pull permissions...")
+	return grantClusterNodeImagePull(ctx, cfg)
+}
+
+func init() {
+	imagePullCmd := &cobra.Command{
+		Use:   "image-pull",
+		Short: "Grant cluster nodes pull access to the image repository",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCreateImagePull(cmd.Context(), &cfg)
+		},
+	}
+	imagePullCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", getEnv("CLUSTER_NAME", "substrate-poc"), "Name of the GKE cluster [env: CLUSTER_NAME]")
+	imagePullCmd.Flags().StringVar(&cfg.ClusterLocation, "cluster-location", getEnv("CLUSTER_LOCATION", "us-west1-c"), "Zone or region for the cluster [env: CLUSTER_LOCATION]")
+	imagePullCmd.Flags().BoolVar(&cfg.CreateArtifactRepository, "create-repository", getEnv("CREATE_ARTIFACT_REPOSITORY", false), "Create the Artifact Registry repository before granting pull access [env: CREATE_ARTIFACT_REPOSITORY]")
+	imagePullCmd.Flags().StringVar(&cfg.ArtifactRegistryRepository, "repository-name", getEnv("ARTIFACT_REGISTRY_REPOSITORY", "ate-images"), "Name of the Artifact Registry Docker repository [env: ARTIFACT_REGISTRY_REPOSITORY]")
+	addNodeGSANameFlag(imagePullCmd)
+	createCmd.AddCommand(imagePullCmd)
 }
 
 // grantAteletImagePull lets atelet pull actor images: from the Substrate
