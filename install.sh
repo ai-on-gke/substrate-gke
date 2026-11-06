@@ -18,6 +18,30 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/ai-on-gke/substrate-gke.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 
+# update_checkout moves an existing checkout to REPO_BRANCH, which is a branch
+# (main, by default) or a release tag (v1.0.0-gke.0). The checkout is the
+# shallow, single-branch clone made below, so a plain `git fetch origin <ref>`
+# leaves the ref only in FETCH_HEAD, and the checkout that follows cannot find
+# a tag, or a branch other than the one cloned. Each case is fetched into the
+# ref it is checked out from. Branch fetches are not depth-limited, so the
+# fast-forward can see how the new commits connect to the old ones.
+update_checkout() {
+    local dir="$1"
+    if git -C "${dir}" ls-remote --exit-code --tags origin "refs/tags/${REPO_BRANCH}" >/dev/null 2>&1; then
+        git -C "${dir}" fetch --quiet --force origin "refs/tags/${REPO_BRANCH}:refs/tags/${REPO_BRANCH}"
+        git -C "${dir}" -c advice.detachedHead=false checkout --quiet --detach "refs/tags/${REPO_BRANCH}"
+    else
+        git -C "${dir}" fetch --quiet origin "+refs/heads/${REPO_BRANCH}:refs/remotes/origin/${REPO_BRANCH}"
+        if git -C "${dir}" show-ref --verify --quiet "refs/heads/${REPO_BRANCH}"; then
+            git -C "${dir}" checkout --quiet "${REPO_BRANCH}"
+            # As before, a local branch that has diverged is left as it is.
+            git -C "${dir}" merge --quiet --ff-only "origin/${REPO_BRANCH}" || true
+        else
+            git -C "${dir}" checkout --quiet -b "${REPO_BRANCH}" "origin/${REPO_BRANCH}"
+        fi
+    fi
+}
+
 main() {
     # If standard input is piped (e.g. curl ... | bash), the interactive
     # Bubble Tea TUI still needs keyboard input — but the shell's own stdin
@@ -60,14 +84,12 @@ main() {
     else
         target_dir="${SUBSTRATE_DIR:-$HOME/.substrate-gke}"
         if [ -d "${target_dir}/.git" ]; then
-            echo "==> Existing installation found at ${target_dir}. Updating..."
-            git -C "${target_dir}" fetch --quiet origin "${REPO_BRANCH}"
-            git -C "${target_dir}" checkout --quiet "${REPO_BRANCH}"
-            git -C "${target_dir}" pull --quiet --ff-only origin "${REPO_BRANCH}" || true
+            echo "==> Existing installation found at ${target_dir}. Updating to ${REPO_BRANCH}..."
+            update_checkout "${target_dir}"
         else
             echo "==> Cloning substrate-gke into ${target_dir}..."
             mkdir -p "$(dirname "${target_dir}")"
-            git clone --quiet --depth 1 --branch "${REPO_BRANCH}" "${REPO_URL}" "${target_dir}"
+            git -c advice.detachedHead=false clone --quiet --depth 1 --branch "${REPO_BRANCH}" "${REPO_URL}" "${target_dir}"
         fi
     fi
 
