@@ -124,6 +124,10 @@ To run the PostgreSQL store backend on Cloud SQL, with IAM database
 authentication and no passwords, see
 [tools/setup-gcp/cloud-sql.md](../tools/setup-gcp/cloud-sql.md).
 
+To federate actor JWTs with Google Cloud Workload Identity Federation and
+`credprovider-token-exchange`, see
+[actor-jwt-federation.md](actor-jwt-federation.md).
+
 ## Tear down
 
 To remove only the control plane and keep the cluster, run this from the
