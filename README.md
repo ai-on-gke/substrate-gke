@@ -385,7 +385,7 @@ That log is the record to keep: the wizard is an interactive terminal program, a
 
 ## Your kubeconfig
 
-The installer never writes `~/.kube/config` or changes your current context. Everything that reaches the cluster — the cluster probes, `ate-setup`, the Filestore step, and the completion screen's `[y]` verify — runs with `KUBECONFIG` pointed at a kubeconfig of the installer's own, `<user cache dir>/substrate-gke/kubeconfig/gke_<project>_<location>_<cluster>.yaml`, and the `ate-setup delete ate-system` command in the exit summary uses the same file. ate-setup records that path in its install record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster)), so leave the file where it is for as long as the cluster runs. Teardown removes it: the `ate-setup delete ate-system` commands (the wizard's `[t]` and the pasted one) after a delete that succeeds, and `tools/cleanup-gcp` (with or without `--cluster-scoped`) once the cluster is gone, so a destroyed cluster leaves no credential file behind.
+The installer never writes `~/.kube/config` or changes your current context. Everything that reaches the cluster — the cluster probes, `ate-setup`, the Filestore step, and the completion screen's `[y]` verify — runs with `KUBECONFIG` pointed at a kubeconfig of the installer's own, `<user cache dir>/substrate-gke/kubeconfig/gke_<project>_<location>_<cluster>.yaml`, and the `ate-setup delete ate-system` command in the exit summary uses the same file. ate-setup records that path in its install record (see [Upgrading an installed cluster](#upgrading-an-installed-cluster)), so leave the file where it is for as long as the cluster runs. Teardown removes it: the `ate-setup delete ate-system` commands (the wizard's `[t]` and the pasted one) after a delete that succeeds, and `tools/cleanup-gcp` (without `--keep-cluster`) once the cluster is gone, so a destroyed cluster leaves no credential file behind.
 
 To work with the cluster from a shell, run the `export KUBECONFIG=...` line the completion screen and the exit summary print, or add the cluster to your own kubeconfig with `gcloud container clusters get-credentials <cluster> --location <location> --project <project>`, which also makes it your current context.
 
@@ -413,11 +413,20 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 ```
 
 > [!TIP]
-> The exit summary from your install prints this invocation pre-filled, as two alternatives — the `--cluster-scoped` form, and the complete teardown — copy the one you want from there rather than retyping values.
+> The exit summary from your install prints this invocation pre-filled; copy it from there rather than retyping values. For a cluster the installer created, it prints two alternatives: the `--cluster-scoped` form and the complete teardown. For a cluster you brought, it prints only the `--keep-cluster` form described below.
 
 The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
 
 This deletes the dashboards and the snapshot transfer, Filestore CSI and node service accounts too (with the project roles of the last two), which every Substrate cluster in the project shares. If other Substrate clusters still use the project, add `--cluster-scoped` (or `CLUSTER_SCOPED=true` with `make teardown`): it deletes only this cluster, its buckets and the bindings on them.
+
+> [!WARNING]
+> Without `--keep-cluster`, `cleanup-gcp` **deletes the GKE cluster and every workload on it**, whether or not the installer created it.
+
+**A cluster you brought.** If you installed onto an existing cluster, the installer created no cluster or node pool, so there is nothing of the cluster's to delete. First remove the Substrate control plane with the `ate-setup delete ate-system` command from the exit summary. Then run `cleanup-gcp` with `--keep-cluster` (or `KEEP_CLUSTER=true` with `make teardown`). It deletes only the snapshot and asset buckets and the IAM bindings on them, plus the image repository with `--delete-repository`. It keeps the cluster, the dashboards and the shared service accounts:
+
+```bash
+./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket> --keep-cluster
+```
 
 Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line.
 

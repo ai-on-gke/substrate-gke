@@ -2082,8 +2082,10 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	if !strings.Contains(flat(view), "prints the GCP cleanup commands") {
 		t.Errorf("view missing the pointer to the cleanup commands:\n%s", view)
 	}
-	if notes := app.ExitNotes(); len(notes) != 2 || !strings.Contains(notes[0].Command, "cleanup-gcp") || !strings.Contains(notes[1].Command, "cleanup-gcp") {
-		t.Errorf("exit notes on the guard = %+v, want the two cleanup-gcp commands", notes)
+	// The notes start with the teardown that keeps the cluster (see
+	// TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand for the rest).
+	if notes := app.ExitNotes(); len(notes) != 4 || !strings.Contains(notes[0].Command, "ate-setup delete ate-system") || !strings.HasSuffix(notes[1].Command, " --keep-cluster") {
+		t.Errorf("exit notes on the guard = %+v, want the control plane's teardown and the keep-cluster cleanup first", notes)
 	}
 
 	// Pressing esc returns to cluster list
@@ -4056,7 +4058,7 @@ func TestImagesScreenSaysUnmanagedImagesMustMatchTheTree(t *testing.T) {
 // quoted values at their hyphens and indented the continuation, so the copied
 // command no longer ran; it is broken at flags instead, with continuations.
 func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
-	cleanup := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "", false)
+	cleanup := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "", snapshot.CleanupComplete)
 	// The completion screen's Next steps at 80 columns (39 columns of
 	// text): the head of the second command is wider than the panel, and
 	// the first carries a comment. Before, the panel re-wrapped the head and
@@ -4185,37 +4187,54 @@ func TestGuardShowsOnlyItsClusterAndLeavesTheCleanupCommand(t *testing.T) {
 	if strings.Contains(view, "tear down here") {
 		t.Errorf("the guard panel repeats the keys:\n%s", view)
 	}
+	// The guard cannot tell who created the cluster, so it leads with the
+	// teardown that keeps it: the control plane's delete, then the
+	// --keep-cluster cleanup. The two that delete the cluster follow, each
+	// saying that the cluster's workloads go with it (#150).
 	notes := app.ExitNotes()
-	if len(notes) != 2 {
-		t.Fatalf("exit notes on the guard = %+v, want the cluster-scoped and the complete cleanup", notes)
+	if len(notes) != 4 {
+		t.Fatalf("exit notes on the guard = %+v, want the control plane's teardown, then the keep-cluster, cluster-scoped and complete cleanups", notes)
 	}
-	for i, n := range notes {
+	if !strings.Contains(notes[0].Command, "ate-setup delete ate-system") || !strings.Contains(notes[0].Command, "CLUSTER_NAME='substrate-installed'") || !strings.Contains(notes[0].Command, "CLUSTER_LOCATION='us-west1-c'") {
+		t.Errorf("exit note 1 does not delete the found cluster's control plane: %s", notes[0].Command)
+	}
+	if lead := strings.Join(notes[0].Lead, " "); !strings.HasPrefix(lead, "Cluster substrate-installed already runs Substrate.") || !strings.Contains(lead, "keep the cluster") {
+		t.Errorf("exit note 1's lead = %q, want the guard's verdict and the keep-the-cluster teardown", lead)
+	}
+	cleanups := notes[1:]
+	for i, n := range cleanups {
 		for _, want := range []string{"./tools/cleanup-gcp", "--cluster 'substrate-installed'", "--location 'us-west1-c'", "--bucket <snapshot-bucket>"} {
 			if !strings.Contains(n.Command, want) {
-				t.Errorf("exit note %d's command lacks %q: %s", i+1, want, n.Command)
+				t.Errorf("cleanup note %d's command lacks %q: %s", i+1, want, n.Command)
 			}
 		}
 		if strings.Contains(n.Command, "--delete-repository") {
-			t.Errorf("exit note %d deletes an image repository this run did not provision: %s", i+1, n.Command)
+			t.Errorf("cleanup note %d deletes an image repository this run did not provision: %s", i+1, n.Command)
 		}
 	}
-	if !strings.Contains(notes[0].Command, "--cluster-scoped") || strings.Contains(notes[1].Command, "--cluster-scoped") {
-		t.Errorf("exit notes = %+v, want the cluster-scoped command first and the complete one second", notes)
-	}
-	clusterScoped, complete := snapshot.CleanupLeads(false, false)
-	if lead := strings.Join(notes[0].Lead, " "); !strings.HasPrefix(lead, "Cluster substrate-installed already runs Substrate.") || !strings.HasSuffix(lead, strings.Join(clusterScoped, " ")) {
-		t.Errorf("exit note 1's lead = %q, want the guard's verdict and then the summary's cluster-scoped option", lead)
-	}
-	if lead := strings.Join(notes[1].Lead, " "); lead != strings.Join(complete, " ") {
-		t.Errorf("exit note 2's lead = %q, want the summary's complete-teardown option", lead)
-	}
-	for i, want := range []string{"Option 1 — cluster-scoped", "Option 2 — complete teardown (only if no other Substrate cluster uses this project)"} {
-		if !strings.Contains(strings.Join(notes[i].Lead, " "), want) {
-			t.Errorf("exit note %d's lead lacks %q: %v", i+1, want, notes[i].Lead)
+	for i, flag := range []string{" --keep-cluster", " --cluster-scoped", ""} {
+		cmd := cleanups[i].Command
+		if flag != "" && !strings.HasSuffix(cmd, flag) || flag == "" && (strings.Contains(cmd, "--keep-cluster") || strings.Contains(cmd, "--cluster-scoped")) {
+			t.Errorf("cleanup note %d = %q, want the keep-cluster, cluster-scoped and complete cleanups in that order", i+1, cmd)
 		}
 	}
-	if !strings.Contains(notes[1].Trail, "--bucket") {
-		t.Errorf("exit note 2's trail = %q, want the --bucket placeholder explained", notes[1].Trail)
+	clusterScoped, complete := snapshot.CleanupLeads("substrate-installed", false, false)
+	if lead, want := strings.Join(cleanups[0].Lead, " "), strings.Join(snapshot.KeepClusterLead("substrate-installed", false), " "); lead != want {
+		t.Errorf("keep-cluster note's lead = %q, want %q", lead, want)
+	}
+	if lead := strings.Join(cleanups[1].Lead, " "); !strings.HasSuffix(lead, strings.Join(clusterScoped, " ")) {
+		t.Errorf("cluster-scoped note's lead = %q, want the summary's cluster-scoped option", lead)
+	}
+	if lead := strings.Join(cleanups[2].Lead, " "); lead != strings.Join(complete, " ") {
+		t.Errorf("complete note's lead = %q, want the summary's complete-teardown option", lead)
+	}
+	for i, n := range cleanups[1:] {
+		if lead := strings.Join(n.Lead, " "); !strings.Contains(lead, "deletes cluster substrate-installed and every workload on it") || strings.Contains(lead, "safe") {
+			t.Errorf("cluster-deleting note %d's lead = %q, want it to say the cluster and its workloads go", i+1, lead)
+		}
+	}
+	if !strings.Contains(cleanups[2].Trail, "--bucket") {
+		t.Errorf("the last note's trail = %q, want the --bucket placeholder explained", cleanups[2].Trail)
 	}
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the list
 	if notes := app.ExitNotes(); len(notes) != 0 {

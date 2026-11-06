@@ -1303,31 +1303,54 @@ func (s *clusterScreen) aboutOne() bool {
 // when the wizard exits on the guard. The panel's copy is meant to be
 // copied, but it sits in a bordered panel and comes out with the border
 // characters on every line; after the alt screen closes it can be copied
-// clean. The two commands are the exit summary's two options, in its words
-// and order: cluster-scoped first, the complete teardown as the alternative.
+// clean.
+//
+// The guard cannot tell who created the cluster: the install it found may
+// have been made on a cluster the user brought. So the teardown that keeps
+// the cluster comes first, as in the exit summary for an existing cluster:
+// the control plane's delete, then the --keep-cluster cleanup (#150). The two
+// cleanups that delete the cluster follow in the summary's words and order,
+// each saying that it deletes the cluster and every workload on it.
 func (s *clusterScreen) exitNotes() []ExitNote {
 	sel, ok := s.selected()
 	if s.mode != "installed" || !ok {
 		return nil
 	}
-	// Neither command deletes an image repository: this run did not
-	// provision one, and cannot tell what else pushes to it. Nor did this
-	// run take the Filestore step, so the complete teardown's lead does not
-	// name its service account; teardown.sh deletes the account anyway when
-	// an earlier install's Filestore step created it.
-	clusterScoped, complete := snapshot.CleanupLeads(false, false)
+	// No command deletes an image repository: this run did not provision
+	// one, and cannot tell what else pushes to it. Nor did this run take the
+	// Filestore step, so the complete teardown's lead does not name its
+	// service account; teardown.sh deletes the account anyway when an
+	// earlier install's Filestore step created it.
+	clusterScoped, complete := snapshot.CleanupLeads(sel.Name, false, false)
 	project := s.deps.Setup.ProjectID
+	// The control plane's teardown names the cluster the guard found, which
+	// is not committed to Setup (see choose), so it reads a copy carrying
+	// that cluster. A tree the user supplied is where the delete runs from,
+	// as in the exit summary.
+	found := *s.deps.Setup
+	found.ClusterName, found.Zone = sel.Name, sel.Location
+	b := s.deps.Builder
+	root := ""
+	if !b.Managed {
+		root = b.Root
+	}
 	return []ExitNote{{
-		Lead: append([]string{
+		Lead: []string{
 			fmt.Sprintf("Cluster %s already runs Substrate.", sel.Name),
 			"To upgrade it, run the installer again and choose \"Upgrade an installed cluster\".",
-			"To delete it from GCP instead, one of two ways:",
-		}, clusterScoped...),
-		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", true),
+			"To remove Substrate and keep the cluster, delete the control plane:",
+		},
+		Command: b.TeardownCommand(&found, root),
+	}, {
+		Lead:    snapshot.KeepClusterLead(sel.Name, false),
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", snapshot.CleanupKeepCluster),
+	}, {
+		Lead:    append([]string{"Or delete the cluster from GCP, one of two ways:"}, clusterScoped...),
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", snapshot.CleanupClusterScoped),
 	}, {
 		Lead:    complete,
-		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", false),
-		Trail:   "(--bucket, in either: the snapshot bucket that install used)",
+		Command: snapshot.CleanupCommand(project, sel.Name, sel.Location, "", snapshot.CleanupComplete),
+		Trail:   "(--bucket, in each cleanup-gcp command: the snapshot bucket that install used)",
 	}}
 }
 
@@ -1978,7 +2001,7 @@ func (s *clusterScreen) panelView(w int) string {
 			"",
 			theme.Title.Render("Supported paths forward:"),
 			hangingIndent("  1. ", "Upgrade it: exit, run the installer again and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
-			hangingIndent("  2. ", "Tear down and reinstall: "+theme.Key.Render("[t]")+" deletes Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and the install continues here. Exiting instead prints the GCP cleanup commands, cluster-scoped and complete.", textW),
+			hangingIndent("  2. ", "Tear down and reinstall: "+theme.Key.Render("[t]")+" deletes Substrate on this cluster now, with every actor, template, atespace, and WorkerPool (the cluster and the snapshot bucket are kept), and the install continues here. Exiting instead prints the GCP cleanup commands, including one that keeps the cluster.", textW),
 			"",
 			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order: the control plane and atelet roll to the new commit at once, while worker pools stay on the older worker image."),
 		}, "\n")))

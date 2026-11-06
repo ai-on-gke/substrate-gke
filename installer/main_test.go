@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
+	"github.com/ai-on-gke/substrate-gke/installer/internal/gcp"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/snapshot"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/ui"
@@ -221,10 +222,13 @@ func captureStdout(t *testing.T, fn func()) string {
 // transfer and node service accounts are shared by every Substrate cluster
 // in the project — and the complete teardown second, worded as the
 // alternative rather than as a second step ("to also remove…" read as one).
+// Both delete the cluster, so both are offered only for a cluster this run
+// created, and both say that the cluster's workloads go with it.
 func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	st := state.NewSetup()
 	st.ProjectID = "acme"
 	st.BucketName = "ate-snapshots-acme-us-west1-c"
+	st.NewCluster(st.ClusterName)
 
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(t.TempDir(), true)}, true)
@@ -260,26 +264,85 @@ func TestSummaryOffersAFullGCPCleanup(t *testing.T) {
 	}
 	for _, want := range []string{
 		"one of two ways:",
-		"Option 1 — cluster-scoped (safe when other clusters share the project)",
+		"Option 1 — cluster-scoped (for a project other Substrate clusters share)",
 		"image repository:",
 		"Option 2 — complete teardown (only if no other Substrate cluster uses this project)",
-		"the dashboards and the",
-		"snapshot transfer and node service accounts:",
+		"the dashboards and the snapshot transfer and node service accounts:",
+		"deletes cluster " + st.ClusterName + " and every workload on it",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary does not present the two cleanups as alternatives (%q):\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "safe") || strings.Contains(out, "--keep-cluster") {
+		t.Errorf("the summary for a new cluster calls a cluster-deleting cleanup safe, or offers --keep-cluster:\n%s", out)
 	}
 	if strings.Contains(out, "To also") {
 		t.Errorf("the complete teardown reads as a step after the cluster-scoped one:\n%s", out)
 	}
 	// The two options' wording is shared with the reinstall guard's exit
 	// note, so the summary prints the helper's lines as they are.
-	clusterScoped, complete := snapshot.CleanupLeads(true, false)
+	clusterScoped, complete := snapshot.CleanupLeads(st.ClusterName, true, false)
 	for _, line := range append(clusterScoped, complete...) {
 		if !strings.Contains(out, line) {
 			t.Errorf("summary lacks the shared line %q:\n%s", line, out)
 		}
+	}
+}
+
+// A cluster the user brought was not created by the install, so the summary
+// must not hand them a command that deletes it (#150): both
+// other cleanups take the cluster and every workload on it with them. It
+// offers the control plane's teardown and then --keep-cluster, which deletes
+// only the buckets, their bindings, and the image repository the run made.
+func TestSummaryNeverDeletesAClusterTheInstallDidNotCreate(t *testing.T) {
+	st := state.NewSetup()
+	st.ProjectID = "acme"
+	st.BucketName = "ate-snapshots-acme-my-cluster-us-west1-b"
+	st.SelectCluster(gcp.Cluster{Name: "my-cluster", Location: "us-west1-b"})
+
+	out := captureStdout(t, func() {
+		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: snapshot.NewBuilder(t.TempDir(), true)}, true)
+	})
+
+	var cleanups []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "./tools/cleanup-gcp") {
+			cleanups = append(cleanups, line)
+		}
+	}
+	if len(cleanups) != 1 || !strings.Contains(cleanups[0], " --keep-cluster") {
+		t.Fatalf("summary for an existing cluster printed %q, want the --keep-cluster cleanup alone:\n%s", cleanups, out)
+	}
+	for _, want := range []string{
+		"--cluster " + snapshot.ShellQuote("my-cluster"),
+		"--location " + snapshot.ShellQuote("us-west1-b"),
+		"--bucket " + snapshot.ShellQuote(st.BucketName),
+		"--delete-repository",
+	} {
+		if !strings.Contains(cleanups[0], want) {
+			t.Errorf("keep-cluster cleanup lacks %q: %s", want, cleanups[0])
+		}
+	}
+	if strings.Contains(cleanups[0], "--cluster-scoped") {
+		t.Errorf("keep-cluster cleanup also asks for the cluster-scoped teardown: %s", cleanups[0])
+	}
+	for _, unwanted := range []string{"Option 1", "Option 2", "every workload on it", "safe"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("summary for an existing cluster offers a cluster-deleting cleanup (%q):\n%s", unwanted, out)
+		}
+	}
+	for _, want := range append(snapshot.KeepClusterLead("my-cluster", true),
+		"Delete the Substrate control plane, keeping the cluster:",
+		"This install did not create cluster my-cluster, so no command here deletes it.") {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary lacks %q:\n%s", want, out)
+		}
+	}
+	// The control plane's teardown comes first: the keep-cluster cleanup
+	// deletes the buckets a running control plane snapshots to.
+	if strings.Index(out, "ate-setup delete ate-system") > strings.Index(out, cleanups[0]) {
+		t.Errorf("the keep-cluster cleanup comes before the control plane's teardown:\n%s", out)
 	}
 }
 
@@ -484,6 +547,9 @@ func TestSummaryReportsAFailedFilestoreStep(t *testing.T) {
 	builder := snapshot.NewBuilder(t.TempDir(), true)
 	st := state.NewSetup()
 	st.FilestoreCSIFailed = true
+	// The complete teardown, which names the account, is offered for a
+	// cluster the run created.
+	st.NewCluster(st.ClusterName)
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, &ui.Deps{Setup: st, Builder: builder}, true)
 	})

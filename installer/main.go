@@ -334,22 +334,34 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	note("Or add the cluster to your own kubeconfig, which also makes it your current context:")
 	command(snapshot.GetCredentialsCommand(st))
 
-	// Delete only the control plane (keep the cluster), or delete the
-	// install from GCP in one of two ways — cluster-scoped, or the complete
-	// teardown — which snapshot.CleanupLeads words as alternatives, the
-	// cluster-scoped one first. The cleanup invocations carry the wizard's
-	// own answers so they can be run from a fresh clone weeks later.
+	// Delete only the control plane (keep the cluster), then what the
+	// install added in GCP. The cleanup invocations carry the wizard's own
+	// answers so they can be run from a fresh clone weeks later.
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	note("Or delete the install from GCP, one of two ways:")
-	// A Filestore run that failed may still have created the account and
-	// its project role (#143), so it is named for a failed run too.
-	clusterScoped, complete := snapshot.CleanupLeads(st.CreatesArtifactRepository(), st.FilestoreCSIDeployed || st.FilestoreCSIFailed)
-	note(clusterScoped...)
-	command(b.CleanupCommand(st, true))
-	note(complete...)
-	command(b.CleanupCommand(st, false))
+	if !st.ClusterIsNew {
+		// A cluster the user brought: the install created no cluster or
+		// node pool on it, so nothing printed here may delete it. Both
+		// other cleanups do, together with every workload on it.
+		note(snapshot.KeepClusterLead(st.ClusterName, st.CreatesArtifactRepository())...)
+		command(b.CleanupCommand(st, snapshot.CleanupKeepCluster))
+		note("This install did not create cluster "+st.ClusterName+", so no command here deletes it.",
+			"The dashboards and the shared service accounts stay; see \"Tearing down\" in the README.")
+	} else {
+		// A cluster this run created: delete it from GCP in one of two
+		// ways — cluster-scoped, or the complete teardown — which
+		// snapshot.CleanupLeads words as alternatives, the cluster-scoped
+		// one first.
+		note("Or delete the install from GCP, one of two ways:")
+		// A Filestore run that failed may still have created the account
+		// and its project role (#143), so it is named for a failed run too.
+		clusterScoped, complete := snapshot.CleanupLeads(st.ClusterName, st.CreatesArtifactRepository(), st.FilestoreCSIDeployed || st.FilestoreCSIFailed)
+		note(clusterScoped...)
+		command(b.CleanupCommand(st, snapshot.CleanupClusterScoped))
+		note(complete...)
+		command(b.CleanupCommand(st, snapshot.CleanupComplete))
+	}
 
 	// The wizard's "Next steps" panel vanishes with the alt screen, so a demo
 	// install leaves a written copy behind. The panel's lead is the export

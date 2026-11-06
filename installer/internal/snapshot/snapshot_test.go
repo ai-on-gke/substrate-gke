@@ -2050,8 +2050,8 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if slices.Contains(spec.SimLines, "Step 2/10: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
 				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
 			}
-			if strings.Contains(b.CleanupCommand(st, false), "--delete-repository") != tc.create {
-				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st, false))
+			if strings.Contains(b.CleanupCommand(st, CleanupComplete), "--delete-repository") != tc.create {
+				t.Errorf("cleanup does not match repository creation: %s", b.CleanupCommand(st, CleanupComplete))
 			}
 		})
 	}
@@ -2070,14 +2070,17 @@ func TestCleanupCommandRepositoryOptions(t *testing.T) {
 			st := testSetup(t)
 			st.Zone = "europe-west4-a"
 			st.ArtifactRegistryRepository, st.KoDockerRepo, st.ImageRepo = tc.repository, tc.registry, tc.imageRepo
-			base := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, false)
-			if got, want := b.CleanupCommand(st, false), base+tc.suffix; got != want {
+			base := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName, CleanupComplete)
+			if got, want := b.CleanupCommand(st, CleanupComplete), base+tc.suffix; got != want {
 				t.Errorf("cleanup = %q, want %q", got, want)
 			}
-			// The cluster-scoped form keeps the repository options: the
-			// repository, like the cluster, is this install's own.
-			if got, want := b.CleanupCommand(st, true), base+" --cluster-scoped"+tc.suffix; got != want {
+			// The scoped forms keep the repository options: the
+			// repository is this install's own, whoever made the cluster.
+			if got, want := b.CleanupCommand(st, CleanupClusterScoped), base+" --cluster-scoped"+tc.suffix; got != want {
 				t.Errorf("cluster-scoped cleanup = %q, want %q", got, want)
+			}
+			if got, want := b.CleanupCommand(st, CleanupKeepCluster), base+" --keep-cluster"+tc.suffix; got != want {
+				t.Errorf("keep-cluster cleanup = %q, want %q", got, want)
 			}
 		})
 	}

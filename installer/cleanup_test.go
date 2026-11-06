@@ -37,6 +37,8 @@ func TestCleanupGcpDelegatesToLocalTool(t *testing.T) {
 		{name: "regional cluster", location: "us-central1", region: "us-central1", repository: "ate-images"},
 		{name: "cluster scoped", args: "--cluster-scoped", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
 		{name: "cluster scoped with repository", args: "--cluster-scoped --delete-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
+		{name: "keep cluster", args: "--keep-cluster", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
+		{name: "keep cluster with repository", args: "--keep-cluster --delete-repository", location: "us-west1-c", region: "us-west1", repository: "ate-images"},
 		{name: "declined", decline: true, location: "us-west1-c", wantErr: "aborted"},
 		{name: "deletion failure", failure: true, location: "us-west1-c", wantErr: "deletion failed"},
 	} {
@@ -101,11 +103,26 @@ echo 12345
 				return
 			}
 			flags := "--all"
-			if strings.Contains(tc.args, "--cluster-scoped") {
+			switch {
+			case strings.Contains(tc.args, "--keep-cluster"):
+				// The buckets and their bindings only: no cluster, node
+				// pool or project-wide step.
+				flags = "--delete-iam-policy-bindings --delete-snapshot-bucket"
+				if strings.Contains(string(out), "- GKE cluster") || !strings.Contains(string(out), "GKE cluster cluster in "+tc.location+" will be kept, with every workload on it.") {
+					t.Errorf("keep-cluster confirmation should keep the cluster:\n%s", out)
+				}
+				if strings.Contains(string(out), "monitoring dashboards") || !strings.Contains(string(out), "service accounts will be kept") {
+					t.Errorf("keep-cluster confirmation should keep the project-wide resources:\n%s", out)
+				}
+			case strings.Contains(tc.args, "--cluster-scoped"):
 				flags = "--cluster-scoped"
 				if strings.Contains(string(out), "monitoring dashboards") || !strings.Contains(string(out), "will be kept") {
 					t.Errorf("cluster-scoped confirmation should keep the project-wide resources:\n%s", out)
 				}
+			}
+			// Every form that deletes the cluster says what goes with it.
+			if !strings.Contains(tc.args, "--keep-cluster") && !strings.Contains(string(out), "- GKE cluster cluster in "+tc.location+", and every workload on it") {
+				t.Errorf("confirmation does not say the cluster's workloads go with it:\n%s", out)
 			}
 			if strings.Contains(tc.args, "--delete-repository") && !strings.Contains(tc.args, "--keep-repository") {
 				flags += " --delete-repository"
@@ -125,6 +142,7 @@ func TestCleanupGcpRejectsInvalidOptionsBeforeCloudCalls(t *testing.T) {
 		{"--region"}, {"--repository", "../images"}, {"--commit", "main"},
 		{"--substrate-root", "/unused"},
 		{"--unknown"},
+		{"--keep-cluster", "--cluster-scoped"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			cmd := exec.CommandContext(t.Context(), "bash", append([]string{"../tools/cleanup-gcp", "--project", "acme", "--cluster", "cluster", "--location", "us-west1-c", "--bucket", "snapshots", "--yes"}, args...)...)
