@@ -2530,7 +2530,7 @@ func TestFilestoreAPICheckComparesTheOverlayWithTheCluster(t *testing.T) {
 		FilestoreAPICheckLine + " (ate.dev/v1alpha1)",
 		"written against ate.dev/v1alpha1, but this cluster serves csidriverconfigs.ate.dev as: v1",
 		"Nothing was changed",
-		"kubernetes-sigs/gcp-filestore-csi-driver#1416",
+		"skip this step, or install a Substrate that serves ate.dev/v1alpha1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("failure output lacks %q:\n%s", want, out)
