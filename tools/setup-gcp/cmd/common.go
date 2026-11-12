@@ -69,8 +69,7 @@ type Config struct {
 	SystemInfraMachineType string
 	PostgresMachineType    string
 
-	BucketName           string
-	AteletSnapshotAccess bool
+	BucketName string
 	// TransferGSAName is the name of the snapshot transfer service account
 	// (SNAPSHOT_TRANSFER_GSA_NAME), the variable ate-setup also reads.
 	TransferGSAName            string
@@ -156,10 +155,17 @@ func (c *Config) assetBucketName() string {
 	return c.BucketName + "-assets"
 }
 
-// addAteletSnapshotAccessFlag registers --atelet-snapshot-access on cmd.
-// See bucketGrants for what it grants and which Substrate revisions need it.
-func addAteletSnapshotAccessFlag(cmd *cobra.Command) {
-	cmd.Flags().BoolVar(&cfg.AteletSnapshotAccess, "atelet-snapshot-access", getEnv("ATELET_SNAPSHOT_ACCESS", true), "Grant atelet objectAdmin and bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 need it; revisions with per-actor snapshot credentials do not. Turn off with --atelet-snapshot-access=false [env: ATELET_SNAPSHOT_ACCESS]")
+// ateletSnapshotAccessRemoved explains why ATELET_SNAPSHOT_ACCESS no longer
+// does anything. The --atelet-snapshot-access flag is gone, so a script that
+// passes it fails with "unknown flag" rather than appearing to be honoured.
+const ateletSnapshotAccessRemoved = "atelet no longer gets storage roles on the project or the snapshot bucket; Substrate v0.6.0 and later move snapshots on per-actor credentials and do not need them"
+
+// warnRemovedAteletSnapshotAccessEnv warns when ATELET_SNAPSHOT_ACCESS is set,
+// since setup-gcp now ignores it.
+func warnRemovedAteletSnapshotAccessEnv() {
+	if _, ok := os.LookupEnv("ATELET_SNAPSHOT_ACCESS"); ok {
+		slog.Warn("Ignoring ATELET_SNAPSHOT_ACCESS: " + ateletSnapshotAccessRemoved)
+	}
 }
 
 // workloadIdentityPrincipal is the IAM member for the ate-system Kubernetes

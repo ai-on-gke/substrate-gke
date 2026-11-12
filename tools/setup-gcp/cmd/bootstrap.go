@@ -30,6 +30,7 @@ var bootstrapCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		warnDeprecatedMachineTypeEnv(cmd)
+		warnRemovedAteletSnapshotAccessEnv()
 		if err := resolveProjectID(ctx, &cfg); err != nil {
 			return err
 		}
@@ -142,7 +143,6 @@ func init() {
 	bootstrapCmd.Flags().Int64Var(&cfg.BootDiskProvisionedIOPS, "boot-disk-provisioned-iops", getEnv("BOOT_DISK_PROVISIONED_IOPS", int64(0)), "Provisioned IOPS for the node pool boot disk (hyperdisk-balanced only; set together with --boot-disk-provisioned-throughput; 0 = GKE default) [env: BOOT_DISK_PROVISIONED_IOPS]")
 	bootstrapCmd.Flags().Int64Var(&cfg.BootDiskProvisionedThroughputMBps, "boot-disk-provisioned-throughput", getEnv("BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS", int64(0)), "Provisioned throughput in MiB/s for the node pool boot disk (hyperdisk-balanced only; set together with --boot-disk-provisioned-iops; 0 = GKE default) [env: BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS]")
 	bootstrapCmd.Flags().StringVar(&cfg.BucketName, "bucket-name", getEnv("BUCKET_NAME", ""), "Name of the GCS bucket for snapshots. The micro-VM asset bucket is named BUCKET_NAME-assets [env: BUCKET_NAME]")
-	addAteletSnapshotAccessFlag(bootstrapCmd)
 	addTransferGSANameFlag(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&cfg.CreateArtifactRepository, "create-repository", getEnv("CREATE_ARTIFACT_REPOSITORY", false), "Create an Artifact Registry repository for source builds [env: CREATE_ARTIFACT_REPOSITORY]")
 	bootstrapCmd.Flags().StringVar(&cfg.ArtifactRegistryRepository, "repository-name", getEnv("ARTIFACT_REGISTRY_REPOSITORY", "ate-images"), "Name of the Artifact Registry Docker repository [env: ARTIFACT_REGISTRY_REPOSITORY]")
