@@ -17,9 +17,11 @@ package cmd
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 
 	"cloud.google.com/go/iam/apiv1/iampb"
+	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/spf13/cobra"
 )
 
@@ -82,7 +84,58 @@ func grantAteletPermissions(ctx context.Context, cfg *Config) error {
 	if err := resolveProject(ctx, cfg); err != nil {
 		return err
 	}
+	warnStaleAteletProjectGrants(ctx, cfg)
 	return grantAteletImagePull(ctx, cfg)
+}
+
+// staleAteletProjectRoles are the project-level roles older setup-gcp
+// releases granted atelet. setup-gcp only adds bindings, so a re-run leaves
+// them in place.
+var staleAteletProjectRoles = []string{"roles/storage.objectAdmin", "roles/artifactregistry.reader"}
+
+// staleAteletSnapshotBucketRoles are the snapshot bucket roles older
+// setup-gcp releases granted atelet (--atelet-snapshot-access, removed).
+var staleAteletSnapshotBucketRoles = []string{"roles/storage.objectAdmin", "roles/storage.bucketViewer"}
+
+// heldRoles returns which of roles bindings grant member without a condition.
+func heldRoles(bindings []*iampb.Binding, member string, roles []string) []string {
+	var held []string
+	for _, b := range bindings {
+		if b.GetCondition() == nil && slices.Contains(roles, b.GetRole()) && slices.Contains(b.GetMembers(), member) && !slices.Contains(held, b.GetRole()) {
+			held = append(held, b.GetRole())
+		}
+	}
+	return held
+}
+
+// warnStaleAteletProjectGrants warns when atelet still holds project-level
+// roles an older setup-gcp granted, so upgraders learn they keep them. It only
+// reads the policy, and a failed read is not an error: the check is advisory.
+func warnStaleAteletProjectGrants(ctx context.Context, cfg *Config) {
+	client, err := resourcemanager.NewProjectsClient(ctx, clientOptions...)
+	if err != nil {
+		slog.Debug("Skipping the check for atelet's old project grants", slog.Any("err", err))
+		return
+	}
+	defer client.Close()
+	policy, err := client.GetIamPolicy(ctx, projectPolicyRequest("projects/"+cfg.ProjectID))
+	if err != nil {
+		slog.Debug("Skipping the check for atelet's old project grants", slog.Any("err", err))
+		return
+	}
+	if held := heldRoles(policy.GetBindings(), workloadIdentityPrincipal(cfg, "atelet"), staleAteletProjectRoles); len(held) > 0 {
+		slog.Warn("atelet still holds project-level roles an older setup-gcp granted, which Substrate v0.6.0 and later do not need. setup-gcp does not remove them; run tools/setup-gcp/teardown.sh --revoke-atelet-permissions",
+			slog.String("project", cfg.ProjectID), slog.Any("roles", held))
+	}
+}
+
+// warnStaleAteletSnapshotBucketGrants warns when the snapshot bucket policy
+// still grants atelet the roles --atelet-snapshot-access used to add.
+func warnStaleAteletSnapshotBucketGrants(cfg *Config, bindings []*iampb.Binding) {
+	if held := heldRoles(bindings, workloadIdentityPrincipal(cfg, "atelet"), staleAteletSnapshotBucketRoles); len(held) > 0 {
+		slog.Warn("atelet still holds snapshot bucket roles an older setup-gcp granted, which Substrate v0.6.0 and later do not need. setup-gcp does not remove them; see \"Moving to per-actor snapshot credentials\" in tools/setup-gcp/README.md for the commands",
+			slog.String("bucket", cfg.BucketName), slog.Any("roles", held))
+	}
 }
 
 // validateIamFlags checks every flag the command needs before any of the
@@ -110,6 +163,7 @@ var iamCmd = &cobra.Command{
 		atelet, _ := cmd.Flags().GetBool("atelet")
 		transferAccount, _ := cmd.Flags().GetBool("transfer-service-account")
 		bucketBindings, _ := cmd.Flags().GetBool("bucket-bindings")
+		warnRemovedAteletSnapshotAccessEnv()
 
 		if err := validateIamFlags(cmd.Context(), &cfg, bucketBindings); err != nil {
 			return err
@@ -150,5 +204,4 @@ func init() {
 	addTransferGSANameFlag(iamCmd)
 	iamCmd.Flags().Bool("transfer-service-account", true, "Create the snapshot transfer service account and let ate-api-server create tokens for it")
 	iamCmd.Flags().Bool("bucket-bindings", true, "Grant ate-api-server and the snapshot transfer service account access to the snapshot bucket, and atelet read access to the asset bucket")
-	addAteletSnapshotAccessFlag(iamCmd)
 }

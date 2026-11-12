@@ -17,13 +17,13 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 	"testing"
 
 	"cloud.google.com/go/iam/apiv1/iampb"
+	"github.com/spf13/cobra"
 	"google.golang.org/genproto/googleapis/type/expr"
 	"google.golang.org/protobuf/proto"
 )
@@ -136,9 +136,8 @@ func TestBucketGrantPreservesConditionalBindings(t *testing.T) {
 	f := newFakeREST(t)
 	cfg := iamConfig()
 	cfg.BucketName = "acme-snapshots"
-	cfg.AteletSnapshotAccess = true
-	atelet := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
-	existing := withCondition("roles/storage.objectAdmin", atelet)
+	apiServer := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/ate-api-server"
+	existing := withCondition("roles/storage.objectAdmin", apiServer)
 	f.policies["b/acme-snapshots"] = &iampb.Policy{Etag: []byte("etag-1"), Version: 3, Bindings: []*iampb.Binding{existing}}
 
 	if err := createIamPolicyBindings(context.Background(), cfg); err != nil {
@@ -147,8 +146,8 @@ func TestBucketGrantPreservesConditionalBindings(t *testing.T) {
 
 	resource := "b/acme-snapshots"
 	checkConditionalBindingKept(t, f.requestedVersions[resource], f.written[resource], existing)
-	if written := f.written[resource]; len(written) == 1 && !hasPlainGrant(written[0], "roles/storage.objectAdmin", atelet) {
-		t.Errorf("atelet's conditional objectAdmin binding was taken as the grant; bindings: %v", written[0].GetBindings())
+	if written := f.written[resource]; len(written) == 1 && !hasPlainGrant(written[0], "roles/storage.objectAdmin", apiServer) {
+		t.Errorf("ate-api-server's conditional objectAdmin binding was taken as the grant; bindings: %v", written[0].GetBindings())
 	}
 }
 
@@ -186,19 +185,59 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
+const ateletMember = "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
+
 // atelet gets nothing on the project: its image pull grant is on the
 // repository bootstrap created, under atelet's own name, and it is told which
 // command grants it the user's actor image repositories.
 func TestAteletGrantIsRepositoryScoped(t *testing.T) {
-	const member = "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
 	const repo = "projects/acme/locations/us-west1/repositories/ate-images"
-	for _, access := range []bool{false, true} {
-		t.Run(fmt.Sprintf("snapshot access %v", access), func(t *testing.T) {
+	f := newFakeGCP(t)
+	r := newFakeREST(t)
+	logs := captureLogs(t)
+	cfg := iamConfig()
+	cfg.CreateArtifactRepository = true
+	cfg.Region, cfg.ArtifactRegistryRepository = "us-west1", "ate-images"
+
+	if err := grantAteletPermissions(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(f.written) != 0 {
+		t.Errorf("atelet grant wrote the project policy: %v", f.written)
+	}
+	if len(r.written[repo]) != 1 || !hasPlainGrant(r.written[repo][0], imagePullRole, ateletMember) {
+		t.Errorf("atelet lacks %s on %s: %v", imagePullRole, repo, r.written[repo])
+	}
+	out := logs.String()
+	if !strings.Contains(out, "atelet") || strings.Contains(out, "the nodes") {
+		t.Errorf("atelet grant logs do not name atelet alone:\n%s", out)
+	}
+	if !strings.Contains(out, "add-iam-policy-binding <repository> --project=<project> --location=<location> --member="+ateletMember) {
+		t.Errorf("atelet grant does not print the actor image repository command:\n%s", out)
+	}
+}
+
+// Review question (#92): a re-run on a project set up by an older setup-gcp
+// silently kept atelet's project-level grants. It now warns about them, and
+// only about unconditional ones, without writing the project policy.
+func TestAteletGrantWarnsAboutOldProjectGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		bindings []*iampb.Binding
+		wantWarn bool
+	}{
+		{"fresh project", nil, false},
+		{"old storage grant", []*iampb.Binding{{Role: "roles/storage.objectAdmin", Members: []string{ateletMember}}}, true},
+		{"old image pull grant", []*iampb.Binding{{Role: "roles/artifactregistry.reader", Members: []string{ateletMember}}}, true},
+		{"conditional grant", []*iampb.Binding{withCondition("roles/storage.objectAdmin", ateletMember)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeGCP(t)
-			r := newFakeREST(t)
+			newFakeREST(t)
+			f.policy.Bindings = tc.bindings
 			logs := captureLogs(t)
 			cfg := iamConfig()
-			cfg.AteletSnapshotAccess = access
 			cfg.CreateArtifactRepository = true
 			cfg.Region, cfg.ArtifactRegistryRepository = "us-west1", "ate-images"
 
@@ -206,19 +245,71 @@ func TestAteletGrantIsRepositoryScoped(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			out := logs.String()
+			if got := strings.Contains(out, "--revoke-atelet-permissions"); got != tc.wantWarn {
+				t.Errorf("warned = %t, want %t:\n%s", got, tc.wantWarn, out)
+			}
 			if len(f.written) != 0 {
 				t.Errorf("atelet grant wrote the project policy: %v", f.written)
 			}
-			if len(r.written[repo]) != 1 || !hasPlainGrant(r.written[repo][0], imagePullRole, member) {
-				t.Errorf("atelet lacks %s on %s: %v", imagePullRole, repo, r.written[repo])
+		})
+	}
+}
+
+// The bucket grant warns when the snapshot bucket still grants atelet the
+// roles the removed --atelet-snapshot-access added, and leaves them alone.
+func TestBucketGrantWarnsAboutOldAteletSnapshotRoles(t *testing.T) {
+	f := newFakeREST(t)
+	cfg := iamConfig()
+	cfg.BucketName = "acme-snapshots"
+	old := &iampb.Binding{Role: "roles/storage.bucketViewer", Members: []string{ateletMember}}
+	f.policies["b/acme-snapshots"] = &iampb.Policy{Etag: []byte("etag-1"), Version: 3, Bindings: []*iampb.Binding{old}}
+	logs := captureLogs(t)
+
+	if err := createIamPolicyBindings(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if out := logs.String(); !strings.Contains(out, "Moving to per-actor snapshot credentials") || !strings.Contains(out, "roles/storage.bucketViewer") {
+		t.Errorf("no warning about atelet's old snapshot bucket role:\n%s", out)
+	}
+	if written := f.written["b/acme-snapshots"]; len(written) != 1 || !hasPlainGrant(written[0], "roles/storage.bucketViewer", ateletMember) {
+		t.Errorf("atelet's old snapshot bucket role was not left in place: %v", written)
+	}
+}
+
+// A set ATELET_SNAPSHOT_ACCESS is ignored with a warning, whatever its value.
+func TestRemovedAteletSnapshotAccessEnvWarns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		set      bool
+		wantWarn bool
+	}{
+		{"unset", false, false},
+		{"set", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("ATELET_SNAPSHOT_ACCESS", "true")
 			}
-			out := logs.String()
-			if !strings.Contains(out, "atelet") || strings.Contains(out, "the nodes") {
-				t.Errorf("atelet grant logs do not name atelet alone:\n%s", out)
-			}
-			if !strings.Contains(out, "add-iam-policy-binding <repository> --project=<project> --location=<location> --member="+member) {
-				t.Errorf("atelet grant does not print the actor image repository command:\n%s", out)
+			logs := captureLogs(t)
+
+			warnRemovedAteletSnapshotAccessEnv()
+
+			if got := strings.Contains(logs.String(), "Ignoring ATELET_SNAPSHOT_ACCESS"); got != tc.wantWarn {
+				t.Errorf("warned = %t, want %t (log: %q)", got, tc.wantWarn, logs.String())
 			}
 		})
+	}
+}
+
+// --atelet-snapshot-access is gone: passing it fails, rather than appearing to
+// be accepted and granting nothing.
+func TestAteletSnapshotAccessFlagIsRemoved(t *testing.T) {
+	for _, cmd := range []*cobra.Command{bootstrapCmd, iamCmd} {
+		err := cmd.ParseFlags([]string{"--atelet-snapshot-access=true"})
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("%s: ParseFlags(--atelet-snapshot-access=true) = %v, want unknown flag", cmd.Name(), err)
+		}
 	}
 }
