@@ -40,6 +40,10 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | Docker with buildx | Only to build Substrate 0.2 or later from source, which builds its envoy-dataplane image with `docker buildx`. Docker also needs credentials for your registry: `gcloud auth configure-docker <registry-host>` |
 | A GCP project with billing | Checked on the project step, which can also enable the GKE API for you |
 
+The installer and `tools/setup-gcp` support Substrate [v0.6.0](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) and later only,
+since [#92](https://github.com/ai-on-gke/substrate-gke/pull/92). Earlier releases fail every suspend and resume with `403` on the
+IAM setup-gcp creates.
+
 ```bash
 # One-line install and launch, ending with the counter demo (make run-demo):
 curl -sSL https://raw.githubusercontent.com/ai-on-gke/substrate-gke/main/install.sh | bash -s -- --demo
@@ -136,8 +140,7 @@ stages those five assets and applies a cluster-wide `SandboxConfig` named `micro
 points at them. How it stages them depends on the Substrate tree:
 
 - **Up to v1.0.0-rc.1**: upstream's `hack/install-microvm-deps.sh --install` assembles
-  the assets for amd64 and uploads them under `kata-assets/` (in the snapshot bucket up
-  to Substrate v0.5.0, in `<bucket>-assets` after).
+  the assets for amd64 and uploads them under `kata-assets/` in `<bucket>-assets`.
 - **From [agent-substrate/substrate#2092](https://github.com/agent-substrate/substrate/pull/2092)
   on** (v1.0.0-rc.2 and later, v1.0.0 being the current pin, and upstream `main`
   and `release-1.0`): `ate-setup deploy sandboxconfig` with
@@ -336,6 +339,10 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | **Default value** | Registry `ghcr.io/agent-substrate/substrate` and tag `v1.0.0`, the pin's release; the commit defaults to the pin, upstream's [`v1.0.0`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0) tag | The pin, upstream's [`v1.0.0`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
+
+Whichever you choose, the commit must be v0.6.0 or later (or a branch or
+commit that includes it): `tools/setup-gcp` grants only what v0.6.0's
+per-actor snapshot credentials need.
 
 > [!NOTE]
 > Upstream's release workflow publishes each release's images to

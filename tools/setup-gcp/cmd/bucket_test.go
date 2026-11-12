@@ -134,21 +134,6 @@ func TestBucketGrantsPerMember(t *testing.T) {
 	}
 }
 
-// With --atelet-snapshot-access, atelet keeps the snapshot bucket roles that
-// Substrate releases up to v0.5.0 need, on top of read on the asset bucket.
-func TestAteletSnapshotAccessKeepsSnapshotBucketRoles(t *testing.T) {
-	cfg := &Config{ProjectID: "proj", ProjectNumber: "123", BucketName: "snaps", AteletSnapshotAccess: true}
-	atelet := workloadIdentityPrincipal(cfg, "atelet")
-	want := []bucketGrant{
-		{bucket: "snaps-assets", member: atelet, role: "roles/storage.objectViewer"},
-		{bucket: "snaps", member: atelet, role: "roles/storage.objectAdmin"},
-		{bucket: "snaps", member: atelet, role: "roles/storage.bucketViewer"},
-	}
-	if got := grantsOf(cfg, atelet); !slices.Equal(got, want) {
-		t.Errorf("atelet bucket grants = %v, want %v", got, want)
-	}
-}
-
 // policyMembers returns the members of the unconditional bindings of role.
 func policyMembers(policy *iam.Policy3, role string) []string {
 	var members []string
