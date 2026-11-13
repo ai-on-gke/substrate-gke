@@ -246,3 +246,23 @@ func TestBootstrapLabelsTheClusterStepForTheSituation(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenExchangeChecklistTracksDeployOutput(t *testing.T) {
+	items := TokenExchange(fetchLabel, true)
+	lines := []string{
+		snapshot.CachedLine + snapshot.ShortCommit(),
+		"Cloning into 'credprovider-token-exchange'...",
+		"Step 2/2: Granting GKE Node image pull permissions...",
+		snapshot.TokenExchangeDeployLine,
+		"[step]: deploy_ate_apiserver",
+		"[step]: deploy_atenet",
+	}
+	for i := range lines {
+		if got := feed(items, lines[:i+1]); got != i {
+			t.Fatalf("after %d lines active = %d, want %d", i+1, got, i)
+		}
+	}
+	if got := len(TokenExchange(fetchLabel, false)); got != 5 {
+		t.Errorf("source TokenExchange checklist len = %d, want 5", got)
+	}
+}

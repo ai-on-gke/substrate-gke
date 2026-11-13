@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 
 	"github.com/spf13/cobra"
 )
@@ -85,18 +84,7 @@ var bootstrapCmd = &cobra.Command{
 		}
 
 		logStep("Granting GKE Node permissions...")
-		// The cluster's own node pools, so a cluster the user brought can
-		// pull too, whatever its nodes run as.
-		nodeAccounts, err := readClusterNodeServiceAccounts(ctx, &cfg)
-		if err != nil {
-			return err
-		}
-		// And the node service account, which the system pools that
-		// warnMissingSystemPools suggests for an existing cluster run as.
-		if !slices.Contains(nodeAccounts, nodeGSAEmail(&cfg)) {
-			nodeAccounts = append(nodeAccounts, nodeGSAEmail(&cfg))
-		}
-		if err := grantNodeImagePull(ctx, &cfg, nodeAccounts); err != nil {
+		if err := grantClusterNodeImagePull(ctx, &cfg); err != nil {
 			return err
 		}
 

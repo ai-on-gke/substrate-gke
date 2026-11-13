@@ -23,9 +23,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
+	"cloud.google.com/go/container/apiv1/containerpb"
 	artifactregistry "google.golang.org/api/artifactregistry/v1"
 	"google.golang.org/api/option"
 )
@@ -218,5 +220,48 @@ func TestBootstrapRepositoryOptIn(t *testing.T) {
 				t.Fatalf("bootstrap: %v\n%s\nwant %q", err, out, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunCreateImagePullGrantsClusterNodePoolsAndNodeGSA(t *testing.T) {
+	gcp := newFakeGCP(t)
+	rest := newFakeREST(t)
+	gcp.cluster = &containerpb.Cluster{
+		Name: "existing",
+		NodePools: []*containerpb.NodePool{
+			{Name: "user-pool", Config: &containerpb.NodeConfig{ServiceAccount: "custom-nodes@acme.iam.gserviceaccount.com"}},
+		},
+	}
+	t.Setenv("ATE_IMAGE_REPO", "")
+	t.Setenv("KO_DOCKER_REPO", "us-west1-docker.pkg.dev/acme/plugin-images")
+
+	c := Config{
+		ProjectID:       "acme",
+		ProjectNumber:   "42",
+		Region:          "us-west1",
+		ClusterLocation: "us-west1-c",
+		ClusterName:     "existing",
+		NodeGSAName:     "ate-gke-node",
+	}
+	if err := runCreateImagePull(t.Context(), &c); err != nil {
+		t.Fatalf("runCreateImagePull() = %v", err)
+	}
+	const repo = "projects/acme/locations/us-west1/repositories/plugin-images"
+	if len(rest.written[repo]) != 1 {
+		t.Fatalf("writes to %s = %d, want 1", repo, len(rest.written[repo]))
+	}
+	var members []string
+	for _, b := range rest.written[repo][0].Bindings {
+		if b.Role == imagePullRole {
+			members = b.Members
+		}
+	}
+	for _, want := range []string{
+		"serviceAccount:custom-nodes@acme.iam.gserviceaccount.com",
+		"serviceAccount:ate-gke-node@acme.iam.gserviceaccount.com",
+	} {
+		if !slices.Contains(members, want) {
+			t.Errorf("repository %s missing %s in %v", repo, want, members)
+		}
 	}
 }

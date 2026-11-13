@@ -77,7 +77,7 @@ func TestStepNumbering(t *testing.T) {
 			t.Errorf("%v should not be numbered", s)
 		}
 	}
-	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, IngressClients: 6, FilestoreCSI: 8, Autoscaling: 9, Sandbox: 10} {
+	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, IngressClients: 6, TokenExchange: 8, FilestoreCSI: 9, Autoscaling: 10, Sandbox: 11} {
 		if n, ok := m.Position(step); !ok || n != want {
 			t.Errorf("Position(%v) = %d/%v, want %d/true", step, n, ok, want)
 		}
@@ -304,5 +304,41 @@ func TestStepTitlesFitTheRail(t *testing.T) {
 				t.Errorf("step %d %q is %d columns, the rail fits %d", n, s.Title(), w, limit)
 			}
 		}
+	}
+}
+
+func TestTokenExchangeValidatorsAndRepositories(t *testing.T) {
+	if err := ValidateTokenExchangeAudience("//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/oidc"); err != nil {
+		t.Errorf("valid audience rejected: %v", err)
+	}
+	for _, bad := range []string{"", "aud\nnext", strings.Repeat("a", maxTokenExchangeAudienceLen+1)} {
+		if err := ValidateTokenExchangeAudience(bad); err == nil {
+			t.Errorf("ValidateTokenExchangeAudience(%q) succeeded, want error", bad)
+		}
+	}
+	got, err := ParseAtespaces(" default, agents ,default, ")
+	if err != nil || len(got) != 2 || got[0] != "default" || got[1] != "agents" {
+		t.Errorf("ParseAtespaces = %v, %v", got, err)
+	}
+	if _, err := ParseAtespaces("Bad_Name"); err == nil {
+		t.Error("ParseAtespaces accepted invalid DNS-1123 label")
+	}
+
+	s := NewSetup()
+	s.ProjectID, s.Zone = "acme", "us-west1-c"
+	s.ImageRepo, s.ImageTag = "ghcr.io/agent-substrate/substrate", "v1.0.0"
+	if !s.TokenExchangeCreatesRepository() || s.ProvisionedArtifactRepository() {
+		t.Error("prebuilt setup before token exchange should plan a repo without marking it provisioned")
+	}
+	s.TokenExchangeCreatedRepo = true
+	if !s.ProvisionedArtifactRepository() {
+		t.Error("ProvisionedArtifactRepository = false after TokenExchangeCreatedRepo")
+	}
+	s.TokenExchangeKoDockerRepo = "us-docker.pkg.dev/acme/custom"
+	if got := s.TokenExchangeBuildRepository(); got != "us-docker.pkg.dev/acme/custom" {
+		t.Errorf("TokenExchangeBuildRepository = %q", got)
+	}
+	if s.TokenExchangeCreatesRepository() {
+		t.Error("TokenExchangeCreatesRepository = true with explicit TokenExchangeKoDockerRepo")
 	}
 }

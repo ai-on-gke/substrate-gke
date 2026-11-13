@@ -206,9 +206,13 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.ControlPlane {
 		t.Fatalf("after provision: %v", app.mach.Current())
 	}
-	press("enter") // deploy finished → filestore CSI
-	if app.mach.Current() != state.FilestoreCSI {
+	press("enter") // deploy finished → token exchange
+	if app.mach.Current() != state.TokenExchange {
 		t.Fatalf("after control plane: %v", app.mach.Current())
+	}
+	press("s") // skip token exchange → filestore CSI
+	if app.mach.Current() != state.FilestoreCSI {
+		t.Fatalf("after token exchange: %v", app.mach.Current())
 	}
 	press("s") // skip filestore CSI → autoscaling
 	if app.mach.Current() != state.Autoscaling {
@@ -263,7 +267,7 @@ func TestCreateNewClusterPath(t *testing.T) {
 	if !app.deps.Setup.ClusterIsNew {
 		t.Fatal("ClusterIsNew must be true")
 	}
-	press("enter", "enter", "enter") // provision, the demo drivers' IDs, control plane
+	press("enter", "enter", "enter", "s") // provision, the demo drivers' IDs, control plane, skip token exchange
 	if app.mach.Current() != state.FilestoreCSI {
 		t.Fatalf("after control plane: %v", app.mach.Current())
 	}
@@ -3369,8 +3373,8 @@ func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	if !app.deps.Setup.ClusterKVMReady {
 		t.Fatal("ClusterKVMReady must be true for substrate-poc")
 	}
-	press("enter", "enter", "enter") // provision -> ingress clients (demo IDs) -> control plane -> filestore CSI
-	press("s", "s")                  // skip filestore CSI and autoscaling -> sandbox
+	press("enter", "enter", "enter") // provision -> ingress clients (demo IDs) -> control plane -> token exchange
+	press("s", "s", "s")             // skip token exchange, filestore CSI, and autoscaling -> sandbox
 	if app.mach.Current() != state.Sandbox {
 		t.Fatalf("expected Sandbox step right after Autoscaling, got %v", app.mach.Current())
 	}
@@ -4574,5 +4578,76 @@ func TestHandOverLinesBreakAtTheJoins(t *testing.T) {
 		if joined := strings.ReplaceAll(strings.Join(lines, "\n"), " &&\n  ", " && "); joined != line {
 			t.Errorf("width %d: the lines do not paste back to the command:\n%s", width, joined)
 		}
+	}
+}
+
+type tokenExchangeFailRunner struct{}
+
+func (tokenExchangeFailRunner) Start(_ context.Context, _ execx.Spec) <-chan execx.Event {
+	ch := make(chan execx.Event, 2)
+	ch <- execx.Event{Line: "Cloning into 'credprovider-token-exchange'..."}
+	ch <- execx.Event{Done: true, Err: errors.New("exit status 1")}
+	close(ch)
+	return ch
+}
+
+func TestTokenExchangeScreenConfigDeployAndFailureSkip(t *testing.T) {
+	deps := &Deps{
+		Setup:   state.NewSetup(),
+		Runner:  tokenExchangeFailRunner{},
+		GCP:     &gcp.Client{DryRun: true},
+		Builder: snapshot.NewBuilder(t.TempDir(), false),
+	}
+	deps.Setup.ProjectID, deps.Setup.ClusterName = "acme", "prod"
+	deps.Setup.ImageRepo, deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+
+	var scr *tokenExchangeScreen
+	drive := func(msgs ...tea.Msg) {
+		queue := append([]tea.Msg(nil), msgs...)
+		for i := 0; len(queue) > 0; i++ {
+			if i > 1000 {
+				t.Fatal("tokenExchangeScreen did not converge")
+			}
+			m := queue[0]
+			queue = queue[1:]
+			queue = append(queue, runCmd(scr.Update(m))...)
+		}
+	}
+
+	scr = newTokenExchangeScreen(deps)
+	drive(key("enter")) // [1] Install -> config
+	drive(key("enter"), key("enter"), key("enter"))
+	if scr.errText == "" {
+		t.Fatal("expected validation error for empty audience")
+	}
+
+	const aud = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/oidc"
+	drive(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(aud), Paste: true})
+	drive(key("enter")) // -> atespaces
+	drive(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("default, agents"), Paste: true})
+	drive(key("enter"), key("enter"))
+	if scr.comp == nil || scr.comp.failed == nil {
+		t.Fatal("expected failed token-exchange run")
+	}
+	if !deps.Setup.TokenExchangeCreatedRepo {
+		t.Error("expected TokenExchangeCreatedRepo on pre-built install with blank ko repo")
+	}
+	drive(key("s"))
+	if !deps.Setup.TokenExchangeFailed || deps.Setup.TokenExchangeDeployed {
+		t.Errorf("skip after failure: failed=%v deployed=%v", deps.Setup.TokenExchangeFailed, deps.Setup.TokenExchangeDeployed)
+	}
+
+	deps.Runner = execx.DryRun{Delay: time.Millisecond}
+	scr = newTokenExchangeScreen(deps)
+	drive(key("enter"), key("enter"), key("enter"), key("enter"))
+	if !scr.comp.ok() {
+		t.Fatalf("dry-run token-exchange failed: %v", scr.comp.failed)
+	}
+	drive(key("enter"))
+	if !deps.Setup.TokenExchangeDeployed || deps.Setup.TokenExchangeFailed {
+		t.Errorf("after success: deployed=%v failed=%v", deps.Setup.TokenExchangeDeployed, deps.Setup.TokenExchangeFailed)
+	}
+	if got := TokenExchangeSummary(deps.Setup); got != "installed (ate-secret://sts/token-exchange/gcp)" {
+		t.Errorf("TokenExchangeSummary = %q", got)
 	}
 }

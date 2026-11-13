@@ -184,6 +184,8 @@ func (a *App) screenFor(s state.Step) Screen {
 		return newIngressScreen(a.deps)
 	case state.ControlPlane:
 		return newControlPlaneScreen(a.deps)
+	case state.TokenExchange:
+		return newTokenExchangeScreen(a.deps)
 	case state.Sandbox:
 		return newSandboxScreen(a.deps)
 	case state.FilestoreCSI:
@@ -381,6 +383,19 @@ func (a *App) runSlash(name string) tea.Cmd {
 			if !a.deps.Setup.MicroVMActive() {
 				a.deps.Setup.SandboxClass = state.SandboxGVisor
 			}
+			return goNext
+		}
+		if s == state.TokenExchange {
+			if p, ok := a.cur.(execCompProvider); ok && p.logComp() != nil {
+				if p.logComp().running() {
+					return nil
+				}
+				if p.logComp().failed != nil {
+					a.deps.Setup.TokenExchangeDeployed, a.deps.Setup.TokenExchangeFailed = false, true
+					return goNext
+				}
+			}
+			a.deps.Setup.TokenExchangeDeployed = false
 			return goNext
 		}
 		if s == state.FilestoreCSI || s == state.Autoscaling || s == state.Demo {

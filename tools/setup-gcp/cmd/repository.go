@@ -43,7 +43,7 @@ func validateRepositoryFlags(ctx context.Context, cfg *Config) error {
 }
 
 func createArtifactRepository(ctx context.Context, cfg *Config) error {
-	svc, err := artifactregistry.NewService(ctx)
+	svc, err := artifactregistry.NewService(ctx, restClientOptions...)
 	if err != nil {
 		return fmt.Errorf("create artifact registry client: %w", err)
 	}
